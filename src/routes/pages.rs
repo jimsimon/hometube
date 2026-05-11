@@ -313,6 +313,26 @@ pub async fn child_bookmarks(current: Option<CurrentAccount>) -> AppResult<Respo
 }
 
 #[derive(Template)]
+#[template(path = "pages/child/downloads.html")]
+struct ChildDownloadsTemplate {
+    display_name: String,
+}
+
+/// `GET /child/downloads` — list of videos saved for offline viewing.
+/// The actual storage is in the browser; the page just hosts the
+/// `<hometube-offline-downloads-list>` web component which reads the
+/// local manifest.
+pub async fn child_downloads(current: Option<CurrentAccount>) -> AppResult<Response> {
+    require_child(current, |c| {
+        let tpl = ChildDownloadsTemplate {
+            display_name: c.display_name,
+        };
+        Ok(Html(tpl.render()?).into_response())
+    })
+    .await
+}
+
+#[derive(Template)]
 #[template(path = "pages/child/video-unavailable.html")]
 struct ChildVideoUnavailableTemplate {
     display_name: String,

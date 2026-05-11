@@ -6,24 +6,24 @@
  * for the detail view.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, query, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { FamilyPlaylistSummary } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { FamilyPlaylistSummary } from "../types/index.js";
 
-import './family-playlist-form.js';
-import './loading-spinner.js';
-import './error-banner.js';
-import type { FamilyPlaylistForm } from './family-playlist-form.js';
+import "./family-playlist-form.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
+import type { FamilyPlaylistForm } from "./family-playlist-form.js";
 
-@customElement('hometube-family-playlist-manager')
+@customElement("hometube-family-playlist-manager")
 export class FamilyPlaylistManager extends LitElement {
   @state() private playlists: FamilyPlaylistSummary[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('hometube-family-playlist-form')
+  @query("hometube-family-playlist-form")
   private form!: FamilyPlaylistForm;
 
   static styles = css`
@@ -96,18 +96,12 @@ export class FamilyPlaylistManager extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.refresh();
-    this.addEventListener(
-      'hometube:family-playlist-saved',
-      this.onSaved as EventListener,
-    );
+    this.addEventListener("hometube:family-playlist-saved", this.onSaved as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener(
-      'hometube:family-playlist-saved',
-      this.onSaved as EventListener,
-    );
+    this.removeEventListener("hometube:family-playlist-saved", this.onSaved as EventListener);
   }
 
   private onSaved = (): void => {
@@ -116,13 +110,11 @@ export class FamilyPlaylistManager extends LitElement {
 
   private async refresh(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.playlists =
-        await api.get<FamilyPlaylistSummary[]>('/api/family-playlists');
+      this.playlists = await api.get<FamilyPlaylistSummary[]>("/api/family-playlists");
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -133,7 +125,7 @@ export class FamilyPlaylistManager extends LitElement {
   };
 
   private async deletePlaylist(id: number): Promise<void> {
-    if (!confirm('Delete this family playlist? This cannot be undone.')) {
+    if (!confirm("Delete this family playlist? This cannot be undone.")) {
       return;
     }
     try {
@@ -150,35 +142,25 @@ export class FamilyPlaylistManager extends LitElement {
         ? html`<hometube-error-banner
             message=${this.error}
             dismissible
-            @hometube:error-dismiss=${() => (this.error = '')}
+            @hometube:error-dismiss=${() => (this.error = "")}
           ></hometube-error-banner>`
         : nothing}
       <div class="toolbar">
-        <button class="primary" type="button" @click=${this.openCreate}>
-          New playlist
-        </button>
+        <button class="primary" type="button" @click=${this.openCreate}>New playlist</button>
       </div>
 
       ${this.loading
-        ? html`<hometube-loading-spinner
-            label="Loading playlists…"
-          ></hometube-loading-spinner>`
+        ? html`<hometube-loading-spinner label="Loading playlists…"></hometube-loading-spinner>`
         : this.playlists.length === 0
-          ? html`<p class="empty">
-              No family playlists yet. Tap "New playlist" to create one.
-            </p>`
+          ? html`<p class="empty">No family playlists yet. Tap "New playlist" to create one.</p>`
           : html`
               <div class="grid">
                 ${this.playlists.map(
                   (p) => html`
                     <div class="card">
-                      <a href="/parent/playlist/${p.id}" class="title">
-                        ${p.title}
-                      </a>
+                      <a href="/parent/playlist/${p.id}" class="title"> ${p.title} </a>
                       ${p.description
-                        ? html`<div class="description">
-                            ${p.description}
-                          </div>`
+                        ? html`<div class="description">${p.description}</div>`
                         : nothing}
                       <div class="stats">${p.video_count} videos</div>
                       <div class="actions">
@@ -209,6 +191,6 @@ export class FamilyPlaylistManager extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-playlist-manager': FamilyPlaylistManager;
+    "hometube-family-playlist-manager": FamilyPlaylistManager;
   }
 }

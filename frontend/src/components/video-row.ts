@@ -6,18 +6,15 @@
  * row.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
-import type {
-  ContinueWatchingItem,
-  NewVideoItem,
-} from '../types/index.js';
+import { api } from "../services/api.js";
+import type { ContinueWatchingItem, NewVideoItem } from "../types/index.js";
 
-import './video-card.js';
+import "./video-card.js";
 
-type Feed = 'continue-watching' | 'new-videos';
+type Feed = "continue-watching" | "new-videos";
 
 interface Card {
   videoId: string;
@@ -28,17 +25,17 @@ interface Card {
   progress: number;
 }
 
-@customElement('hometube-video-row')
+@customElement("hometube-video-row")
 export class VideoRow extends LitElement {
   @property({ type: String })
-  feed: Feed = 'new-videos';
+  feed: Feed = "new-videos";
 
   @property({ type: String })
-  heading = '';
+  heading = "";
 
   @state() private cards: Card[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -76,12 +73,10 @@ export class VideoRow extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      if (this.feed === 'continue-watching') {
-        const items = await api.get<ContinueWatchingItem[]>(
-          '/api/feed/continue-watching',
-        );
+      if (this.feed === "continue-watching") {
+        const items = await api.get<ContinueWatchingItem[]>("/api/feed/continue-watching");
         this.cards = items.map((it) => ({
           videoId: it.video_id,
           title: it.video_title,
@@ -94,7 +89,7 @@ export class VideoRow extends LitElement {
               : 0,
         }));
       } else {
-        const items = await api.get<NewVideoItem[]>('/api/feed/new-videos');
+        const items = await api.get<NewVideoItem[]>("/api/feed/new-videos");
         this.cards = items.map((it) => ({
           videoId: it.video_id,
           title: it.title,
@@ -128,8 +123,8 @@ export class VideoRow extends LitElement {
                         role="listitem"
                         video-id=${c.videoId}
                         title=${c.title}
-                        thumbnail-url=${c.thumbnailUrl ?? ''}
-                        channel-title=${c.channelTitle ?? ''}
+                        thumbnail-url=${c.thumbnailUrl ?? ""}
+                        channel-title=${c.channelTitle ?? ""}
                         duration=${c.durationSeconds ?? 0}
                         progress=${c.progress}
                       ></hometube-video-card>
@@ -143,6 +138,6 @@ export class VideoRow extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-video-row': VideoRow;
+    "hometube-video-row": VideoRow;
   }
 }

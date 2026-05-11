@@ -18,15 +18,15 @@
  *   - The current selection is reflected via `aria-activedescendant`.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api, ApiError } from '../services/api.js';
+import { api, ApiError } from "../services/api.js";
 
 const DEBOUNCE_MS = 200;
 const MAX_SUGGESTIONS = 5;
 
-type SearchKind = 'all' | 'channel' | 'playlist' | 'video';
+type SearchKind = "all" | "channel" | "playlist" | "video";
 
 interface ChannelHit {
   channel_id: string;
@@ -36,7 +36,7 @@ interface ChannelHit {
 interface PlaylistHit {
   playlist_id: string;
   playlist_title: string;
-  source: 'allowlist' | 'own' | 'family';
+  source: "allowlist" | "own" | "family";
 }
 
 interface VideoHit {
@@ -57,24 +57,24 @@ interface SearchApiResponse {
 }
 
 interface Suggestion {
-  kind: 'channel' | 'playlist' | 'video';
+  kind: "channel" | "playlist" | "video";
   href: string;
   title: string;
   subtitle: string | null;
 }
 
-@customElement('hometube-search-bar')
+@customElement("hometube-search-bar")
 export class SearchBar extends LitElement {
   /** Initial query (used when rendered on the search page). */
-  @property({ type: String, attribute: 'initial-q' })
-  initialQ = '';
+  @property({ type: String, attribute: "initial-q" })
+  initialQ = "";
 
   /** Initial kind filter. */
-  @property({ type: String, attribute: 'initial-type' })
-  initialType: SearchKind = 'all';
+  @property({ type: String, attribute: "initial-type" })
+  initialType: SearchKind = "all";
 
-  @state() private query = '';
-  @state() private kind: SearchKind = 'all';
+  @state() private query = "";
+  @state() private kind: SearchKind = "all";
   @state() private suggestions: Suggestion[] = [];
   @state() private suggestionsOpen = false;
   @state() private highlighted = -1;
@@ -104,7 +104,7 @@ export class SearchBar extends LitElement {
       clip: rect(0 0 0 0);
       white-space: nowrap;
     }
-    input[type='search'] {
+    input[type="search"] {
       width: 100%;
       padding: 0.5rem 0.75rem;
       border-radius: 0.375rem;
@@ -156,7 +156,7 @@ export class SearchBar extends LitElement {
       color: inherit;
     }
     .suggestion:hover,
-    .suggestion[data-highlighted='true'] {
+    .suggestion[data-highlighted="true"] {
       background: var(--wa-color-surface-raised);
     }
     .suggestion .meta {
@@ -172,14 +172,14 @@ export class SearchBar extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.query = this.initialQ ?? '';
-    this.kind = (this.initialType ?? 'all') as SearchKind;
-    document.addEventListener('click', this.onDocumentClick);
+    this.query = this.initialQ ?? "";
+    this.kind = (this.initialType ?? "all") as SearchKind;
+    document.addEventListener("click", this.onDocumentClick);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    document.removeEventListener('click', this.onDocumentClick);
+    document.removeEventListener("click", this.onDocumentClick);
     if (this.debounceTimer != null) {
       window.clearTimeout(this.debounceTimer);
     }
@@ -234,30 +234,30 @@ export class SearchBar extends LitElement {
     const out: Suggestion[] = [];
     for (const ch of res.results.channels.slice(0, 2)) {
       out.push({
-        kind: 'channel',
+        kind: "channel",
         href: `/child/channel/${encodeURIComponent(ch.channel_id)}`,
         title: ch.channel_title,
-        subtitle: 'Channel',
+        subtitle: "Channel",
       });
     }
     for (const pl of res.results.playlists.slice(0, 2)) {
       const id = pl.playlist_id;
-      const href = id.startsWith('family:')
+      const href = id.startsWith("family:")
         ? `/child/playlists`
         : `/child/playlist/${encodeURIComponent(id)}`;
       out.push({
-        kind: 'playlist',
+        kind: "playlist",
         href,
         title: pl.playlist_title,
-        subtitle: 'Playlist',
+        subtitle: "Playlist",
       });
     }
     for (const v of res.results.videos.slice(0, MAX_SUGGESTIONS)) {
       out.push({
-        kind: 'video',
+        kind: "video",
         href: `/child/video/${encodeURIComponent(v.video_id)}`,
         title: v.title,
-        subtitle: v.channel_title ?? 'Video',
+        subtitle: v.channel_title ?? "Video",
       });
     }
     return out.slice(0, MAX_SUGGESTIONS);
@@ -280,16 +280,13 @@ export class SearchBar extends LitElement {
 
   private onKeydown = (event: KeyboardEvent): void => {
     if (!this.suggestionsOpen) return;
-    if (event.key === 'ArrowDown') {
+    if (event.key === "ArrowDown") {
       event.preventDefault();
-      this.highlighted = Math.min(
-        this.suggestions.length - 1,
-        this.highlighted + 1,
-      );
-    } else if (event.key === 'ArrowUp') {
+      this.highlighted = Math.min(this.suggestions.length - 1, this.highlighted + 1);
+    } else if (event.key === "ArrowUp") {
       event.preventDefault();
       this.highlighted = Math.max(-1, this.highlighted - 1);
-    } else if (event.key === 'Escape') {
+    } else if (event.key === "Escape") {
       this.suggestionsOpen = false;
       this.highlighted = -1;
     }
@@ -311,11 +308,9 @@ export class SearchBar extends LitElement {
             .value=${this.query}
             autocomplete="off"
             aria-autocomplete="list"
-            aria-expanded=${this.suggestionsOpen ? 'true' : 'false'}
+            aria-expanded=${this.suggestionsOpen ? "true" : "false"}
             aria-controls="search-suggestions"
-            aria-activedescendant=${this.highlighted >= 0
-              ? `suggestion-${this.highlighted}`
-              : ''}
+            aria-activedescendant=${this.highlighted >= 0 ? `suggestion-${this.highlighted}` : ""}
             @input=${this.onInput}
             @focus=${() => {
               if (this.suggestions.length > 0) this.suggestionsOpen = true;
@@ -332,8 +327,8 @@ export class SearchBar extends LitElement {
                   (s, idx) => html`<li
                     id="suggestion-${idx}"
                     role="option"
-                    aria-selected=${idx === this.highlighted ? 'true' : 'false'}
-                    data-highlighted=${idx === this.highlighted ? 'true' : 'false'}
+                    aria-selected=${idx === this.highlighted ? "true" : "false"}
+                    data-highlighted=${idx === this.highlighted ? "true" : "false"}
                     class="suggestion"
                     @mousedown=${(e: Event) => {
                       e.preventDefault();
@@ -341,9 +336,7 @@ export class SearchBar extends LitElement {
                     }}
                   >
                     <span>${s.title}</span>
-                    ${s.subtitle
-                      ? html`<span class="meta">${s.subtitle}</span>`
-                      : nothing}
+                    ${s.subtitle ? html`<span class="meta">${s.subtitle}</span>` : nothing}
                   </li>`,
                 )}
               </ul>`
@@ -371,6 +364,6 @@ export class SearchBar extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-search-bar': SearchBar;
+    "hometube-search-bar": SearchBar;
   }
 }

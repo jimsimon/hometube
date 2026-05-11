@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Downloads — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+<section class="child-downloads" aria-label="Offline downloads">
+  <header class="page-header">
+    <h1>Your downloads</h1>
+    <p class="subtitle">
+      Videos you've saved for offline play. They live on this device — clear
+      them when you're done to free up storage.
+    </p>
+  </header>
+
+  <hometube-offline-downloads-list></hometube-offline-downloads-list>
+</section>
+
+<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
+{% endblock %}
+
+{% block head %}
+<style>
+  .child-downloads {
+    padding: 1rem;
+    max-width: 56rem;
+    margin: 0 auto;
+  }
+  .page-header h1 {
+    margin: 0 0 0.25rem;
+  }
+  .subtitle {
+    margin: 0 0 1rem;
+    color: var(--wa-color-text-quiet);
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+<script type="module" src="/assets/components/offline-downloads-list.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+{% endblock %}

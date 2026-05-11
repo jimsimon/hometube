@@ -27,7 +27,7 @@ a {
   color: var(--wa-color-brand-on-quiet);
 }
 
-header[slot='header'] {
+header[slot="header"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -36,7 +36,7 @@ header[slot='header'] {
   border-bottom: 1px solid var(--wa-color-surface-border);
 }
 
-footer[slot='footer'] {
+footer[slot="footer"] {
   padding: var(--wa-space-m) var(--wa-space-l);
   border-top: 1px solid var(--wa-color-surface-border);
   text-align: center;

@@ -6,27 +6,24 @@
  * button that opens <hometube-create-playlist-dialog>.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, query, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
-import type {
-  FamilyPlaylistSummary,
-  PlaylistSummary,
-} from '../types/index.js';
+import { api } from "../services/api.js";
+import type { FamilyPlaylistSummary, PlaylistSummary } from "../types/index.js";
 
-import './playlist-card.js';
-import './create-playlist-dialog.js';
-import type { CreatePlaylistDialog } from './create-playlist-dialog.js';
+import "./playlist-card.js";
+import "./create-playlist-dialog.js";
+import type { CreatePlaylistDialog } from "./create-playlist-dialog.js";
 
-@customElement('hometube-playlist-list')
+@customElement("hometube-playlist-list")
 export class PlaylistList extends LitElement {
   @state() private playlists: PlaylistSummary[] = [];
   @state() private familyPlaylists: FamilyPlaylistSummary[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('hometube-create-playlist-dialog')
+  @query("hometube-create-playlist-dialog")
   private dialog!: CreatePlaylistDialog;
 
   static styles = css`
@@ -69,18 +66,12 @@ export class PlaylistList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    this.addEventListener(
-      'hometube:playlist-created',
-      this.onCreated as EventListener,
-    );
+    this.addEventListener("hometube:playlist-created", this.onCreated as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener(
-      'hometube:playlist-created',
-      this.onCreated as EventListener,
-    );
+    this.removeEventListener("hometube:playlist-created", this.onCreated as EventListener);
   }
 
   private onCreated = (): void => {
@@ -89,12 +80,12 @@ export class PlaylistList extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
       const [own, family] = await Promise.all([
-        api.get<PlaylistSummary[]>('/api/playlists'),
+        api.get<PlaylistSummary[]>("/api/playlists"),
         api
-          .get<FamilyPlaylistSummary[]>('/api/family-playlists')
+          .get<FamilyPlaylistSummary[]>("/api/family-playlists")
           .catch(() => [] as FamilyPlaylistSummary[]),
       ]);
       this.playlists = own;
@@ -117,9 +108,7 @@ export class PlaylistList extends LitElement {
     const library = this.playlists.filter((p) => !p.is_own);
     return html`
       <div class="toolbar">
-        <button type="button" @click=${this.openCreate}>
-          New playlist
-        </button>
+        <button type="button" @click=${this.openCreate}>New playlist</button>
       </div>
 
       ${own.length > 0
@@ -171,9 +160,7 @@ export class PlaylistList extends LitElement {
                     style="display: grid; gap: 0.25rem; padding: 0.75rem; border: 1px solid var(--wa-color-surface-border); border-radius: 0.5rem; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); text-decoration: none;"
                     href=${`/child/playlist/family:${p.id}`}
                   >
-                    <strong style="font-size: 1.05rem; font-style: normal;"
-                      >${p.title}</strong
-                    >
+                    <strong style="font-size: 1.05rem; font-style: normal;">${p.title}</strong>
                     <span style="font-size: 0.85rem;"
                       >${p.video_count} videos · shared by family</span
                     >
@@ -183,12 +170,8 @@ export class PlaylistList extends LitElement {
             </div>
           `
         : nothing}
-      ${own.length === 0 &&
-      library.length === 0 &&
-      this.familyPlaylists.length === 0
-        ? html`<p class="empty">
-            You don't have any playlists yet. Tap "New playlist" to start.
-          </p>`
+      ${own.length === 0 && library.length === 0 && this.familyPlaylists.length === 0
+        ? html`<p class="empty">You don't have any playlists yet. Tap "New playlist" to start.</p>`
         : nothing}
 
       <hometube-create-playlist-dialog></hometube-create-playlist-dialog>
@@ -198,6 +181,6 @@ export class PlaylistList extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-playlist-list': PlaylistList;
+    "hometube-playlist-list": PlaylistList;
   }
 }

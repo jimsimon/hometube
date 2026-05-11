@@ -7,10 +7,10 @@
  * inside the dialog while open.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-@customElement('hometube-wind-down-overlay')
+@customElement("hometube-wind-down-overlay")
 export class WindDownOverlay extends LitElement {
   @state() private open = false;
 
@@ -67,37 +67,26 @@ export class WindDownOverlay extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    document.addEventListener(
-      'hometube:sleep-timer-expired',
-      this.onExpired as EventListener,
-    );
+    document.addEventListener("hometube:sleep-timer-expired", this.onExpired as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    document.removeEventListener(
-      'hometube:sleep-timer-expired',
-      this.onExpired as EventListener,
-    );
+    document.removeEventListener("hometube:sleep-timer-expired", this.onExpired as EventListener);
   }
 
   private onExpired = (): void => {
     this.open = true;
     queueMicrotask(() => {
       const root = this.renderRoot as ShadowRoot;
-      (root.querySelector('a.button') as HTMLAnchorElement | null)?.focus();
+      (root.querySelector("a.button") as HTMLAnchorElement | null)?.focus();
     });
   };
 
   override render() {
     if (!this.open) return null;
     return html`
-      <div
-        class="backdrop"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="wind-down-title"
-      >
+      <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="wind-down-title">
         <div class="dialog">
           <h2 id="wind-down-title">Time to stop</h2>
           <p>Your sleep timer is up. Great work watching!</p>
@@ -112,6 +101,6 @@ export class WindDownOverlay extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-wind-down-overlay': WindDownOverlay;
+    "hometube-wind-down-overlay": WindDownOverlay;
   }
 }

@@ -14,25 +14,25 @@
  * to every child-aware component on the page.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
-import type { AccountSummary } from '../types/index.js';
+import { api } from "../services/api.js";
+import type { AccountSummary } from "../types/index.js";
 
-import './notification-bell.js';
+import "./notification-bell.js";
 
-const SELECTED_CHILD_KEY = 'hometube-selected-child';
+const SELECTED_CHILD_KEY = "hometube-selected-child";
 
-@customElement('hometube-nav-parent')
+@customElement("hometube-nav-parent")
 export class NavParent extends LitElement {
-  @property({ type: String, attribute: 'display-name' })
-  displayName = '';
+  @property({ type: String, attribute: "display-name" })
+  displayName = "";
 
   @state() private childrenList: AccountSummary[] = [];
   @state() private selectedChildId: number | null = null;
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -106,9 +106,9 @@ export class NavParent extends LitElement {
 
   private async loadChildren(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      const list = await api.get<AccountSummary[]>('/api/accounts?type=child');
+      const list = await api.get<AccountSummary[]>("/api/accounts?type=child");
       this.childrenList = list;
       const stored = Number(localStorage.getItem(SELECTED_CHILD_KEY));
       const fromStore = list.find((c) => c.id === stored);
@@ -127,7 +127,7 @@ export class NavParent extends LitElement {
   private dispatchChildChanged(childId: number): void {
     localStorage.setItem(SELECTED_CHILD_KEY, String(childId));
     this.dispatchEvent(
-      new CustomEvent('child-changed', {
+      new CustomEvent("child-changed", {
         detail: { childId },
         bubbles: true,
         composed: true,
@@ -143,9 +143,9 @@ export class NavParent extends LitElement {
 
   private onLogout = async (): Promise<void> => {
     try {
-      await api.post('/api/auth/logout');
+      await api.post("/api/auth/logout");
     } finally {
-      window.location.href = '/profiles';
+      window.location.href = "/profiles";
     }
   };
 
@@ -174,15 +174,12 @@ export class NavParent extends LitElement {
                   <select
                     id="child-select"
                     aria-label="Active child"
-                    .value=${String(this.selectedChildId ?? '')}
+                    .value=${String(this.selectedChildId ?? "")}
                     @change=${this.onChildChange}
                   >
                     ${this.childrenList.map(
                       (c) =>
-                        html`<option
-                          value=${c.id}
-                          ?selected=${c.id === this.selectedChildId}
-                        >
+                        html`<option value=${c.id} ?selected=${c.id === this.selectedChildId}>
                           ${c.display_name}
                         </option>`,
                     )}
@@ -194,13 +191,11 @@ export class NavParent extends LitElement {
         <hometube-theme-toggle></hometube-theme-toggle>
 
         <span class="who" aria-hidden="true">
-          ${this.displayName ? `Signed in as ${this.displayName}` : ''}
+          ${this.displayName ? `Signed in as ${this.displayName}` : ""}
         </span>
         <a href="/profiles">Switch profile</a>
         <button type="button" @click=${this.onLogout}>Log out</button>
-        ${this.error
-          ? html`<span class="error" role="alert">${this.error}</span>`
-          : null}
+        ${this.error ? html`<span class="error" role="alert">${this.error}</span>` : null}
       </nav>
     `;
   }
@@ -208,6 +203,6 @@ export class NavParent extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-nav-parent': NavParent;
+    "hometube-nav-parent": NavParent;
   }
 }

@@ -7,27 +7,27 @@
  * subscribe button, and video grid.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import { pickThumbnail } from '../types/index.js';
-import type { ChannelInfo, ChannelVideosPage } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import { pickThumbnail } from "../types/index.js";
+import type { ChannelInfo, ChannelVideosPage } from "../types/index.js";
 
-import './subscribe-button.js';
-import './video-card.js';
+import "./subscribe-button.js";
+import "./video-card.js";
 
-@customElement('hometube-channel-detail')
+@customElement("hometube-channel-detail")
 export class ChannelDetail extends LitElement {
-  @property({ type: String, attribute: 'channel-id' })
-  channelId = '';
+  @property({ type: String, attribute: "channel-id" })
+  channelId = "";
 
   @state() private info: ChannelInfo | null = null;
-  @state() private videos: ChannelVideosPage['items'] = [];
+  @state() private videos: ChannelVideosPage["items"] = [];
   @state() private nextPageToken: string | null = null;
-  @state() private sort: 'latest' | 'most_viewed' = 'latest';
+  @state() private sort: "latest" | "most_viewed" = "latest";
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -112,14 +112,12 @@ export class ChannelDetail extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     this.videos = [];
     this.nextPageToken = null;
     try {
       const [info, page] = await Promise.all([
-        api.get<ChannelInfo>(
-          `/api/channels/${encodeURIComponent(this.channelId)}`,
-        ),
+        api.get<ChannelInfo>(`/api/channels/${encodeURIComponent(this.channelId)}`),
         api.get<ChannelVideosPage>(
           `/api/channels/${encodeURIComponent(this.channelId)}/videos?sort=${this.sort}`,
         ),
@@ -128,8 +126,7 @@ export class ChannelDetail extends LitElement {
       this.videos = page.items;
       this.nextPageToken = page.next_page_token;
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -149,7 +146,7 @@ export class ChannelDetail extends LitElement {
   }
 
   private onSortChange = (e: Event): void => {
-    this.sort = (e.target as HTMLSelectElement).value as 'latest' | 'most_viewed';
+    this.sort = (e.target as HTMLSelectElement).value as "latest" | "most_viewed";
     void this.load();
   };
 
@@ -168,25 +165,19 @@ export class ChannelDetail extends LitElement {
           ? html`<img class="avatar" src=${this.avatar()!} alt="" />`
           : html`<div class="avatar" aria-hidden="true"></div>`}
         <div class="meta">
-          <h1>${this.info?.title ?? 'Channel'}</h1>
+          <h1>${this.info?.title ?? "Channel"}</h1>
           ${this.info?.subscriber_count != null
             ? html`<div class="stats">
                 ${this.info.subscriber_count.toLocaleString()} subscribers
               </div>`
             : null}
         </div>
-        <hometube-subscribe-button
-          channel-id=${this.channelId}
-        ></hometube-subscribe-button>
+        <hometube-subscribe-button channel-id=${this.channelId}></hometube-subscribe-button>
       </header>
 
       <div class="controls">
         <label for="channel-sort">Sort by</label>
-        <select
-          id="channel-sort"
-          .value=${this.sort}
-          @change=${this.onSortChange}
-        >
+        <select id="channel-sort" .value=${this.sort} @change=${this.onSortChange}>
           <option value="latest">Latest</option>
           <option value="most_viewed">Most viewed</option>
         </select>
@@ -204,17 +195,15 @@ export class ChannelDetail extends LitElement {
                       role="listitem"
                       video-id=${v.video_id}
                       title=${v.title}
-                      thumbnail-url=${pickThumbnail(v.thumbnails) ?? ''}
-                      channel-title=${v.channel_title ?? ''}
+                      thumbnail-url=${pickThumbnail(v.thumbnails) ?? ""}
+                      channel-title=${v.channel_title ?? ""}
                     ></hometube-video-card>
                   `,
                 )}
               </div>
               ${this.nextPageToken
                 ? html`<div class="more">
-                    <button type="button" @click=${() => void this.loadMore()}>
-                      Load more
-                    </button>
+                    <button type="button" @click=${() => void this.loadMore()}>Load more</button>
                   </div>`
                 : null}
             `}
@@ -224,6 +213,6 @@ export class ChannelDetail extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-channel-detail': ChannelDetail;
+    "hometube-channel-detail": ChannelDetail;
   }
 }

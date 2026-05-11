@@ -11,19 +11,19 @@
  * the dialog without submitting.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state, query } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
-@customElement('hometube-add-member-dialog')
+@customElement("hometube-add-member-dialog")
 export class AddMemberDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
 
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('wa-dialog') private dialog!: HTMLElement & {
+  @query("wa-dialog") private dialog!: HTMLElement & {
     show?: () => void;
     hide?: () => void;
   };
@@ -79,7 +79,7 @@ export class AddMemberDialog extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('open')) {
+    if (changed.has("open")) {
       if (this.open) {
         this.dialog?.show?.();
         // Focus trap: focus the first input on open.
@@ -93,7 +93,7 @@ export class AddMemberDialog extends LitElement {
   private close(): void {
     this.open = false;
     this.dispatchEvent(
-      new CustomEvent('add-member-cancelled', {
+      new CustomEvent("add-member-cancelled", {
         bubbles: true,
         composed: true,
       }),
@@ -102,29 +102,26 @@ export class AddMemberDialog extends LitElement {
 
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
-      if (typeof err.body === 'string' && err.body.length > 0) return err.body;
+      if (typeof err.body === "string" && err.body.length > 0) return err.body;
       return err.message;
     }
     if (err instanceof Error) return err.message;
-    return 'Unknown error';
+    return "Unknown error";
   }
 
   private async onSubmit(e: Event): Promise<void> {
     e.preventDefault();
     const form = e.target as HTMLFormElement;
     const data = new FormData(form);
-    const role = String(data.get('role') ?? 'child');
-    const display_name = String(data.get('display_name') ?? '').trim();
+    const role = String(data.get("role") ?? "child");
+    const display_name = String(data.get("display_name") ?? "").trim();
     this.busy = true;
-    this.error = '';
+    this.error = "";
     try {
-      const res = await api.post<{ login_url: string }>(
-        '/api/family/members',
-        {
-          role,
-          display_name: display_name || undefined,
-        },
-      );
+      const res = await api.post<{ login_url: string }>("/api/family/members", {
+        role,
+        display_name: display_name || undefined,
+      });
       // Send the browser through the OAuth flow. The auth callback
       // will pick the role + display name back out of the signed
       // pending-member cookie and redirect to /parent/family.
@@ -137,15 +134,11 @@ export class AddMemberDialog extends LitElement {
 
   override render() {
     return html`
-      <wa-dialog
-        label="Add a family member"
-        ?open=${this.open}
-        @wa-after-hide=${this.close}
-      >
+      <wa-dialog label="Add a family member" ?open=${this.open} @wa-after-hide=${this.close}>
         <form @submit=${this.onSubmit}>
           <p>
-            Adding a family member starts a Google sign-in for that
-            person. Have them sit down with you to pick the account.
+            Adding a family member starts a Google sign-in for that person. Have them sit down with
+            you to pick the account.
           </p>
           <label>
             Role
@@ -163,15 +156,11 @@ export class AddMemberDialog extends LitElement {
               placeholder="Optional — defaults to their Google name"
             />
           </label>
-          ${this.error
-            ? html`<p class="error" role="alert">${this.error}</p>`
-            : null}
+          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : null}
           <div class="actions">
-            <button type="button" @click=${this.close} ?disabled=${this.busy}>
-              Cancel
-            </button>
+            <button type="button" @click=${this.close} ?disabled=${this.busy}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>
-              ${this.busy ? 'Working…' : 'Continue with Google'}
+              ${this.busy ? "Working…" : "Continue with Google"}
             </button>
           </div>
         </form>
@@ -182,6 +171,6 @@ export class AddMemberDialog extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-add-member-dialog': AddMemberDialog;
+    "hometube-add-member-dialog": AddMemberDialog;
   }
 }

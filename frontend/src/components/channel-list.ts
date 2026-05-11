@@ -7,19 +7,19 @@
  * parent hasn't approved yet.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
-import type { SubscriptionRow } from '../types/index.js';
+import { api } from "../services/api.js";
+import type { SubscriptionRow } from "../types/index.js";
 
-import './channel-card.js';
+import "./channel-card.js";
 
-@customElement('hometube-channel-list')
+@customElement("hometube-channel-list")
 export class ChannelList extends LitElement {
   @state() private subs: SubscriptionRow[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -48,18 +48,12 @@ export class ChannelList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    this.addEventListener(
-      'hometube:subscription-changed',
-      this.onChanged as EventListener,
-    );
+    this.addEventListener("hometube:subscription-changed", this.onChanged as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener(
-      'hometube:subscription-changed',
-      this.onChanged as EventListener,
-    );
+    this.removeEventListener("hometube:subscription-changed", this.onChanged as EventListener);
   }
 
   private onChanged = (): void => {
@@ -68,9 +62,9 @@ export class ChannelList extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.subs = await api.get<SubscriptionRow[]>('/api/subscriptions');
+      this.subs = await api.get<SubscriptionRow[]>("/api/subscriptions");
     } catch (err) {
       this.error = (err as Error).message;
     } finally {
@@ -84,9 +78,7 @@ export class ChannelList extends LitElement {
       return html`<p class="error" role="alert">${this.error}</p>`;
     }
     if (this.subs.length === 0) {
-      return html`<p class="empty">
-        You haven't subscribed to any channels yet.
-      </p>`;
+      return html`<p class="empty">You haven't subscribed to any channels yet.</p>`;
     }
     const visible = this.subs.filter((s) => s.visible);
     const hidden = this.subs.filter((s) => !s.visible);
@@ -100,7 +92,7 @@ export class ChannelList extends LitElement {
                     role="listitem"
                     channel-id=${s.channel_id}
                     title=${s.channel_title}
-                    thumbnail-url=${s.channel_thumbnail_url ?? ''}
+                    thumbnail-url=${s.channel_thumbnail_url ?? ""}
                   ></hometube-channel-card>
                 `,
               )}
@@ -117,7 +109,7 @@ export class ChannelList extends LitElement {
                     role="listitem"
                     channel-id=${s.channel_id}
                     title=${s.channel_title}
-                    thumbnail-url=${s.channel_thumbnail_url ?? ''}
+                    thumbnail-url=${s.channel_thumbnail_url ?? ""}
                     hidden
                   ></hometube-channel-card>
                 `,
@@ -131,6 +123,6 @@ export class ChannelList extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-channel-list': ChannelList;
+    "hometube-channel-list": ChannelList;
   }
 }

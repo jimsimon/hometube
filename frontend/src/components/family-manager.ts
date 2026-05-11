@@ -11,20 +11,20 @@
  *      card and re-fetches on receipt
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
-import './family-member-card.js';
-import './add-member-dialog.js';
-import type { FamilyMember } from './family-member-card.js';
+import "./family-member-card.js";
+import "./add-member-dialog.js";
+import type { FamilyMember } from "./family-member-card.js";
 
-@customElement('hometube-family-manager')
+@customElement("hometube-family-manager")
 export class FamilyManager extends LitElement {
   @state() private members: FamilyMember[] = [];
   @state() private loading = true;
-  @state() private error = '';
+  @state() private error = "";
   @state() private addOpen = false;
 
   static styles = css`
@@ -57,23 +57,23 @@ export class FamilyManager extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.refresh();
-    this.addEventListener('family-changed', () => void this.refresh());
+    this.addEventListener("family-changed", () => void this.refresh());
   }
 
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
-      if (typeof err.body === 'string' && err.body.length > 0) return err.body;
+      if (typeof err.body === "string" && err.body.length > 0) return err.body;
       return err.message;
     }
     if (err instanceof Error) return err.message;
-    return 'Unknown error';
+    return "Unknown error";
   }
 
   private async refresh(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.members = await api.get<FamilyMember[]>('/api/family/members');
+      this.members = await api.get<FamilyMember[]>("/api/family/members");
     } catch (err) {
       this.error = this.errorMessage(err);
     } finally {
@@ -84,11 +84,7 @@ export class FamilyManager extends LitElement {
   override render() {
     return html`
       <div class="toolbar">
-        <button
-          type="button"
-          class="add"
-          @click=${() => (this.addOpen = true)}
-        >
+        <button type="button" class="add" @click=${() => (this.addOpen = true)}>
           Add family member
         </button>
       </div>
@@ -119,6 +115,6 @@ export class FamilyManager extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-manager': FamilyManager;
+    "hometube-family-manager": FamilyManager;
   }
 }

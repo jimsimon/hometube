@@ -14,35 +14,28 @@
  *     (the tile is not selectable for switching)
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
-import './pin-entry-dialog.js';
+import "./pin-entry-dialog.js";
 
 interface ProfileSummary {
   id: number;
   display_name: string;
   avatar_url: string | null;
-  account_type: 'parent' | 'child';
+  account_type: "parent" | "child";
   has_pin: boolean;
 }
 
-const TILE_BG_COLORS = [
-  '#2563eb',
-  '#7c3aed',
-  '#dc2626',
-  '#16a34a',
-  '#ca8a04',
-  '#0891b2',
-];
+const TILE_BG_COLORS = ["#2563eb", "#7c3aed", "#dc2626", "#16a34a", "#ca8a04", "#0891b2"];
 
-@customElement('hometube-profile-picker')
+@customElement("hometube-profile-picker")
 export class ProfilePicker extends LitElement {
   @state() private profiles: ProfileSummary[] = [];
   @state() private loading = true;
-  @state() private error = '';
+  @state() private error = "";
   @state() private pinTarget: ProfileSummary | null = null;
 
   static styles = css`
@@ -139,16 +132,16 @@ export class ProfilePicker extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.profiles = await api.get<ProfileSummary[]>('/api/auth/profiles');
+      this.profiles = await api.get<ProfileSummary[]>("/api/auth/profiles");
     } catch (err) {
-      if (err instanceof ApiError && typeof err.body === 'string') {
+      if (err instanceof ApiError && typeof err.body === "string") {
         this.error = err.body;
       } else if (err instanceof Error) {
         this.error = err.message;
       } else {
-        this.error = 'Could not load profiles';
+        this.error = "Could not load profiles";
       }
     } finally {
       this.loading = false;
@@ -159,16 +152,16 @@ export class ProfilePicker extends LitElement {
     const parts = name.trim().split(/\s+/);
     return parts
       .slice(0, 2)
-      .map((p) => p[0]?.toUpperCase() ?? '')
-      .join('');
+      .map((p) => p[0]?.toUpperCase() ?? "")
+      .join("");
   }
 
   private avatarBg(id: number): string {
-    return TILE_BG_COLORS[id % TILE_BG_COLORS.length] ?? '#2563eb';
+    return TILE_BG_COLORS[id % TILE_BG_COLORS.length] ?? "#2563eb";
   }
 
   private async onTileClick(profile: ProfileSummary): Promise<void> {
-    if (profile.account_type === 'parent') {
+    if (profile.account_type === "parent") {
       if (!profile.has_pin) {
         // Can't switch into a PIN-less parent. The tile is rendered
         // with `disabled`, but click handlers still fire on touch
@@ -186,45 +179,42 @@ export class ProfilePicker extends LitElement {
     }
     // Children switch immediately, no PIN required.
     try {
-      await api.post('/api/auth/switch', { account_id: profile.id });
-      window.location.href = '/';
+      await api.post("/api/auth/switch", { account_id: profile.id });
+      window.location.href = "/";
     } catch (err) {
-      if (err instanceof ApiError && typeof err.body === 'string') {
+      if (err instanceof ApiError && typeof err.body === "string") {
         this.error = err.body;
       } else if (err instanceof Error) {
         this.error = err.message;
       } else {
-        this.error = 'Switch failed';
+        this.error = "Switch failed";
       }
     }
   }
 
   override render() {
     if (this.loading) return html`<p class="empty">Loading profiles…</p>`;
-    if (this.error)
-      return html`<p class="error" role="alert">${this.error}</p>`;
+    if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
     if (this.profiles.length === 0)
       return html`<p class="empty">No profiles yet — finish setup first.</p>`;
 
     return html`
-      <div class="grid" role="list">
-        ${this.profiles.map((p) => this.renderTile(p))}
-      </div>
+      <div class="grid" role="list">${this.profiles.map((p) => this.renderTile(p))}</div>
 
       <hometube-pin-entry-dialog
         ?open=${this.pinTarget != null}
         account-id=${this.pinTarget?.id ?? 0}
-        display-name=${this.pinTarget?.display_name ?? ''}
+        display-name=${this.pinTarget?.display_name ?? ""}
         @pin-cancelled=${() => (this.pinTarget = null)}
       ></hometube-pin-entry-dialog>
     `;
   }
 
   private renderTile(p: ProfileSummary) {
-    const needsPin = p.account_type === 'parent' && !p.has_pin;
+    const needsPin = p.account_type === "parent" && !p.has_pin;
     const label = needsPin
       ? `${p.display_name} (set PIN required)`
-      : p.account_type === 'parent'
+      : p.account_type === "parent"
         ? `Switch to ${p.display_name} (parent — PIN required)`
         : `Switch to ${p.display_name}`;
     return html`
@@ -239,7 +229,7 @@ export class ProfilePicker extends LitElement {
         <div
           class="avatar"
           aria-hidden="true"
-          style=${p.avatar_url ? '' : `background: ${this.avatarBg(p.id)}`}
+          style=${p.avatar_url ? "" : `background: ${this.avatarBg(p.id)}`}
         >
           ${p.avatar_url
             ? html`<img src=${p.avatar_url} alt="" />`
@@ -248,9 +238,7 @@ export class ProfilePicker extends LitElement {
         <div class="name">${p.display_name}</div>
         <div class="badges">
           <span class=${`badge ${p.account_type}`}>${p.account_type}</span>
-          ${needsPin
-            ? html`<span class="badge warn">Set PIN required</span>`
-            : nothing}
+          ${needsPin ? html`<span class="badge warn">Set PIN required</span>` : nothing}
         </div>
       </button>
     `;
@@ -259,6 +247,6 @@ export class ProfilePicker extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-profile-picker': ProfilePicker;
+    "hometube-profile-picker": ProfilePicker;
   }
 }

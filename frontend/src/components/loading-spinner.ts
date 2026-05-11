@@ -6,14 +6,14 @@
  * `aria-live="polite"` label so screen readers announce the state.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property } from "lit/decorators.js";
 
-@customElement('hometube-loading-spinner')
+@customElement("hometube-loading-spinner")
 export class LoadingSpinner extends LitElement {
   /** Visible + announced label. Defaults to "Loading…". */
   @property({ type: String })
-  label = 'Loading…';
+  label = "Loading…";
 
   /** When `true`, renders inline (no centred block layout). */
   @property({ type: Boolean })
@@ -66,6 +66,6 @@ export class LoadingSpinner extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-loading-spinner': LoadingSpinner;
+    "hometube-loading-spinner": LoadingSpinner;
   }
 }

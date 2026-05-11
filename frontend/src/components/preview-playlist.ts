@@ -6,23 +6,23 @@
  * adding it to a child's allowlist.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import { pickThumbnail, type PlaylistPreview } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import { pickThumbnail, type PlaylistPreview } from "../types/index.js";
 
-import './loading-spinner.js';
-import './error-banner.js';
+import "./loading-spinner.js";
+import "./error-banner.js";
 
-@customElement('hometube-preview-playlist')
+@customElement("hometube-preview-playlist")
 export class PreviewPlaylist extends LitElement {
-  @property({ type: String, attribute: 'playlist-id' })
-  playlistId = '';
+  @property({ type: String, attribute: "playlist-id" })
+  playlistId = "";
 
   @state() private data: PlaylistPreview | null = null;
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -81,21 +81,20 @@ export class PreviewPlaylist extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('playlistId') && this.playlistId) {
+    if (changed.has("playlistId") && this.playlistId) {
       void this.load();
     }
   }
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
       this.data = await api.get<PlaylistPreview>(
         `/api/preview/playlist/${encodeURIComponent(this.playlistId)}`,
       );
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -106,9 +105,7 @@ export class PreviewPlaylist extends LitElement {
       return html`<hometube-loading-spinner></hometube-loading-spinner>`;
     }
     if (this.error) {
-      return html`<hometube-error-banner
-        message=${this.error}
-      ></hometube-error-banner>`;
+      return html`<hometube-error-banner message=${this.error}></hometube-error-banner>`;
     }
     if (!this.data) return nothing;
 
@@ -126,10 +123,7 @@ export class PreviewPlaylist extends LitElement {
       <div class="grid">
         ${this.data.videos.map(
           (v) => html`
-            <a
-              class="card"
-              href="/parent/preview/video/${encodeURIComponent(v.video_id)}"
-            >
+            <a class="card" href="/parent/preview/video/${encodeURIComponent(v.video_id)}">
               ${pickThumbnail(v.thumbnails)
                 ? html`<img src=${pickThumbnail(v.thumbnails)!} alt="" />`
                 : nothing}
@@ -144,6 +138,6 @@ export class PreviewPlaylist extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-preview-playlist': PreviewPlaylist;
+    "hometube-preview-playlist": PreviewPlaylist;
   }
 }

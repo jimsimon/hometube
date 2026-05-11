@@ -6,20 +6,20 @@
  * success so list components can refresh themselves.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, query, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { PlaylistSummary } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { PlaylistSummary } from "../types/index.js";
 
-@customElement('hometube-create-playlist-dialog')
+@customElement("hometube-create-playlist-dialog")
 export class CreatePlaylistDialog extends LitElement {
-  @state() private titleValue = '';
-  @state() private description = '';
+  @state() private titleValue = "";
+  @state() private description = "";
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('wa-dialog') private dialog!: HTMLElement & {
+  @query("wa-dialog") private dialog!: HTMLElement & {
     open?: boolean;
     show?: () => void;
     hide?: () => void;
@@ -64,7 +64,7 @@ export class CreatePlaylistDialog extends LitElement {
       font: inherit;
       cursor: pointer;
     }
-    button[type='submit'] {
+    button[type="submit"] {
       background: var(--wa-color-brand-fill, #2563eb);
       color: white;
     }
@@ -79,9 +79,9 @@ export class CreatePlaylistDialog extends LitElement {
 
   /** Public method: open the dialog and reset state. */
   open(): void {
-    this.titleValue = '';
-    this.description = '';
-    this.error = '';
+    this.titleValue = "";
+    this.description = "";
+    this.error = "";
     queueMicrotask(() => this.dialog?.show?.());
   }
 
@@ -92,26 +92,25 @@ export class CreatePlaylistDialog extends LitElement {
   private async onSubmit(e: Event): Promise<void> {
     e.preventDefault();
     if (!this.titleValue.trim()) {
-      this.error = 'Title is required.';
+      this.error = "Title is required.";
       return;
     }
     this.busy = true;
-    this.error = '';
+    this.error = "";
     try {
-      await api.post<PlaylistSummary>('/api/playlists', {
+      await api.post<PlaylistSummary>("/api/playlists", {
         title: this.titleValue.trim(),
         description: this.description.trim() || null,
       });
       this.dispatchEvent(
-        new CustomEvent('hometube:playlist-created', {
+        new CustomEvent("hometube:playlist-created", {
           bubbles: true,
           composed: true,
         }),
       );
       this.close();
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.busy = false;
     }
@@ -127,32 +126,23 @@ export class CreatePlaylistDialog extends LitElement {
               type="text"
               required
               .value=${this.titleValue}
-              @input=${(e: Event) =>
-                (this.titleValue = (e.target as HTMLInputElement).value)}
+              @input=${(e: Event) => (this.titleValue = (e.target as HTMLInputElement).value)}
             />
           </label>
           <label>
             Description (optional)
             <textarea
               .value=${this.description}
-              @input=${(e: Event) =>
-                (this.description = (e.target as HTMLTextAreaElement).value)}
+              @input=${(e: Event) => (this.description = (e.target as HTMLTextAreaElement).value)}
             ></textarea>
           </label>
-          ${this.error
-            ? html`<p class="error" role="alert">${this.error}</p>`
-            : null}
+          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : null}
           <div class="actions">
-            <button
-              type="button"
-              class="secondary"
-              ?disabled=${this.busy}
-              @click=${this.close}
-            >
+            <button type="button" class="secondary" ?disabled=${this.busy} @click=${this.close}>
               Cancel
             </button>
             <button type="submit" ?disabled=${this.busy}>
-              ${this.busy ? 'Creating…' : 'Create'}
+              ${this.busy ? "Creating…" : "Create"}
             </button>
           </div>
         </form>
@@ -163,6 +153,6 @@ export class CreatePlaylistDialog extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-create-playlist-dialog': CreatePlaylistDialog;
+    "hometube-create-playlist-dialog": CreatePlaylistDialog;
   }
 }

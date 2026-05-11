@@ -10,6 +10,8 @@ frontend/dist/
 frontend/coverage/
 frontend/.vite/
 frontend/.cache/
+frontend/.vitest-attachments/
+frontend/src/**/__screenshots__/
 *.tsbuildinfo
 
 # ---------- Playwright / E2E ----------

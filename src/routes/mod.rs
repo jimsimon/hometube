@@ -39,6 +39,7 @@ pub mod cache;
 pub mod channels;
 pub mod child_settings;
 pub mod cron;
+pub mod downloads;
 pub mod family;
 pub mod family_playlists;
 pub mod feed;
@@ -261,6 +262,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/videos/{video_id}", get(videos::get_metadata))
         .route("/api/videos/{video_id}/stream", get(videos::get_stream))
         .route(
+            "/api/videos/{video_id}/stream/manifest.mpd",
+            get(videos::get_stream_manifest),
+        )
+        .route(
             "/api/videos/{video_id}/captions",
             get(videos::list_captions),
         )
@@ -356,6 +361,20 @@ pub fn router(state: AppState) -> Router {
             "/api/children/me/settings",
             get(child_settings::get_my_settings),
         )
+        // Offline downloads (Phase 16). The actual storage lives in the
+        // browser; the backend tracks state + hands out a stream URL.
+        .route(
+            "/api/downloads",
+            get(downloads::list).post(downloads::create),
+        )
+        .route(
+            "/api/downloads/{video_id}",
+            put(downloads::update).delete(downloads::delete),
+        )
+        .route(
+            "/api/downloads/{video_id}/stream",
+            get(downloads::stream),
+        )
         .route_layer(axum::middleware::from_fn(require_child));
 
     // -----------------------------------------------------------------
@@ -407,6 +426,7 @@ pub fn router(state: AppState) -> Router {
         .route("/child/playlists", get(pages::child_playlists))
         .route("/child/playlist/{id}", get(pages::child_playlist))
         .route("/child/bookmarks", get(pages::child_bookmarks))
+        .route("/child/downloads", get(pages::child_downloads))
         .route("/child/search", get(pages::child_search));
 
     // -----------------------------------------------------------------

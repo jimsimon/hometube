@@ -8,28 +8,28 @@
  *   - remove a video
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, query, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, query, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { FamilyPlaylistDetail } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { FamilyPlaylistDetail } from "../types/index.js";
 
-import './family-playlist-form.js';
-import './loading-spinner.js';
-import './error-banner.js';
-import type { FamilyPlaylistForm } from './family-playlist-form.js';
+import "./family-playlist-form.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
+import type { FamilyPlaylistForm } from "./family-playlist-form.js";
 
 /** Extract a YouTube video id from a URL or pass-through the input. */
 function extractVideoId(input: string): string {
   const trimmed = input.trim();
-  if (!trimmed) return '';
+  if (!trimmed) return "";
   // youtu.be/<id> or watch?v=<id>
   try {
     const url = new URL(trimmed);
-    if (url.hostname.endsWith('youtu.be')) {
-      return url.pathname.replace(/^\//, '').split('/')[0] ?? '';
+    if (url.hostname.endsWith("youtu.be")) {
+      return url.pathname.replace(/^\//, "").split("/")[0] ?? "";
     }
-    const v = url.searchParams.get('v');
+    const v = url.searchParams.get("v");
     if (v) return v;
   } catch {
     // not a URL; fall through.
@@ -37,19 +37,19 @@ function extractVideoId(input: string): string {
   return trimmed;
 }
 
-@customElement('hometube-family-playlist-detail')
+@customElement("hometube-family-playlist-detail")
 export class FamilyPlaylistDetailEl extends LitElement {
-  @property({ type: Number, attribute: 'playlist-id' })
+  @property({ type: Number, attribute: "playlist-id" })
   playlistId = 0;
 
   @state() private detail: FamilyPlaylistDetail | null = null;
   @state() private loading = false;
-  @state() private error = '';
-  @state() private addInput = '';
+  @state() private error = "";
+  @state() private addInput = "";
   @state() private adding = false;
   @state() private dragIndex: number | null = null;
 
-  @query('hometube-family-playlist-form')
+  @query("hometube-family-playlist-form")
   private form!: FamilyPlaylistForm;
 
   static styles = css`
@@ -168,18 +168,12 @@ export class FamilyPlaylistDetailEl extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    this.addEventListener(
-      'hometube:family-playlist-saved',
-      this.onSaved as EventListener,
-    );
+    this.addEventListener("hometube:family-playlist-saved", this.onSaved as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener(
-      'hometube:family-playlist-saved',
-      this.onSaved as EventListener,
-    );
+    this.removeEventListener("hometube:family-playlist-saved", this.onSaved as EventListener);
   }
 
   private onSaved = (): void => {
@@ -188,14 +182,11 @@ export class FamilyPlaylistDetailEl extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.detail = await api.get<FamilyPlaylistDetail>(
-        `/api/family-playlists/${this.playlistId}`,
-      );
+      this.detail = await api.get<FamilyPlaylistDetail>(`/api/family-playlists/${this.playlistId}`);
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -209,16 +200,15 @@ export class FamilyPlaylistDetailEl extends LitElement {
     const videoId = extractVideoId(this.addInput);
     if (!videoId) return;
     this.adding = true;
-    this.error = '';
+    this.error = "";
     try {
       await api.post(`/api/family-playlists/${this.playlistId}/videos`, {
         video_id: videoId,
       });
-      this.addInput = '';
+      this.addInput = "";
       await this.load();
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.adding = false;
     }
@@ -238,14 +228,14 @@ export class FamilyPlaylistDetailEl extends LitElement {
   private onDragStart = (index: number) => (e: DragEvent) => {
     this.dragIndex = index;
     if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(index));
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(index));
     }
   };
 
   private onDragOver = (e: DragEvent): void => {
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
   };
 
   private onDrop = (targetIndex: number) => (e: DragEvent) => {
@@ -264,10 +254,9 @@ export class FamilyPlaylistDetailEl extends LitElement {
 
   private async pushReorder(videoIds: string[]): Promise<void> {
     try {
-      await api.put(
-        `/api/family-playlists/${this.playlistId}/videos/reorder`,
-        { video_ids: videoIds },
-      );
+      await api.put(`/api/family-playlists/${this.playlistId}/videos/reorder`, {
+        video_ids: videoIds,
+      });
     } catch (err) {
       this.error = (err as Error).message;
       void this.load();
@@ -276,13 +265,11 @@ export class FamilyPlaylistDetailEl extends LitElement {
 
   override render() {
     if (this.loading && this.detail == null) {
-      return html`<hometube-loading-spinner
-        label="Loading playlist…"
-      ></hometube-loading-spinner>`;
+      return html`<hometube-loading-spinner label="Loading playlist…"></hometube-loading-spinner>`;
     }
     if (!this.detail) {
       return html`<hometube-error-banner
-        message=${this.error || 'Playlist not found.'}
+        message=${this.error || "Playlist not found."}
       ></hometube-error-banner>`;
     }
 
@@ -291,7 +278,7 @@ export class FamilyPlaylistDetailEl extends LitElement {
         ? html`<hometube-error-banner
             message=${this.error}
             dismissible
-            @hometube:error-dismiss=${() => (this.error = '')}
+            @hometube:error-dismiss=${() => (this.error = "")}
           ></hometube-error-banner>`
         : nothing}
       <header class="detail-header">
@@ -301,16 +288,11 @@ export class FamilyPlaylistDetailEl extends LitElement {
             ? html`<p class="description">${this.detail.description}</p>`
             : nothing}
           <p class="stats">
-            ${this.detail.videos.length} videos · shared with
-            ${this.detail.child_ids.length} child${this.detail.child_ids
-              .length === 1
-              ? ''
-              : 'ren'}
+            ${this.detail.videos.length} videos · shared with ${this.detail.child_ids.length}
+            child${this.detail.child_ids.length === 1 ? "" : "ren"}
           </p>
         </div>
-        <button class="secondary" type="button" @click=${this.openEdit}>
-          Edit
-        </button>
+        <button class="secondary" type="button" @click=${this.openEdit}>Edit</button>
       </header>
 
       <div class="add-row">
@@ -320,10 +302,9 @@ export class FamilyPlaylistDetailEl extends LitElement {
           type="text"
           placeholder="Paste a YouTube URL or video ID"
           .value=${this.addInput}
-          @input=${(e: Event) =>
-            (this.addInput = (e.target as HTMLInputElement).value)}
+          @input=${(e: Event) => (this.addInput = (e.target as HTMLInputElement).value)}
           @keydown=${(e: KeyboardEvent) => {
-            if (e.key === 'Enter') void this.addVideo();
+            if (e.key === "Enter") void this.addVideo();
           }}
         />
         <button
@@ -332,7 +313,7 @@ export class FamilyPlaylistDetailEl extends LitElement {
           @click=${() => void this.addVideo()}
           ?disabled=${this.adding}
         >
-          ${this.adding ? 'Adding…' : 'Add video'}
+          ${this.adding ? "Adding…" : "Add video"}
         </button>
       </div>
 
@@ -344,7 +325,7 @@ export class FamilyPlaylistDetailEl extends LitElement {
                 (v, i) => html`
                   <li
                     draggable="true"
-                    class=${this.dragIndex === i ? 'dragging' : ''}
+                    class=${this.dragIndex === i ? "dragging" : ""}
                     @dragstart=${this.onDragStart(i)}
                     @dragover=${this.onDragOver}
                     @drop=${this.onDrop(i)}
@@ -356,9 +337,7 @@ export class FamilyPlaylistDetailEl extends LitElement {
                     <div class="row-meta">
                       <div class="row-title">${v.video_title}</div>
                       ${v.channel_title
-                        ? html`<div class="row-channel">
-                            ${v.channel_title}
-                          </div>`
+                        ? html`<div class="row-channel">${v.channel_title}</div>`
                         : nothing}
                     </div>
                     <button
@@ -382,6 +361,6 @@ export class FamilyPlaylistDetailEl extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-playlist-detail': FamilyPlaylistDetailEl;
+    "hometube-family-playlist-detail": FamilyPlaylistDetailEl;
   }
 }

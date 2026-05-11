@@ -7,26 +7,26 @@
  * keyboard-accessible.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property } from "lit/decorators.js";
 
-import './subscribe-button.js';
+import "./subscribe-button.js";
 
-@customElement('hometube-channel-card')
+@customElement("hometube-channel-card")
 export class ChannelCard extends LitElement {
-  @property({ type: String, attribute: 'channel-id' })
-  channelId = '';
+  @property({ type: String, attribute: "channel-id" })
+  channelId = "";
 
   @property({ type: String })
-  title = '';
+  title = "";
 
-  @property({ type: String, attribute: 'thumbnail-url' })
+  @property({ type: String, attribute: "thumbnail-url" })
   thumbnailUrl: string | null = null;
 
-  @property({ type: Number, attribute: 'subscriber-count' })
+  @property({ type: Number, attribute: "subscriber-count" })
   subscriberCount: number | null = null;
 
-  @property({ type: Boolean, attribute: 'show-subscribe' })
+  @property({ type: Boolean, attribute: "show-subscribe" })
   showSubscribe = false;
 
   @property({ type: Boolean })
@@ -100,26 +100,20 @@ export class ChannelCard extends LitElement {
   }
 
   override render() {
-    const href = this.channelId
-      ? `/child/channel/${encodeURIComponent(this.channelId)}`
-      : '#';
+    const href = this.channelId ? `/child/channel/${encodeURIComponent(this.channelId)}` : "#";
     return html`
       <div class="card">
         <a href=${href} aria-label=${this.title}>
           ${this.thumbnailUrl
             ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
             : html`<div class="placeholder" aria-hidden="true"></div>`}
-          <div class="title">${this.title || 'Channel'}</div>
+          <div class="title">${this.title || "Channel"}</div>
           ${this.subscriberCount != null
-            ? html`<div class="subs">
-                ${this.formatSubs(this.subscriberCount)} subscribers
-              </div>`
+            ? html`<div class="subs">${this.formatSubs(this.subscriberCount)} subscribers</div>`
             : null}
         </a>
         ${this.hidden
-          ? html`<p class="hidden-note">
-              Not on your allowlist — ask a parent to add it.
-            </p>`
+          ? html`<p class="hidden-note">Not on your allowlist — ask a parent to add it.</p>`
           : null}
         ${this.showSubscribe && this.channelId
           ? html`<hometube-subscribe-button
@@ -133,6 +127,6 @@ export class ChannelCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-channel-card': ChannelCard;
+    "hometube-channel-card": ChannelCard;
   }
 }

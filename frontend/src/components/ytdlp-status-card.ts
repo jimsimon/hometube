@@ -7,10 +7,10 @@
  * hears the result without leaving the page.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
+import { api } from "../services/api.js";
 
 interface YtdlpStatus {
   current_version: string | null;
@@ -20,12 +20,12 @@ interface YtdlpStatus {
   binary_path: string;
 }
 
-@customElement('hometube-ytdlp-status-card')
+@customElement("hometube-ytdlp-status-card")
 export class YtdlpStatusCard extends LitElement {
   @state() private status: YtdlpStatus | null = null;
-  @state() private error = '';
+  @state() private error = "";
   @state() private busy = false;
-  @state() private message = '';
+  @state() private message = "";
 
   static styles = css`
     :host {
@@ -76,9 +76,9 @@ export class YtdlpStatusCard extends LitElement {
   }
 
   private async load(): Promise<void> {
-    this.error = '';
+    this.error = "";
     try {
-      this.status = await api.get<YtdlpStatus>('/api/system/ytdlp');
+      this.status = await api.get<YtdlpStatus>("/api/system/ytdlp");
     } catch (err) {
       this.error = `Could not load yt-dlp status: ${(err as Error).message}`;
     }
@@ -86,10 +86,10 @@ export class YtdlpStatusCard extends LitElement {
 
   private async onUpdate(): Promise<void> {
     this.busy = true;
-    this.message = 'Update queued…';
+    this.message = "Update queued…";
     try {
-      await api.post('/api/system/ytdlp/update');
-      this.message = 'Update started. Refresh in a few seconds.';
+      await api.post("/api/system/ytdlp/update");
+      this.message = "Update started. Refresh in a few seconds.";
       // Reload the status after a short delay to pick up the new
       // version + last_updated_at.
       setTimeout(() => void this.load(), 4000);
@@ -101,7 +101,7 @@ export class YtdlpStatusCard extends LitElement {
   }
 
   private fmtDate(ts: number | null): string {
-    if (!ts) return '—';
+    if (!ts) return "—";
     return new Date(ts * 1000).toLocaleString();
   }
 
@@ -114,12 +114,9 @@ export class YtdlpStatusCard extends LitElement {
       <article>
         <dl>
           <dt>Installed version</dt>
-          <dd>${this.status.current_version ?? 'Not yet detected'}</dd>
+          <dd>${this.status.current_version ?? "Not yet detected"}</dd>
           <dt>Latest published</dt>
-          <dd>
-            ${this.status.latest_known_version ??
-            'Refreshing in the background…'}
-          </dd>
+          <dd>${this.status.latest_known_version ?? "Refreshing in the background…"}</dd>
           <dt>Last checked</dt>
           <dd>${this.fmtDate(this.status.last_checked_at)}</dd>
           <dt>Last updated</dt>
@@ -127,19 +124,11 @@ export class YtdlpStatusCard extends LitElement {
           <dt>Binary path</dt>
           <dd><code>${this.status.binary_path}</code></dd>
         </dl>
-        <button
-          type="button"
-          ?disabled=${this.busy}
-          @click=${this.onUpdate}
-        >
-          ${this.busy ? 'Updating…' : 'Update now'}
+        <button type="button" ?disabled=${this.busy} @click=${this.onUpdate}>
+          ${this.busy ? "Updating…" : "Update now"}
         </button>
-        <div class="live" role="status" aria-live="polite">
-          ${this.message}
-        </div>
-        ${this.message
-          ? html`<p>${this.message}</p>`
-          : nothing}
+        <div class="live" role="status" aria-live="polite">${this.message}</div>
+        ${this.message ? html`<p>${this.message}</p>` : nothing}
       </article>
     `;
   }
@@ -147,6 +136,6 @@ export class YtdlpStatusCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-ytdlp-status-card': YtdlpStatusCard;
+    "hometube-ytdlp-status-card": YtdlpStatusCard;
   }
 }

@@ -15,17 +15,17 @@
  * `<hometube-family-manager>` re-fetches the list.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state, query } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
 export interface FamilyMember {
   id: number;
   email: string;
   display_name: string;
   avatar_url: string | null;
-  account_type: 'parent' | 'child';
+  account_type: "parent" | "child";
   has_pin: boolean;
   created_at: number;
   token_expires_at: number;
@@ -33,16 +33,16 @@ export interface FamilyMember {
   last_login_at: number | null;
 }
 
-@customElement('hometube-family-member-card')
+@customElement("hometube-family-member-card")
 export class FamilyMemberCard extends LitElement {
   @property({ attribute: false }) member: FamilyMember | null = null;
 
   @state() private editing = false;
   @state() private removing = false;
   @state() private busy = false;
-  @state() private status = '';
+  @state() private status = "";
 
-  @query('wa-dialog.confirm-remove') private removeDialog?: HTMLElement & {
+  @query("wa-dialog.confirm-remove") private removeDialog?: HTMLElement & {
     show?: () => void;
     hide?: () => void;
   };
@@ -178,7 +178,7 @@ export class FamilyMemberCard extends LitElement {
   `;
 
   private fmtDate(ts: number | null): string {
-    if (!ts) return 'never';
+    if (!ts) return "never";
     return new Date(ts * 1000).toLocaleString();
   }
 
@@ -186,23 +186,21 @@ export class FamilyMemberCard extends LitElement {
     const parts = name.trim().split(/\s+/);
     return parts
       .slice(0, 2)
-      .map((p) => p[0]?.toUpperCase() ?? '')
-      .join('');
+      .map((p) => p[0]?.toUpperCase() ?? "")
+      .join("");
   }
 
   private dispatchChanged(): void {
-    this.dispatchEvent(
-      new CustomEvent('family-changed', { bubbles: true, composed: true }),
-    );
+    this.dispatchEvent(new CustomEvent("family-changed", { bubbles: true, composed: true }));
   }
 
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
-      if (typeof err.body === 'string' && err.body.length > 0) return err.body;
+      if (typeof err.body === "string" && err.body.length > 0) return err.body;
       return err.message;
     }
     if (err instanceof Error) return err.message;
-    return 'Unknown error';
+    return "Unknown error";
   }
 
   private async onSaveEdit(e: Event): Promise<void> {
@@ -210,8 +208,8 @@ export class FamilyMemberCard extends LitElement {
     if (!this.member) return;
     const form = e.target as HTMLFormElement;
     const data = new FormData(form);
-    const display_name = String(data.get('display_name') ?? '').trim();
-    const role = String(data.get('role') ?? '');
+    const display_name = String(data.get("display_name") ?? "").trim();
+    const role = String(data.get("role") ?? "");
 
     this.busy = true;
     try {
@@ -219,7 +217,7 @@ export class FamilyMemberCard extends LitElement {
         display_name: display_name || undefined,
         role: role || undefined,
       });
-      this.status = 'Saved.';
+      this.status = "Saved.";
       this.editing = false;
       this.dispatchChanged();
     } catch (err) {
@@ -281,17 +279,11 @@ export class FamilyMemberCard extends LitElement {
           <span class="email">${m.email}</span>
           <div class="badges">
             <span class=${`badge ${m.account_type}`}>${m.account_type}</span>
-            ${m.account_type === 'parent' && !m.has_pin
-              ? html`<span class="badge warn" title="Set PIN required"
-                  >Set PIN required</span
-                >`
+            ${m.account_type === "parent" && !m.has_pin
+              ? html`<span class="badge warn" title="Set PIN required">Set PIN required</span>`
               : nothing}
-            ${m.token_expired
-              ? html`<span class="badge expired">Token expired</span>`
-              : nothing}
-            <span class="badge"
-              >Last login: ${this.fmtDate(m.last_login_at)}</span
-            >
+            ${m.token_expired ? html`<span class="badge expired">Token expired</span>` : nothing}
+            <span class="badge">Last login: ${this.fmtDate(m.last_login_at)}</span>
           </div>
         </div>
         <div class="actions">
@@ -300,17 +292,12 @@ export class FamilyMemberCard extends LitElement {
             ?disabled=${this.busy}
             @click=${() => (this.editing = !this.editing)}
           >
-            ${this.editing ? 'Cancel' : 'Edit'}
+            ${this.editing ? "Cancel" : "Edit"}
           </button>
           <button type="button" ?disabled=${this.busy} @click=${this.onReauth}>
             Re-authenticate
           </button>
-          <button
-            type="button"
-            class="danger"
-            ?disabled=${this.busy}
-            @click=${this.openRemove}
-          >
+          <button type="button" class="danger" ?disabled=${this.busy} @click=${this.openRemove}>
             Remove
           </button>
         </div>
@@ -320,28 +307,13 @@ export class FamilyMemberCard extends LitElement {
               <div class="row">
                 <label>
                   Name
-                  <input
-                    name="display_name"
-                    type="text"
-                    .value=${m.display_name}
-                    required
-                  />
+                  <input name="display_name" type="text" .value=${m.display_name} required />
                 </label>
                 <label>
                   Role
                   <select name="role" .value=${m.account_type}>
-                    <option
-                      value="parent"
-                      ?selected=${m.account_type === 'parent'}
-                    >
-                      Parent
-                    </option>
-                    <option
-                      value="child"
-                      ?selected=${m.account_type === 'child'}
-                    >
-                      Child
-                    </option>
+                    <option value="parent" ?selected=${m.account_type === "parent"}>Parent</option>
+                    <option value="child" ?selected=${m.account_type === "child"}>Child</option>
                   </select>
                 </label>
               </div>
@@ -354,20 +326,13 @@ export class FamilyMemberCard extends LitElement {
         <div class="live" role="status" aria-live="polite">${this.status}</div>
 
         ${this.removing
-          ? html`<wa-dialog
-              class="confirm-remove"
-              label=${`Remove ${m.display_name}?`}
-              open
-            >
+          ? html`<wa-dialog class="confirm-remove" label=${`Remove ${m.display_name}?`} open>
               <p>
-                Removing ${m.display_name} also signs them out everywhere
-                and deletes their HomeTube data. Their YouTube account
-                itself is unaffected.
+                Removing ${m.display_name} also signs them out everywhere and deletes their HomeTube
+                data. Their YouTube account itself is unaffected.
               </p>
               <div class="dialog-actions">
-                <button type="button" @click=${this.closeRemove}>
-                  Cancel
-                </button>
+                <button type="button" @click=${this.closeRemove}>Cancel</button>
                 <button
                   type="button"
                   class="danger"
@@ -386,6 +351,6 @@ export class FamilyMemberCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-member-card': FamilyMemberCard;
+    "hometube-family-member-card": FamilyMemberCard;
   }
 }

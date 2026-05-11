@@ -11,14 +11,14 @@
  * `hometube:error-dismiss` when `dismissible`.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property } from "lit/decorators.js";
 
-@customElement('hometube-error-banner')
+@customElement("hometube-error-banner")
 export class ErrorBanner extends LitElement {
   /** Message text to display. Empty hides the banner. */
   @property({ type: String })
-  message = '';
+  message = "";
 
   /** When set, render a "Dismiss" button. */
   @property({ type: Boolean })
@@ -63,7 +63,7 @@ export class ErrorBanner extends LitElement {
 
   private onRetry = (): void => {
     this.dispatchEvent(
-      new CustomEvent('hometube:error-retry', {
+      new CustomEvent("hometube:error-retry", {
         bubbles: true,
         composed: true,
       }),
@@ -72,12 +72,12 @@ export class ErrorBanner extends LitElement {
 
   private onDismiss = (): void => {
     this.dispatchEvent(
-      new CustomEvent('hometube:error-dismiss', {
+      new CustomEvent("hometube:error-dismiss", {
         bubbles: true,
         composed: true,
       }),
     );
-    this.message = '';
+    this.message = "";
   };
 
   override render() {
@@ -89,11 +89,7 @@ export class ErrorBanner extends LitElement {
           ? html`<button type="button" @click=${this.onRetry}>Retry</button>`
           : nothing}
         ${this.dismissible
-          ? html`<button
-              type="button"
-              aria-label="Dismiss error"
-              @click=${this.onDismiss}
-            >
+          ? html`<button type="button" aria-label="Dismiss error" @click=${this.onDismiss}>
               Dismiss
             </button>`
           : nothing}
@@ -104,6 +100,6 @@ export class ErrorBanner extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-error-banner': ErrorBanner;
+    "hometube-error-banner": ErrorBanner;
   }
 }

@@ -12,10 +12,10 @@
  * live region.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state, query } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state, query } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
+import { api } from "../services/api.js";
 
 interface CacheStats {
   total_bytes: number;
@@ -38,22 +38,22 @@ interface CacheSettings {
   metadata_ttl_hours: number;
 }
 
-const PRESETS = ['5 GB', '10 GB', '25 GB', '50 GB', '100 GB', 'Unlimited'];
+const PRESETS = ["5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited"];
 
-@customElement('hometube-cache-manager')
+@customElement("hometube-cache-manager")
 export class CacheManager extends LitElement {
   @state() private stats: CacheStats | null = null;
   @state() private settings: CacheSettings | null = null;
   @state() private busy = false;
-  @state() private status = '';
+  @state() private status = "";
   @state() private confirmOpen = false;
 
-  @query('wa-dialog') private dialog!: HTMLElement & {
+  @query("wa-dialog") private dialog!: HTMLElement & {
     show?: () => void;
     hide?: () => void;
     open?: boolean;
   };
-  @query('button.cancel-confirm') private cancelButton?: HTMLButtonElement;
+  @query("button.cancel-confirm") private cancelButton?: HTMLButtonElement;
 
   static styles = css`
     :host {
@@ -150,8 +150,8 @@ export class CacheManager extends LitElement {
   private async load(): Promise<void> {
     try {
       const [stats, settings] = await Promise.all([
-        api.get<CacheStats>('/api/cache/stats'),
-        api.get<CacheSettings>('/api/cache/settings'),
+        api.get<CacheStats>("/api/cache/stats"),
+        api.get<CacheSettings>("/api/cache/settings"),
       ]);
       this.stats = stats;
       this.settings = settings;
@@ -161,8 +161,8 @@ export class CacheManager extends LitElement {
   }
 
   private fmtBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
     const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
     return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
   }
@@ -171,7 +171,7 @@ export class CacheManager extends LitElement {
     const max_size = (e.target as HTMLSelectElement).value;
     this.busy = true;
     try {
-      this.settings = await api.put<CacheSettings>('/api/cache/settings', {
+      this.settings = await api.put<CacheSettings>("/api/cache/settings", {
         max_size,
       });
       this.status = `Max size set to ${max_size}.`;
@@ -214,8 +214,8 @@ export class CacheManager extends LitElement {
     this.busy = true;
     this.closeConfirm();
     try {
-      await api.post('/api/cache/clear');
-      this.status = 'Entire cache cleared.';
+      await api.post("/api/cache/clear");
+      this.status = "Entire cache cleared.";
       await this.load();
     } catch (err) {
       this.status = `Failed to clear: ${(err as Error).message}`;
@@ -228,24 +228,20 @@ export class CacheManager extends LitElement {
     if (!this.stats || !this.settings) return html`<p>Loading cache…</p>`;
     const usedPct =
       this.stats.max_size_bytes > 0
-        ? Math.min(
-            100,
-            (this.stats.total_bytes / this.stats.max_size_bytes) * 100,
-          )
+        ? Math.min(100, (this.stats.total_bytes / this.stats.max_size_bytes) * 100)
         : 0;
     return html`
       <article>
         <dl>
           <dt>Cache size</dt>
           <dd>
-            ${this.fmtBytes(this.stats.total_bytes)} ·
-            ${this.stats.segment_count} segments ·
+            ${this.fmtBytes(this.stats.total_bytes)} · ${this.stats.segment_count} segments ·
             ${this.stats.video_count} videos
           </dd>
           <dt>Hit rate</dt>
           <dd>
-            ${(this.stats.hit_rate * 100).toFixed(1)}% (hits:
-            ${this.stats.hit_count}, misses: ${this.stats.miss_count})
+            ${(this.stats.hit_rate * 100).toFixed(1)}% (hits: ${this.stats.hit_count}, misses:
+            ${this.stats.miss_count})
           </dd>
           <dt>Limit</dt>
           <dd>
@@ -273,21 +269,13 @@ export class CacheManager extends LitElement {
               @change=${this.onMaxSize}
             >
               ${PRESETS.map(
-                (p) => html`<option
-                  value=${p}
-                  ?selected=${p === this.settings!.max_size}
-                >
+                (p) => html`<option value=${p} ?selected=${p === this.settings!.max_size}>
                   ${p}
                 </option>`,
               )}
             </select>
           </label>
-          <button
-            type="button"
-            class="danger"
-            ?disabled=${this.busy}
-            @click=${this.openConfirm}
-          >
+          <button type="button" class="danger" ?disabled=${this.busy} @click=${this.openConfirm}>
             Clear entire cache
           </button>
         </div>
@@ -322,31 +310,19 @@ export class CacheManager extends LitElement {
               </tbody>
             </table>`
           : html`<p>No segments cached yet.</p>`}
-        <div class="live" role="status" aria-live="polite">
-          ${this.status}
-        </div>
+        <div class="live" role="status" aria-live="polite">${this.status}</div>
 
         ${this.confirmOpen
           ? html`<wa-dialog label="Clear segment cache?" open>
               <p>
-                This removes every cached video segment from disk. Future
-                playback re-downloads them from YouTube on demand.
+                This removes every cached video segment from disk. Future playback re-downloads them
+                from YouTube on demand.
               </p>
               <div class="dialog-actions">
-                <button
-                  type="button"
-                  class="cancel-confirm"
-                  @click=${this.closeConfirm}
-                >
+                <button type="button" class="cancel-confirm" @click=${this.closeConfirm}>
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  class="danger"
-                  @click=${this.onClearAll}
-                >
-                  Clear cache
-                </button>
+                <button type="button" class="danger" @click=${this.onClearAll}>Clear cache</button>
               </div>
             </wa-dialog>`
           : nothing}
@@ -357,6 +333,6 @@ export class CacheManager extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-cache-manager': CacheManager;
+    "hometube-cache-manager": CacheManager;
   }
 }

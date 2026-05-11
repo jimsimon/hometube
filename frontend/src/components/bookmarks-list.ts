@@ -7,14 +7,14 @@
  * `?t=<seconds>` query so the player can seek on load.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { Bookmark } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { Bookmark } from "../types/index.js";
 
-import './loading-spinner.js';
-import './error-banner.js';
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 interface VideoGroup {
   videoId: string;
@@ -22,11 +22,11 @@ interface VideoGroup {
   bookmarks: Bookmark[];
 }
 
-@customElement('hometube-bookmarks-list')
+@customElement("hometube-bookmarks-list")
 export class BookmarksList extends LitElement {
   @state() private bookmarks: Bookmark[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -84,12 +84,11 @@ export class BookmarksList extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.bookmarks = await api.get<Bookmark[]>('/api/bookmarks?limit=200');
+      this.bookmarks = await api.get<Bookmark[]>("/api/bookmarks?limit=200");
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -118,25 +117,20 @@ export class BookmarksList extends LitElement {
   private formatTime(seconds: number): string {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
-    return `${m}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
   }
 
   override render() {
     if (this.loading) {
-      return html`<hometube-loading-spinner
-        label="Loading bookmarks…"
-      ></hometube-loading-spinner>`;
+      return html`<hometube-loading-spinner label="Loading bookmarks…"></hometube-loading-spinner>`;
     }
     if (this.error) {
-      return html`<hometube-error-banner
-        message=${this.error}
-      ></hometube-error-banner>`;
+      return html`<hometube-error-banner message=${this.error}></hometube-error-banner>`;
     }
     const groups = this.groupByVideo();
     if (groups.length === 0) {
       return html`<p class="empty">
-        No bookmarks yet. Tap the bookmark button while watching a video to
-        save a moment.
+        No bookmarks yet. Tap the bookmark button while watching a video to save a moment.
       </p>`;
     }
     return html`
@@ -150,11 +144,9 @@ export class BookmarksList extends LitElement {
                   <li>
                     <a
                       href="/child/video/${encodeURIComponent(g.videoId)}?t=${b.timestamp_seconds}"
-                      aria-label=${`Jump to ${this.formatTime(b.timestamp_seconds)}${b.label ? ` — ${b.label}` : ''}`}
+                      aria-label=${`Jump to ${this.formatTime(b.timestamp_seconds)}${b.label ? ` — ${b.label}` : ""}`}
                     >
-                      <span class="timestamp"
-                        >${this.formatTime(b.timestamp_seconds)}</span
-                      >
+                      <span class="timestamp">${this.formatTime(b.timestamp_seconds)}</span>
                       ${b.label ? html`<span>${b.label}</span>` : nothing}
                     </a>
                   </li>
@@ -170,6 +162,6 @@ export class BookmarksList extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-bookmarks-list': BookmarksList;
+    "hometube-bookmarks-list": BookmarksList;
   }
 }

@@ -6,8 +6,8 @@
  * `services/theme` helpers.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
 import {
   applyTheme,
@@ -16,9 +16,9 @@ import {
   setThemePreference,
   watchSystemTheme,
   type ThemePreference,
-} from '../services/theme.js';
+} from "../services/theme.js";
 
-@customElement('hometube-theme-toggle')
+@customElement("hometube-theme-toggle")
 export class ThemeToggle extends LitElement {
   static styles = css`
     :host {
@@ -43,7 +43,7 @@ export class ThemeToggle extends LitElement {
   `;
 
   @state()
-  private pref: ThemePreference = 'system';
+  private pref: ThemePreference = "system";
 
   private cleanupSystemListener?: () => void;
 
@@ -51,7 +51,7 @@ export class ThemeToggle extends LitElement {
     super.connectedCallback();
     this.pref = getThemePreference();
     this.cleanupSystemListener = watchSystemTheme((theme) => {
-      if (this.pref === 'system') applyTheme(theme);
+      if (this.pref === "system") applyTheme(theme);
     });
   }
 
@@ -70,20 +70,10 @@ export class ThemeToggle extends LitElement {
   override render() {
     return html`
       <label for="theme-select">Theme</label>
-      <select
-        id="theme-select"
-        @change=${this.onChange}
-        aria-label="Color theme"
-      >
-        <option value="system" ?selected=${this.pref === 'system'}>
-          System
-        </option>
-        <option value="light" ?selected=${this.pref === 'light'}>
-          Light
-        </option>
-        <option value="dark" ?selected=${this.pref === 'dark'}>
-          Dark
-        </option>
+      <select id="theme-select" @change=${this.onChange} aria-label="Color theme">
+        <option value="system" ?selected=${this.pref === "system"}>System</option>
+        <option value="light" ?selected=${this.pref === "light"}>Light</option>
+        <option value="dark" ?selected=${this.pref === "dark"}>Dark</option>
       </select>
     `;
   }
@@ -91,6 +81,6 @@ export class ThemeToggle extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-theme-toggle': ThemeToggle;
+    "hometube-theme-toggle": ThemeToggle;
   }
 }

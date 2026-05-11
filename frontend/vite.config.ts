@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 import { readdirSync } from 'node:fs';
+import { VitePWA } from 'vite-plugin-pwa';
 
 /**
  * HomeTube uses a multi-page-app architecture: the Rust server renders
@@ -9,6 +10,11 @@ import { readdirSync } from 'node:fs';
  * `src/components/` is bundled into its own ES module under
  * `dist/components/<name>.js`. The server's `<script type="module">`
  * tags reference these files directly.
+ *
+ * The `vite-plugin-pwa` plugin runs in `injectManifest` mode: it takes
+ * our hand-written `src/sw.ts`, injects a Workbox precache manifest at
+ * build time, and emits the result as `/sw.js` at the root of the dist
+ * directory.
  */
 
 const componentsDir = resolve(__dirname, 'src/components');
@@ -30,17 +36,50 @@ function discoverComponentEntries(): Record<string, string> {
 
 export default defineConfig({
   root: __dirname,
+  plugins: [
+    VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
+      injectRegister: false,
+      // Vite-plugin-pwa emits the SW to `dist/sw.js` by default.
+      manifest: {
+        name: 'HomeTube',
+        short_name: 'HomeTube',
+        description: 'Self-hosted YouTube frontend for kids.',
+        start_url: '/',
+        display: 'standalone',
+        background_color: '#ffffff',
+        theme_color: '#2563eb',
+        icons: [],
+      },
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html}'],
+        // Don't fail the build if a referenced asset is missing —
+        // we share the dist folder with the askama-rendered HTML, so
+        // some references are dangling.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+      },
+      // We don't ship icons in this repo yet, so disable the manifest
+      // emission to keep the build clean for the askama frontend.
+      includeAssets: [],
+    }),
+  ],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
     target: 'es2022',
     sourcemap: true,
+    // The video-player bundle pulls in vidstack + dashjs; ~1.2 MB
+    // unminified is expected. Bump the soft warning ceiling to silence
+    // the noisy "chunk larger than 500 kB" output.
+    chunkSizeWarningLimit: 2000,
     rollupOptions: {
       input: {
-        // Service worker (registered by the app shell).
-        sw: resolve(__dirname, 'src/sw.ts'),
         // Per-component bundles.
         ...discoverComponentEntries(),
+        // SW registration shim served from `<base>` template.
+        'services/sw-register': resolve(__dirname, 'src/services/sw-register.ts'),
       },
       output: {
         // Stable filenames so the askama templates can reference them

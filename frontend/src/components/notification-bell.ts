@@ -12,21 +12,21 @@
  * + `aria-controls` for keyboard / SR users.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { NotificationRow } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { NotificationRow } from "../types/index.js";
 
 const POLL_INTERVAL_MS = 60_000;
 
-@customElement('hometube-notification-bell')
+@customElement("hometube-notification-bell")
 export class NotificationBell extends LitElement {
   @state() private unread = 0;
   @state() private items: NotificationRow[] = [];
   @state() private open = false;
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   private pollHandle: number | null = null;
 
@@ -159,11 +159,8 @@ export class NotificationBell extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.refreshUnread();
-    this.pollHandle = window.setInterval(
-      () => void this.refreshUnread(),
-      POLL_INTERVAL_MS,
-    );
-    document.addEventListener('click', this.onDocumentClick);
+    this.pollHandle = window.setInterval(() => void this.refreshUnread(), POLL_INTERVAL_MS);
+    document.addEventListener("click", this.onDocumentClick);
   }
 
   override disconnectedCallback(): void {
@@ -172,7 +169,7 @@ export class NotificationBell extends LitElement {
       window.clearInterval(this.pollHandle);
       this.pollHandle = null;
     }
-    document.removeEventListener('click', this.onDocumentClick);
+    document.removeEventListener("click", this.onDocumentClick);
   }
 
   private onDocumentClick = (e: Event): void => {
@@ -185,9 +182,7 @@ export class NotificationBell extends LitElement {
 
   private async refreshUnread(): Promise<void> {
     try {
-      const res = await api.get<{ unread: number }>(
-        '/api/notifications/unread-count',
-      );
+      const res = await api.get<{ unread: number }>("/api/notifications/unread-count");
       this.unread = res.unread;
     } catch {
       // Silent: a transient API failure shouldn't blow up the nav bar.
@@ -204,14 +199,11 @@ export class NotificationBell extends LitElement {
 
   private async loadItems(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.items = await api.get<NotificationRow[]>(
-        '/api/notifications?limit=20',
-      );
+      this.items = await api.get<NotificationRow[]>("/api/notifications?limit=20");
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -220,9 +212,7 @@ export class NotificationBell extends LitElement {
   private async markRead(id: number): Promise<void> {
     try {
       await api.put(`/api/notifications/${id}/read`);
-      this.items = this.items.map((n) =>
-        n.id === id ? { ...n, is_read: 1 } : n,
-      );
+      this.items = this.items.map((n) => (n.id === id ? { ...n, is_read: 1 } : n));
       void this.refreshUnread();
     } catch (err) {
       this.error = (err as Error).message;
@@ -241,7 +231,7 @@ export class NotificationBell extends LitElement {
 
   private async markAllRead(): Promise<void> {
     try {
-      await api.put('/api/notifications/read-all');
+      await api.put("/api/notifications/read-all");
       this.items = this.items.map((n) => ({ ...n, is_read: 1 }));
       this.unread = 0;
     } catch (err) {
@@ -258,16 +248,16 @@ export class NotificationBell extends LitElement {
     const badge =
       this.unread > 0
         ? html`<span class="badge" aria-hidden="true"
-            >${this.unread > 99 ? '99+' : this.unread}</span
+            >${this.unread > 99 ? "99+" : this.unread}</span
           >`
         : nothing;
     return html`
       <button
         type="button"
         class="bell"
-        aria-label=${`Notifications${this.unread > 0 ? ` (${this.unread} unread)` : ''}`}
+        aria-label=${`Notifications${this.unread > 0 ? ` (${this.unread} unread)` : ""}`}
         aria-haspopup="true"
-        aria-expanded=${this.open ? 'true' : 'false'}
+        aria-expanded=${this.open ? "true" : "false"}
         aria-controls="notification-panel"
         @click=${this.toggleOpen}
       >
@@ -275,15 +265,8 @@ export class NotificationBell extends LitElement {
       </button>
       ${this.open
         ? html`
-            <div
-              id="notification-panel"
-              class="panel"
-              role="dialog"
-              aria-label="Notifications"
-            >
-              ${this.error
-                ? html`<p class="error">${this.error}</p>`
-                : nothing}
+            <div id="notification-panel" class="panel" role="dialog" aria-label="Notifications">
+              ${this.error ? html`<p class="error">${this.error}</p>` : nothing}
               ${this.loading
                 ? html`<p class="empty">Loading…</p>`
                 : this.items.length === 0
@@ -292,11 +275,9 @@ export class NotificationBell extends LitElement {
                       <ul>
                         ${this.items.map(
                           (n) => html`
-                            <li class=${n.is_read === 0 ? 'unread' : ''}>
+                            <li class=${n.is_read === 0 ? "unread" : ""}>
                               <span class="title">${n.title}</span>
-                              <span class="timestamp">
-                                ${this.formatTime(n.created_at)}
-                              </span>
+                              <span class="timestamp"> ${this.formatTime(n.created_at)} </span>
                               <span class="message">${n.message}</span>
                               <span class="actions">
                                 ${n.is_read === 0
@@ -321,10 +302,7 @@ export class NotificationBell extends LitElement {
                       </ul>
                       ${this.unread > 0
                         ? html`<div class="footer">
-                            <button
-                              type="button"
-                              @click=${() => void this.markAllRead()}
-                            >
+                            <button type="button" @click=${() => void this.markAllRead()}>
                               Mark all read
                             </button>
                           </div>`
@@ -339,6 +317,6 @@ export class NotificationBell extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-notification-bell': NotificationBell;
+    "hometube-notification-bell": NotificationBell;
   }
 }

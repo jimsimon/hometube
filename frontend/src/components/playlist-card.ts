@@ -6,30 +6,30 @@
  * a sync-status indicator when out of sync with YouTube.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property } from "lit/decorators.js";
 
-import type { SyncStatus } from '../types/index.js';
+import type { SyncStatus } from "../types/index.js";
 
-@customElement('hometube-playlist-card')
+@customElement("hometube-playlist-card")
 export class PlaylistCard extends LitElement {
-  @property({ type: Number, attribute: 'playlist-id' })
+  @property({ type: Number, attribute: "playlist-id" })
   playlistId = 0;
 
   @property({ type: String })
-  title = '';
+  title = "";
 
-  @property({ type: Number, attribute: 'video-count' })
+  @property({ type: Number, attribute: "video-count" })
   videoCount = 0;
 
-  @property({ type: String, attribute: 'thumbnail-url' })
+  @property({ type: String, attribute: "thumbnail-url" })
   thumbnailUrl: string | null = null;
 
-  @property({ type: Boolean, attribute: 'is-own' })
+  @property({ type: Boolean, attribute: "is-own" })
   isOwn = true;
 
-  @property({ type: String, attribute: 'sync-status' })
-  syncStatus: SyncStatus = 'synced';
+  @property({ type: String, attribute: "sync-status" })
+  syncStatus: SyncStatus = "synced";
 
   static styles = css`
     :host {
@@ -101,28 +101,24 @@ export class PlaylistCard extends LitElement {
   override render() {
     const href = `/child/playlist/${this.playlistId}`;
     const isPending =
-      this.syncStatus === 'pending_create' ||
-      this.syncStatus === 'pending_update' ||
-      this.syncStatus === 'pending_delete' ||
-      this.syncStatus === 'pending_push';
-    const isError = this.syncStatus === 'error';
+      this.syncStatus === "pending_create" ||
+      this.syncStatus === "pending_update" ||
+      this.syncStatus === "pending_delete" ||
+      this.syncStatus === "pending_push";
+    const isError = this.syncStatus === "error";
     return html`
       <a href=${href} aria-label=${this.title}>
         <div class="thumb">
-          ${this.thumbnailUrl
-            ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
-            : null}
+          ${this.thumbnailUrl ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />` : null}
         </div>
         <div class="title">${this.title}</div>
         <div class="row">
           <span class="meta">${this.videoCount} videos</span>
           <span class="row" style="gap:0.25rem">
-            <span class="badge ${this.isOwn ? 'own' : ''}"
-              >${this.isOwn ? 'Yours' : 'Library'}</span
+            <span class="badge ${this.isOwn ? "own" : ""}"
+              >${this.isOwn ? "Yours" : "Library"}</span
             >
-            ${isPending
-              ? html`<span class="badge sync pending">Syncing…</span>`
-              : null}
+            ${isPending ? html`<span class="badge sync pending">Syncing…</span>` : null}
             ${isError ? html`<span class="badge sync error">Sync error</span>` : null}
           </span>
         </div>
@@ -133,6 +129,6 @@ export class PlaylistCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-playlist-card': PlaylistCard;
+    "hometube-playlist-card": PlaylistCard;
   }
 }

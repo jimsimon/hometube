@@ -12,21 +12,21 @@
  * a successful switch.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state, query } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
-@customElement('hometube-pin-entry-dialog')
+@customElement("hometube-pin-entry-dialog")
 export class PinEntryDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
-  @property({ type: Number, attribute: 'account-id' }) accountId = 0;
-  @property({ type: String, attribute: 'display-name' }) displayName = '';
+  @property({ type: Number, attribute: "account-id" }) accountId = 0;
+  @property({ type: String, attribute: "display-name" }) displayName = "";
 
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('wa-dialog') private dialog!: HTMLElement & {
+  @query("wa-dialog") private dialog!: HTMLElement & {
     show?: () => void;
     hide?: () => void;
   };
@@ -84,9 +84,9 @@ export class PinEntryDialog extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('open')) {
+    if (changed.has("open")) {
       if (this.open) {
-        this.error = '';
+        this.error = "";
         this.dialog?.show?.();
         // Focus the PIN input on open. Use queueMicrotask so the dialog
         // has finished opening and can hand focus over.
@@ -102,9 +102,7 @@ export class PinEntryDialog extends LitElement {
 
   private close(): void {
     this.open = false;
-    this.dispatchEvent(
-      new CustomEvent('pin-cancelled', { bubbles: true, composed: true }),
-    );
+    this.dispatchEvent(new CustomEvent("pin-cancelled", { bubbles: true, composed: true }));
   }
 
   private async onSubmit(e: Event): Promise<void> {
@@ -112,28 +110,28 @@ export class PinEntryDialog extends LitElement {
     if (!this.accountId) return;
     const form = e.target as HTMLFormElement;
     const data = new FormData(form);
-    const pin = String(data.get('pin') ?? '').trim();
+    const pin = String(data.get("pin") ?? "").trim();
     if (!/^\d{4,6}$/.test(pin)) {
-      this.error = 'PIN must be 4-6 digits.';
+      this.error = "PIN must be 4-6 digits.";
       return;
     }
     this.busy = true;
-    this.error = '';
+    this.error = "";
     try {
-      await api.post('/api/auth/switch', {
+      await api.post("/api/auth/switch", {
         account_id: this.accountId,
         pin,
       });
-      window.location.href = '/';
+      window.location.href = "/";
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
         this.error = "That PIN didn't match. Try again.";
-      } else if (err instanceof ApiError && typeof err.body === 'string') {
+      } else if (err instanceof ApiError && typeof err.body === "string") {
         this.error = err.body;
       } else if (err instanceof Error) {
         this.error = err.message;
       } else {
-        this.error = 'Something went wrong.';
+        this.error = "Something went wrong.";
       }
       this.busy = false;
       // Re-focus the input so the user can retry quickly.
@@ -146,9 +144,7 @@ export class PinEntryDialog extends LitElement {
     return html`
       <wa-dialog
         ?open=${this.open}
-        label=${this.displayName
-          ? `Enter PIN for ${this.displayName}`
-          : 'Enter PIN'}
+        label=${this.displayName ? `Enter PIN for ${this.displayName}` : "Enter PIN"}
         @wa-after-hide=${() => this.close()}
       >
         <form @submit=${this.onSubmit} novalidate>
@@ -169,15 +165,11 @@ export class PinEntryDialog extends LitElement {
               autofocus
             />
           </label>
-          ${this.error
-            ? html`<p class="error" role="alert">${this.error}</p>`
-            : nothing}
+          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
           <div class="actions">
-            <button type="button" ?disabled=${this.busy} @click=${this.close}>
-              Cancel
-            </button>
+            <button type="button" ?disabled=${this.busy} @click=${this.close}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>
-              ${this.busy ? 'Checking…' : 'Continue'}
+              ${this.busy ? "Checking…" : "Continue"}
             </button>
           </div>
         </form>
@@ -188,6 +180,6 @@ export class PinEntryDialog extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-pin-entry-dialog': PinEntryDialog;
+    "hometube-pin-entry-dialog": PinEntryDialog;
   }
 }

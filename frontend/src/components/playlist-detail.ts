@@ -12,20 +12,20 @@
  * but don't roll back — the next refresh will reconcile.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { PlaylistDetail, PlaylistVideo } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { PlaylistDetail, PlaylistVideo } from "../types/index.js";
 
-@customElement('hometube-playlist-detail')
+@customElement("hometube-playlist-detail")
 export class PlaylistDetailEl extends LitElement {
-  @property({ type: Number, attribute: 'playlist-id' })
+  @property({ type: Number, attribute: "playlist-id" })
   playlistId = 0;
 
   @state() private detail: PlaylistDetail | null = null;
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
   @state() private dragIndex: number | null = null;
 
   static styles = css`
@@ -98,7 +98,7 @@ export class PlaylistDetailEl extends LitElement {
       color: var(--wa-color-text-quiet);
       user-select: none;
     }
-    li[aria-disabled='true'] .grip {
+    li[aria-disabled="true"] .grip {
       cursor: not-allowed;
       opacity: 0.5;
     }
@@ -158,14 +158,11 @@ export class PlaylistDetailEl extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
-      this.detail = await api.get<PlaylistDetail>(
-        `/api/playlists/${this.playlistId}`,
-      );
+      this.detail = await api.get<PlaylistDetail>(`/api/playlists/${this.playlistId}`);
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -175,15 +172,15 @@ export class PlaylistDetailEl extends LitElement {
     if (!this.detail?.is_own) return;
     this.dragIndex = index;
     if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(index));
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(index));
     }
   };
 
   private onDragOver = (e: DragEvent): void => {
     if (!this.detail?.is_own) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
   };
 
   private onDrop = (targetIndex: number) => (e: DragEvent) => {
@@ -207,8 +204,7 @@ export class PlaylistDetailEl extends LitElement {
         video_ids: videos.map((v) => v.video_id),
       });
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
       void this.load();
     }
   }
@@ -216,9 +212,7 @@ export class PlaylistDetailEl extends LitElement {
   private async onRemove(videoId: string): Promise<void> {
     if (!this.detail?.is_own) return;
     try {
-      await api.delete(
-        `/api/playlists/${this.playlistId}/videos/${encodeURIComponent(videoId)}`,
-      );
+      await api.delete(`/api/playlists/${this.playlistId}/videos/${encodeURIComponent(videoId)}`);
       await this.load();
     } catch (err) {
       this.error = (err as Error).message;
@@ -230,8 +224,8 @@ export class PlaylistDetailEl extends LitElement {
     if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
     if (!this.detail) return null;
 
-    const isPending = this.detail.sync_status.startsWith('pending');
-    const isError = this.detail.sync_status === 'error';
+    const isPending = this.detail.sync_status.startsWith("pending");
+    const isError = this.detail.sync_status === "error";
 
     return html`
       <header>
@@ -241,12 +235,10 @@ export class PlaylistDetailEl extends LitElement {
             ? html`<p class="description">${this.detail.description}</p>`
             : nothing}
           <p class="stats">${this.detail.video_count} videos</p>
-          <span class="badge ${this.detail.is_own ? '' : ''}"
-            >${this.detail.is_own ? 'Yours' : 'Library'}</span
+          <span class="badge ${this.detail.is_own ? "" : ""}"
+            >${this.detail.is_own ? "Yours" : "Library"}</span
           >
-          ${isPending
-            ? html`<span class="badge pending">Syncing…</span>`
-            : nothing}
+          ${isPending ? html`<span class="badge pending">Syncing…</span>` : nothing}
           ${isError ? html`<span class="badge error">Sync error</span>` : nothing}
         </div>
       </header>
@@ -260,7 +252,7 @@ export class PlaylistDetailEl extends LitElement {
                   <li
                     draggable=${this.detail!.is_own}
                     aria-disabled=${!this.detail!.is_own}
-                    class=${this.dragIndex === i ? 'dragging' : ''}
+                    class=${this.dragIndex === i ? "dragging" : ""}
                     @dragstart=${this.onDragStart(i)}
                     @dragover=${this.onDragOver}
                     @drop=${this.onDrop(i)}
@@ -268,12 +260,10 @@ export class PlaylistDetailEl extends LitElement {
                     <span class="grip" aria-hidden="true">⋮⋮</span>
                     ${v.video_thumbnail_url
                       ? html`<img src=${v.video_thumbnail_url} alt="" />`
-                      : html`<div
-                          class="placeholder"
-                          aria-hidden="true"
-                        ></div>`}
+                      : html`<div class="placeholder" aria-hidden="true"></div>`}
                     <a
-                      href="/child/video/${encodeURIComponent(v.video_id)}?from=playlist:${this.detail!.id}"
+                      href="/child/video/${encodeURIComponent(v.video_id)}?from=playlist:${this
+                        .detail!.id}"
                       class="row-meta"
                     >
                       <div class="row-title">${v.video_title}</div>
@@ -303,6 +293,6 @@ export class PlaylistDetailEl extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-playlist-detail': PlaylistDetailEl;
+    "hometube-playlist-detail": PlaylistDetailEl;
   }
 }

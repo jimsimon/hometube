@@ -11,24 +11,24 @@
  * each successful toggle, with the new boolean state in `detail.subscribed`.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { SubscriptionRow, SyncStatus } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { SubscriptionRow, SyncStatus } from "../types/index.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const POLL_MAX_ATTEMPTS = 10;
 
-@customElement('hometube-subscribe-button')
+@customElement("hometube-subscribe-button")
 export class SubscribeButton extends LitElement {
-  @property({ type: String, attribute: 'channel-id' })
-  channelId = '';
+  @property({ type: String, attribute: "channel-id" })
+  channelId = "";
 
   @state() private subscribed = false;
   @state() private syncStatus: SyncStatus | null = null;
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
   private pollTimer: number | null = null;
 
@@ -64,8 +64,13 @@ export class SubscribeButton extends LitElement {
       animation: pulse 1s ease-in-out infinite;
     }
     @keyframes pulse {
-      0%, 100% { opacity: 0.4; }
-      50% { opacity: 1; }
+      0%,
+      100% {
+        opacity: 0.4;
+      }
+      50% {
+        opacity: 1;
+      }
     }
     .error {
       color: var(--wa-color-danger-fill, #b91c1c);
@@ -86,7 +91,7 @@ export class SubscribeButton extends LitElement {
 
   private async refresh(): Promise<void> {
     try {
-      const subs = await api.get<SubscriptionRow[]>('/api/subscriptions');
+      const subs = await api.get<SubscriptionRow[]>("/api/subscriptions");
       const match = subs.find((s) => s.channel_id === this.channelId);
       this.subscribed = !!match;
       this.syncStatus = match ? match.sync_status : null;
@@ -98,22 +103,20 @@ export class SubscribeButton extends LitElement {
   private async onToggle(): Promise<void> {
     if (this.busy || !this.channelId) return;
     this.busy = true;
-    this.error = '';
+    this.error = "";
     const wasSubscribed = this.subscribed;
     try {
       if (wasSubscribed) {
-        await api.delete(
-          `/api/subscriptions/${encodeURIComponent(this.channelId)}`,
-        );
+        await api.delete(`/api/subscriptions/${encodeURIComponent(this.channelId)}`);
         this.subscribed = false;
-        this.syncStatus = 'pending_delete';
+        this.syncStatus = "pending_delete";
       } else {
-        await api.post('/api/subscriptions', { channel_id: this.channelId });
+        await api.post("/api/subscriptions", { channel_id: this.channelId });
         this.subscribed = true;
-        this.syncStatus = 'pending_push';
+        this.syncStatus = "pending_push";
       }
       this.dispatchEvent(
-        new CustomEvent('hometube:subscription-changed', {
+        new CustomEvent("hometube:subscription-changed", {
           detail: { channelId: this.channelId, subscribed: this.subscribed },
           bubbles: true,
           composed: true,
@@ -121,8 +124,7 @@ export class SubscribeButton extends LitElement {
       );
       this.startPolling();
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.busy = false;
     }
@@ -135,14 +137,10 @@ export class SubscribeButton extends LitElement {
       attempts++;
       void (async () => {
         try {
-          const subs = await api.get<SubscriptionRow[]>('/api/subscriptions');
+          const subs = await api.get<SubscriptionRow[]>("/api/subscriptions");
           const match = subs.find((s) => s.channel_id === this.channelId);
           this.syncStatus = match ? match.sync_status : null;
-          if (
-            !match ||
-            match.sync_status === 'synced' ||
-            match.sync_status === 'error'
-          ) {
+          if (!match || match.sync_status === "synced" || match.sync_status === "error") {
             this.stopPolling();
           }
         } catch {
@@ -161,32 +159,26 @@ export class SubscribeButton extends LitElement {
   }
 
   override render() {
-    const pending =
-      this.syncStatus === 'pending_push' ||
-      this.syncStatus === 'pending_delete';
-    const label = this.subscribed ? 'Subscribed' : 'Subscribe';
+    const pending = this.syncStatus === "pending_push" || this.syncStatus === "pending_delete";
+    const label = this.subscribed ? "Subscribed" : "Subscribe";
     return html`
       <button
         type="button"
-        class=${this.subscribed ? 'subscribed' : ''}
+        class=${this.subscribed ? "subscribed" : ""}
         ?disabled=${this.busy}
         aria-pressed=${this.subscribed}
         @click=${this.onToggle}
       >
-        ${pending
-          ? html`<span class="pending-indicator" aria-hidden="true"></span>`
-          : null}
+        ${pending ? html`<span class="pending-indicator" aria-hidden="true"></span>` : null}
         ${label}
       </button>
-      ${this.error
-        ? html`<div class="error" role="alert">${this.error}</div>`
-        : null}
+      ${this.error ? html`<div class="error" role="alert">${this.error}</div>` : null}
     `;
   }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-subscribe-button': SubscribeButton;
+    "hometube-subscribe-button": SubscribeButton;
   }
 }

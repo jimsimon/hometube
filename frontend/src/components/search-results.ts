@@ -17,40 +17,39 @@
  *     of the page so the user can refine without going back.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api, ApiError } from '../services/api.js';
+import { api, ApiError } from "../services/api.js";
 import type {
   ChildSearchChannelHit,
   ChildSearchPlaylistHit,
   ChildSearchPlaylistSource,
   ChildSearchResponse,
   ChildSearchVideoHit,
-} from '../types/index.js';
+} from "../types/index.js";
 
-import './search-bar.js';
-import './channel-card.js';
-import './playlist-card.js';
-import './video-card.js';
+import "./search-bar.js";
+import "./channel-card.js";
+import "./playlist-card.js";
+import "./video-card.js";
 
 const PLAYLIST_BADGE_LABELS: Record<ChildSearchPlaylistSource, string> = {
-  allowlist: 'Allowed',
-  own: 'My playlist',
-  family: 'Family',
+  allowlist: "Allowed",
+  own: "My playlist",
+  family: "Family",
 };
 
-@customElement('hometube-search-results')
+@customElement("hometube-search-results")
 export class SearchResults extends LitElement {
-  @property({ type: String }) q = '';
-  @property({ type: String }) type: 'all' | 'channel' | 'playlist' | 'video' =
-    'all';
+  @property({ type: String }) q = "";
+  @property({ type: String }) type: "all" | "channel" | "playlist" | "video" = "all";
 
   @state() private channels: ChildSearchChannelHit[] = [];
   @state() private playlists: ChildSearchPlaylistHit[] = [];
   @state() private videos: ChildSearchVideoHit[] = [];
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
   @state() private nextPageToken: string | null = null;
 
   static styles = css`
@@ -141,10 +140,7 @@ export class SearchResults extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (
-      (changed.has('q') || changed.has('type')) &&
-      this.q
-    ) {
+    if ((changed.has("q") || changed.has("type")) && this.q) {
       void this.runSearch(false);
     }
   }
@@ -152,7 +148,7 @@ export class SearchResults extends LitElement {
   private async runSearch(append: boolean): Promise<void> {
     if (!this.q) return;
     this.loading = true;
-    this.error = '';
+    this.error = "";
     if (!append) {
       this.channels = [];
       this.playlists = [];
@@ -161,14 +157,12 @@ export class SearchResults extends LitElement {
     }
     try {
       const params = new URLSearchParams();
-      params.set('q', this.q);
-      if (this.type) params.set('type', this.type);
+      params.set("q", this.q);
+      if (this.type) params.set("type", this.type);
       if (append && this.nextPageToken) {
-        params.set('page_token', this.nextPageToken);
+        params.set("page_token", this.nextPageToken);
       }
-      const res = await api.get<ChildSearchResponse>(
-        `/api/search?${params.toString()}`,
-      );
+      const res = await api.get<ChildSearchResponse>(`/api/search?${params.toString()}`);
       if (append) {
         this.channels = [...this.channels, ...res.results.channels];
         this.playlists = [...this.playlists, ...res.results.playlists];
@@ -181,9 +175,7 @@ export class SearchResults extends LitElement {
       this.nextPageToken = res.next_page_token;
     } catch (err) {
       this.error =
-        err instanceof ApiError
-          ? `Search failed (HTTP ${err.status}).`
-          : (err as Error).message;
+        err instanceof ApiError ? `Search failed (HTTP ${err.status}).` : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -203,15 +195,12 @@ export class SearchResults extends LitElement {
 
     return html`
       <div class="bar">
-        <hometube-search-bar
-          initial-q=${this.q}
-          initial-type=${this.type}
-        ></hometube-search-bar>
+        <hometube-search-bar initial-q=${this.q} initial-type=${this.type}></hometube-search-bar>
       </div>
 
       <div class="live" role="status" aria-live="polite">
         ${this.loading
-          ? 'Searching…'
+          ? "Searching…"
           : this.error
             ? `Error: ${this.error}`
             : `Found ${this.channels.length} channels, ${this.playlists.length} playlists, ${this.videos.length} videos.`}
@@ -219,15 +208,10 @@ export class SearchResults extends LitElement {
 
       ${empty
         ? html`<p class="empty">
-            No results yet. Try a different word, or ask a parent to add what
-            you're looking for.
+            No results yet. Try a different word, or ask a parent to add what you're looking for.
           </p>`
         : nothing}
-
-      ${this.error
-        ? html`<p class="empty" role="alert">${this.error}</p>`
-        : nothing}
-
+      ${this.error ? html`<p class="empty" role="alert">${this.error}</p>` : nothing}
       ${this.channels.length > 0
         ? html`
             <h2>Channels</h2>
@@ -242,7 +226,6 @@ export class SearchResults extends LitElement {
             </div>
           `
         : nothing}
-
       ${this.playlists.length > 0
         ? html`
             <h2>Playlists</h2>
@@ -255,8 +238,7 @@ export class SearchResults extends LitElement {
                 >`;
                 // Family playlists encode their id as `family:N`; the
                 // child playlist deep-link is on the local id only.
-                const isLocal =
-                  p.source !== 'family' && !/^[A-Z]/.test(p.playlist_id);
+                const isLocal = p.source !== "family" && !/^[A-Z]/.test(p.playlist_id);
                 if (isLocal) {
                   return html`<div class="playlist-result">
                     ${badge}
@@ -264,7 +246,7 @@ export class SearchResults extends LitElement {
                       playlist-id=${Number(p.playlist_id) || 0}
                       title=${p.playlist_title}
                       .thumbnailUrl=${p.playlist_thumbnail_url}
-                      ?is-own=${p.source === 'own'}
+                      ?is-own=${p.source === "own"}
                     ></hometube-playlist-card>
                   </div>`;
                 }
@@ -280,7 +262,6 @@ export class SearchResults extends LitElement {
             </div>
           `
         : nothing}
-
       ${this.videos.length > 0
         ? html`
             <h2>Videos</h2>
@@ -296,12 +277,11 @@ export class SearchResults extends LitElement {
             </div>
           `
         : nothing}
-
       ${this.nextPageToken
         ? html`
             <div class="more">
               <button type="button" @click=${this.onLoadMore} ?disabled=${this.loading}>
-                ${this.loading ? 'Loading…' : 'Load more'}
+                ${this.loading ? "Loading…" : "Load more"}
               </button>
             </div>
           `
@@ -312,6 +292,6 @@ export class SearchResults extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-search-results': SearchResults;
+    "hometube-search-results": SearchResults;
   }
 }

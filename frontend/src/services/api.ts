@@ -12,23 +12,20 @@ export class ApiError extends Error {
     message: string,
   ) {
     super(message);
-    this.name = 'ApiError';
+    this.name = "ApiError";
   }
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit & { json?: unknown } = {},
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
   const { json, headers, ...rest } = init;
 
   const finalHeaders: Record<string, string> = {
-    Accept: 'application/json',
-    ...((headers as Record<string, string>) ?? {}),
+    Accept: "application/json",
+    ...(headers as Record<string, string> | undefined),
   };
   let body = rest.body;
   if (json !== undefined) {
-    finalHeaders['Content-Type'] = 'application/json';
+    finalHeaders["Content-Type"] = "application/json";
     body = JSON.stringify(json);
   }
 
@@ -36,12 +33,12 @@ async function request<T>(
     ...rest,
     body,
     headers: finalHeaders,
-    credentials: 'same-origin',
+    credentials: "same-origin",
   });
 
   let data: unknown = null;
-  const contentType = res.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
     data = await res.json().catch(() => null);
   } else {
     data = await res.text().catch(() => null);
@@ -54,10 +51,8 @@ async function request<T>(
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path, { method: 'GET' }),
-  post: <T>(path: string, json?: unknown) =>
-    request<T>(path, { method: 'POST', json }),
-  put: <T>(path: string, json?: unknown) =>
-    request<T>(path, { method: 'PUT', json }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  get: <T>(path: string) => request<T>(path, { method: "GET" }),
+  post: <T>(path: string, json?: unknown) => request<T>(path, { method: "POST", json }),
+  put: <T>(path: string, json?: unknown) => request<T>(path, { method: "PUT", json }),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };

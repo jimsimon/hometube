@@ -6,42 +6,32 @@
  * PUTs the entire set in one transaction.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api, ApiError } from '../services/api.js';
-import type { UsageLimit } from '../types/index.js';
+import { api, ApiError } from "../services/api.js";
+import type { UsageLimit } from "../types/index.js";
 
-const DAY_LABELS = [
-  'Sunday',
-  'Monday',
-  'Tuesday',
-  'Wednesday',
-  'Thursday',
-  'Friday',
-  'Saturday',
-];
+const DAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function defaultLimit(day: number): UsageLimit {
   return {
     day_of_week: day,
     max_hours: 2,
-    allowed_start_time: '08:00',
-    allowed_end_time: '20:00',
+    allowed_start_time: "08:00",
+    allowed_end_time: "20:00",
   };
 }
 
-@customElement('hometube-usage-limit-editor')
+@customElement("hometube-usage-limit-editor")
 export class UsageLimitEditor extends LitElement {
-  @property({ type: Number, attribute: 'child-id' })
+  @property({ type: Number, attribute: "child-id" })
   childId: number | null = null;
 
-  @state() private limits: UsageLimit[] = Array.from({ length: 7 }, (_, i) =>
-    defaultLimit(i),
-  );
+  @state() private limits: UsageLimit[] = Array.from({ length: 7 }, (_, i) => defaultLimit(i));
   @state() private saving = false;
-  @state() private message = '';
-  @state() private error = '';
+  @state() private message = "";
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -57,8 +47,8 @@ export class UsageLimitEditor extends LitElement {
       border-bottom: 1px solid var(--wa-color-surface-border);
       text-align: left;
     }
-    input[type='number'],
-    input[type='time'] {
+    input[type="number"],
+    input[type="time"] {
       padding: 0.25rem 0.5rem;
       border: 1px solid var(--wa-color-surface-border, #ccc);
       border-radius: 0.375rem;
@@ -90,7 +80,7 @@ export class UsageLimitEditor extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('childId') && this.childId != null) {
+    if (changed.has("childId") && this.childId != null) {
       void this.refresh();
     }
   }
@@ -98,9 +88,7 @@ export class UsageLimitEditor extends LitElement {
   private async refresh(): Promise<void> {
     if (this.childId == null) return;
     try {
-      const rows = await api.get<UsageLimit[]>(
-        `/api/children/${this.childId}/usage-limits`,
-      );
+      const rows = await api.get<UsageLimit[]>(`/api/children/${this.childId}/usage-limits`);
       const merged: UsageLimit[] = Array.from({ length: 7 }, (_, day) => {
         const row = rows.find((r) => r.day_of_week === day);
         return row ?? defaultLimit(day);
@@ -114,11 +102,11 @@ export class UsageLimitEditor extends LitElement {
   private updateField(day: number, field: keyof UsageLimit, value: string): void {
     const next = [...this.limits];
     const row = { ...next[day]! };
-    if (field === 'max_hours') {
+    if (field === "max_hours") {
       row.max_hours = Number(value);
-    } else if (field === 'allowed_start_time') {
+    } else if (field === "allowed_start_time") {
       row.allowed_start_time = value;
-    } else if (field === 'allowed_end_time') {
+    } else if (field === "allowed_end_time") {
       row.allowed_end_time = value;
     }
     next[day] = row;
@@ -128,11 +116,11 @@ export class UsageLimitEditor extends LitElement {
   private async onSave(): Promise<void> {
     if (this.childId == null) return;
     this.saving = true;
-    this.message = '';
-    this.error = '';
+    this.message = "";
+    this.error = "";
     try {
       await api.put(`/api/children/${this.childId}/usage-limits`, this.limits);
-      this.message = 'Saved.';
+      this.message = "Saved.";
     } catch (err) {
       this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
@@ -160,9 +148,7 @@ export class UsageLimitEditor extends LitElement {
               <tr>
                 <th scope="row">${DAY_LABELS[idx]}</th>
                 <td>
-                  <label class="sr-only" for="hours-${idx}"
-                    >Max hours for ${DAY_LABELS[idx]}</label
-                  >
+                  <label class="sr-only" for="hours-${idx}">Max hours for ${DAY_LABELS[idx]}</label>
                   <input
                     id="hours-${idx}"
                     type="number"
@@ -171,11 +157,7 @@ export class UsageLimitEditor extends LitElement {
                     step="0.25"
                     .value=${String(row.max_hours)}
                     @input=${(e: Event) =>
-                      this.updateField(
-                        idx,
-                        'max_hours',
-                        (e.target as HTMLInputElement).value,
-                      )}
+                      this.updateField(idx, "max_hours", (e.target as HTMLInputElement).value)}
                   />
                 </td>
                 <td>
@@ -189,15 +171,13 @@ export class UsageLimitEditor extends LitElement {
                     @input=${(e: Event) =>
                       this.updateField(
                         idx,
-                        'allowed_start_time',
+                        "allowed_start_time",
                         (e.target as HTMLInputElement).value,
                       )}
                   />
                 </td>
                 <td>
-                  <label class="sr-only" for="end-${idx}"
-                    >End time for ${DAY_LABELS[idx]}</label
-                  >
+                  <label class="sr-only" for="end-${idx}">End time for ${DAY_LABELS[idx]}</label>
                   <input
                     id="end-${idx}"
                     type="time"
@@ -205,7 +185,7 @@ export class UsageLimitEditor extends LitElement {
                     @input=${(e: Event) =>
                       this.updateField(
                         idx,
-                        'allowed_end_time',
+                        "allowed_end_time",
                         (e.target as HTMLInputElement).value,
                       )}
                   />
@@ -216,11 +196,9 @@ export class UsageLimitEditor extends LitElement {
         </tbody>
       </table>
       <button type="button" @click=${() => void this.onSave()} ?disabled=${this.saving}>
-        ${this.saving ? 'Saving…' : 'Save'}
+        ${this.saving ? "Saving…" : "Save"}
       </button>
-      ${this.message
-        ? html`<p class="ok" role="status">${this.message}</p>`
-        : nothing}
+      ${this.message ? html`<p class="ok" role="status">${this.message}</p>` : nothing}
       ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
     `;
   }
@@ -228,6 +206,6 @@ export class UsageLimitEditor extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-usage-limit-editor': UsageLimitEditor;
+    "hometube-usage-limit-editor": UsageLimitEditor;
   }
 }

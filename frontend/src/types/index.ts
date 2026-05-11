@@ -5,7 +5,7 @@
  * narrow — only the fields the UI actually consumes.
  */
 
-export type AccountType = 'parent' | 'child';
+export type AccountType = "parent" | "child";
 
 export interface Account {
   id: number;
@@ -20,7 +20,7 @@ export interface AccountSummary {
   email: string;
   display_name: string;
   avatar_url: string | null;
-  account_type: 'parent' | 'child';
+  account_type: "parent" | "child";
   has_pin: boolean;
   created_at: number;
 }
@@ -61,7 +61,7 @@ export interface BlockedVideo {
 export interface ChildSettings {
   child_account_id: number;
   downloads_enabled: boolean;
-  max_quality: '480p' | '720p' | '1080p' | null;
+  max_quality: "480p" | "720p" | "1080p" | null;
   playback_speed_locked: boolean;
   autoplay_enabled: boolean;
   autoplay_max_consecutive: number | null;
@@ -75,7 +75,7 @@ export interface UsageLimit {
 }
 
 export interface SearchItem {
-  kind: 'channel' | 'playlist' | 'video';
+  kind: "channel" | "playlist" | "video";
   id: string;
   title: string;
   description: string;
@@ -112,7 +112,7 @@ export interface ChildSearchChannelHit {
  * - `own` — playlist the child created in HomeTube
  * - `family` — family playlist the parent created and shared
  */
-export type ChildSearchPlaylistSource = 'allowlist' | 'own' | 'family';
+export type ChildSearchPlaylistSource = "allowlist" | "own" | "family";
 
 export interface ChildSearchPlaylistHit {
   playlist_id: string;
@@ -137,7 +137,7 @@ export interface ChildSearchResults {
 
 export interface ChildSearchResponse {
   q: string;
-  kind: 'all' | 'channel' | 'playlist' | 'video' | string;
+  kind: "all" | "channel" | "playlist" | "video" | string;
   results: ChildSearchResults;
   next_page_token: string | null;
 }
@@ -159,7 +159,7 @@ export interface NewVideoItem {
   channel_title: string | null;
   thumbnail_url: string | null;
   published_at: string | null;
-  source_kind: 'channel' | 'playlist';
+  source_kind: "channel" | "playlist";
   source_id: string;
 }
 
@@ -194,7 +194,7 @@ export interface AllowedWindow {
 }
 
 export interface UsageLimitResponse {
-  reason: 'limit_exceeded' | 'outside_window';
+  reason: "limit_exceeded" | "outside_window";
   remaining_seconds: number;
   allowed_window?: AllowedWindow | null;
 }
@@ -203,7 +203,7 @@ export interface HeartbeatResponse {
   remaining_seconds: number | null;
   allowed_window: AllowedWindow | null;
   limit_exceeded: boolean;
-  reason?: 'limit_exceeded' | 'outside_window';
+  reason?: "limit_exceeded" | "outside_window";
 }
 
 // ---------------------------------------------------------------------------
@@ -211,12 +211,12 @@ export interface HeartbeatResponse {
 // ---------------------------------------------------------------------------
 
 export type SyncStatus =
-  | 'synced'
-  | 'pending_push'
-  | 'pending_delete'
-  | 'pending_create'
-  | 'pending_update'
-  | 'error';
+  | "synced"
+  | "pending_push"
+  | "pending_delete"
+  | "pending_create"
+  | "pending_update"
+  | "error";
 
 export interface ChannelInfo {
   id: string;
@@ -248,7 +248,7 @@ export interface SubscriptionRow {
   channel_id: string;
   channel_title: string;
   channel_thumbnail_url: string | null;
-  source: 'app' | 'youtube';
+  source: "app" | "youtube";
   sync_status: SyncStatus;
   subscribed_at: number;
   visible: boolean;
@@ -260,7 +260,7 @@ export interface PlaylistSummary {
   title: string;
   description: string | null;
   is_own: boolean;
-  source: 'app' | 'youtube';
+  source: "app" | "youtube";
   sync_status: SyncStatus;
   video_count: number;
   created_at: number;
@@ -286,7 +286,7 @@ export interface LikeRow {
   video_id: string;
   video_title: string | null;
   video_thumbnail_url: string | null;
-  source: 'app' | 'youtube';
+  source: "app" | "youtube";
   sync_status: SyncStatus;
   liked_at: number;
 }
@@ -310,7 +310,7 @@ export interface Bookmark {
 
 export interface SleepTimerRow {
   id: number;
-  timer_type: 'after_video' | 'minutes';
+  timer_type: "after_video" | "minutes";
   minutes_remaining: number | null;
   videos_remaining: number | null;
   started_at: number;
@@ -318,10 +318,8 @@ export interface SleepTimerRow {
 }
 
 /** Best-effort thumbnail-pick helper used across components. */
-export function pickThumbnail(
-  thumbs: Record<string, { url: string }>,
-): string | null {
-  for (const key of ['maxres', 'high', 'standard', 'medium', 'default']) {
+export function pickThumbnail(thumbs: Record<string, { url: string }>): string | null {
+  for (const key of ["maxres", "high", "standard", "medium", "default"]) {
     const t = thumbs[key];
     if (t) return t.url;
   }
@@ -364,13 +362,13 @@ export interface SearchLogEntry {
 }
 
 export type NotificationType =
-  | 'time_limit_approaching'
-  | 'time_limit_reached'
-  | 'ytdlp_failure'
-  | 'sync_error'
-  | 'token_expired'
-  | 'new_search_term'
-  | 'system_update';
+  | "time_limit_approaching"
+  | "time_limit_reached"
+  | "ytdlp_failure"
+  | "sync_error"
+  | "token_expired"
+  | "new_search_term"
+  | "system_update";
 
 export interface NotificationRow {
   id: number;

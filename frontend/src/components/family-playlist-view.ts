@@ -6,23 +6,23 @@
  * see the videos and can tap through to play them.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { FamilyPlaylistDetail } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { FamilyPlaylistDetail } from "../types/index.js";
 
-import './loading-spinner.js';
-import './error-banner.js';
+import "./loading-spinner.js";
+import "./error-banner.js";
 
-@customElement('hometube-family-playlist-view')
+@customElement("hometube-family-playlist-view")
 export class FamilyPlaylistView extends LitElement {
-  @property({ type: String, attribute: 'playlist-id' })
-  playlistId = '';
+  @property({ type: String, attribute: "playlist-id" })
+  playlistId = "";
 
   @state() private detail: FamilyPlaylistDetail | null = null;
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -99,14 +99,13 @@ export class FamilyPlaylistView extends LitElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
       this.detail = await api.get<FamilyPlaylistDetail>(
         `/api/family-playlists/${encodeURIComponent(this.playlistId)}`,
       );
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -117,9 +116,7 @@ export class FamilyPlaylistView extends LitElement {
       return html`<hometube-loading-spinner></hometube-loading-spinner>`;
     }
     if (this.error) {
-      return html`<hometube-error-banner
-        message=${this.error}
-      ></hometube-error-banner>`;
+      return html`<hometube-error-banner message=${this.error}></hometube-error-banner>`;
     }
     if (!this.detail) return nothing;
 
@@ -140,7 +137,8 @@ export class FamilyPlaylistView extends LitElement {
                 (v) => html`
                   <li>
                     <a
-                      href="/child/video/${encodeURIComponent(v.video_id)}?from=family:${this.detail!.id}"
+                      href="/child/video/${encodeURIComponent(v.video_id)}?from=family:${this
+                        .detail!.id}"
                     >
                       ${v.video_thumbnail_url
                         ? html`<img src=${v.video_thumbnail_url} alt="" />`
@@ -148,9 +146,7 @@ export class FamilyPlaylistView extends LitElement {
                       <div>
                         <div class="row-title">${v.video_title}</div>
                         ${v.channel_title
-                          ? html`<div class="row-channel">
-                              ${v.channel_title}
-                            </div>`
+                          ? html`<div class="row-channel">${v.channel_title}</div>`
                           : nothing}
                       </div>
                     </a>
@@ -165,6 +161,6 @@ export class FamilyPlaylistView extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-playlist-view': FamilyPlaylistView;
+    "hometube-family-playlist-view": FamilyPlaylistView;
   }
 }

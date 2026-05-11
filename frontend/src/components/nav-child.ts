@@ -12,19 +12,19 @@
  * implemented are listed but link to placeholders.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, query } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, query } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
+import { api } from "../services/api.js";
 
-import './search-bar.js';
+import "./search-bar.js";
 
-@customElement('hometube-nav-child')
+@customElement("hometube-nav-child")
 export class NavChild extends LitElement {
-  @property({ type: String, attribute: 'display-name' })
-  displayName = '';
+  @property({ type: String, attribute: "display-name" })
+  displayName = "";
 
-  @query('wa-drawer') private drawer!: HTMLElement & {
+  @query("wa-drawer") private drawer!: HTMLElement & {
     open?: boolean;
     show?: () => void;
     hide?: () => void;
@@ -53,7 +53,7 @@ export class NavChild extends LitElement {
       display: flex;
       gap: 0.5rem;
     }
-    input[type='search'] {
+    input[type="search"] {
       flex: 1;
       padding: 0.5rem;
       border: 1px solid var(--wa-color-surface-border, #ccc);
@@ -103,20 +103,16 @@ export class NavChild extends LitElement {
 
   private onLogout = async (): Promise<void> => {
     try {
-      await api.post('/api/auth/logout');
+      await api.post("/api/auth/logout");
     } finally {
-      window.location.href = '/profiles';
+      window.location.href = "/profiles";
     }
   };
 
   override render() {
     return html`
       <nav aria-label="Main navigation">
-        <button
-          type="button"
-          aria-label="Open navigation menu"
-          @click=${this.toggleDrawer}
-        >
+        <button type="button" aria-label="Open navigation menu" @click=${this.toggleDrawer}>
           ☰
         </button>
         <a href="/child/home" class="brand">HomeTube</a>
@@ -124,9 +120,7 @@ export class NavChild extends LitElement {
           <hometube-search-bar></hometube-search-bar>
         </div>
         <hometube-theme-toggle></hometube-theme-toggle>
-        ${this.displayName
-          ? html`<span aria-hidden="true">${this.displayName}</span>`
-          : null}
+        ${this.displayName ? html`<span aria-hidden="true">${this.displayName}</span>` : null}
         <a href="/profiles" aria-label="Switch profile">Switch</a>
         <button type="button" @click=${this.onLogout}>Log out</button>
       </nav>
@@ -137,6 +131,7 @@ export class NavChild extends LitElement {
           <li><a href="/child/channels">Channels</a></li>
           <li><a href="/child/playlists">Playlists</a></li>
           <li><a href="/child/bookmarks">Bookmarks</a></li>
+          <li><a href="/child/downloads">Downloads</a></li>
         </ul>
       </wa-drawer>
     `;
@@ -145,6 +140,6 @@ export class NavChild extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-nav-child': NavChild;
+    "hometube-nav-child": NavChild;
   }
 }

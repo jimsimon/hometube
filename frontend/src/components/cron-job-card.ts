@@ -17,10 +17,10 @@
  * ARIA live region.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
+import { api } from "../services/api.js";
 
 interface CronJob {
   id: number;
@@ -42,20 +42,20 @@ interface CronRun {
   job_id: number;
   started_at: number;
   finished_at: number | null;
-  status: 'running' | 'success' | 'failure';
+  status: "running" | "success" | "failure";
   message: string | null;
   output: string | null;
 }
 
-@customElement('hometube-cron-job-card')
+@customElement("hometube-cron-job-card")
 export class CronJobCard extends LitElement {
-  @property({ type: Number, attribute: 'job-id' }) jobId = 0;
+  @property({ type: Number, attribute: "job-id" }) jobId = 0;
   @property({ attribute: false }) job: CronJob | null = null;
 
   @state() private runs: CronRun[] = [];
   @state() private historyOpen = false;
   @state() private busy = false;
-  @state() private status = '';
+  @state() private status = "";
 
   static styles = css`
     :host {
@@ -151,7 +151,7 @@ export class CronJobCard extends LitElement {
   `;
 
   private fmtDate(ts: number | null): string {
-    if (!ts) return '—';
+    if (!ts) return "—";
     return new Date(ts * 1000).toLocaleString();
   }
 
@@ -180,7 +180,7 @@ export class CronJobCard extends LitElement {
       this.job = await api.put<CronJob>(`/api/cron/jobs/${this.jobId}`, {
         enabled,
       });
-      this.status = enabled ? 'Job enabled.' : 'Job disabled.';
+      this.status = enabled ? "Job enabled." : "Job disabled.";
       this.dispatchChanged();
     } catch (err) {
       this.status = `Failed to toggle: ${(err as Error).message}`;
@@ -191,10 +191,10 @@ export class CronJobCard extends LitElement {
 
   private async onRunNow(): Promise<void> {
     this.busy = true;
-    this.status = 'Running…';
+    this.status = "Running…";
     try {
       await api.post(`/api/cron/jobs/${this.jobId}/run`);
-      this.status = 'Triggered. Refreshing in a moment…';
+      this.status = "Triggered. Refreshing in a moment…";
       // After a couple of seconds reload the parent list to surface
       // the result.
       setTimeout(() => this.dispatchChanged(), 2000);
@@ -209,9 +209,7 @@ export class CronJobCard extends LitElement {
     this.historyOpen = !this.historyOpen;
     if (this.historyOpen && this.runs.length === 0) {
       try {
-        this.runs = await api.get<CronRun[]>(
-          `/api/cron/jobs/${this.jobId}/runs?limit=20`,
-        );
+        this.runs = await api.get<CronRun[]>(`/api/cron/jobs/${this.jobId}/runs?limit=20`);
       } catch (err) {
         this.status = `Could not load history: ${(err as Error).message}`;
       }
@@ -220,7 +218,7 @@ export class CronJobCard extends LitElement {
 
   private dispatchChanged(): void {
     document.dispatchEvent(
-      new CustomEvent('hometube:cron-changed', {
+      new CustomEvent("hometube:cron-changed", {
         bubbles: true,
         composed: true,
       }),
@@ -230,7 +228,7 @@ export class CronJobCard extends LitElement {
   override render() {
     if (!this.job) return html`<p>Loading job…</p>`;
     const status = this.job.last_run_status;
-    const badgeClass = status ? `badge ${status}` : 'badge';
+    const badgeClass = status ? `badge ${status}` : "badge";
     return html`
       <article aria-labelledby="job-${this.jobId}-name">
         <header>
@@ -242,8 +240,7 @@ export class CronJobCard extends LitElement {
           </div>
           <div>
             <span class=${badgeClass}>
-              ${status ?? 'never run'} ·
-              ${this.fmtDate(this.job.last_run_at)}
+              ${status ?? "never run"} · ${this.fmtDate(this.job.last_run_at)}
             </span>
           </div>
         </header>
@@ -256,19 +253,13 @@ export class CronJobCard extends LitElement {
               @change=${this.onTogglePreset}
             >
               ${this.job.allowed_presets.map(
-                (p) => html`<option
-                  value=${p}
-                  ?selected=${p === this.job!.schedule_preset}
-                >
+                (p) => html`<option value=${p} ?selected=${p === this.job!.schedule_preset}>
                   ${p}
                 </option>`,
               )}
               ${this.job.allowed_presets.includes(this.job.schedule_preset)
                 ? nothing
-                : html`<option
-                    value=${this.job.schedule_preset}
-                    selected
-                  >
+                : html`<option value=${this.job.schedule_preset} selected>
                     ${this.job.schedule_preset} (custom)
                   </option>`}
             </select>
@@ -283,16 +274,11 @@ export class CronJobCard extends LitElement {
             Enabled
           </label>
           <span>Next: ${this.fmtDate(this.job.next_run_at)}</span>
-          <button
-            type="button"
-            class="primary"
-            ?disabled=${this.busy}
-            @click=${this.onRunNow}
-          >
+          <button type="button" class="primary" ?disabled=${this.busy} @click=${this.onRunNow}>
             Run now
           </button>
           <button type="button" @click=${this.toggleHistory}>
-            ${this.historyOpen ? 'Hide history' : 'Show history'}
+            ${this.historyOpen ? "Hide history" : "Show history"}
           </button>
         </div>
         <div class="live" role="status" aria-live="polite">${this.status}</div>
@@ -302,8 +288,7 @@ export class CronJobCard extends LitElement {
                 ? html`<li>No runs yet.</li>`
                 : this.runs.map(
                     (r) => html`<li>
-                      <strong>${r.status}</strong> ·
-                      ${this.fmtDate(r.started_at)}
+                      <strong>${r.status}</strong> · ${this.fmtDate(r.started_at)}
                       ${r.message ? html` — ${r.message}` : nothing}
                       ${r.output
                         ? html`<details>
@@ -322,6 +307,6 @@ export class CronJobCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-cron-job-card': CronJobCard;
+    "hometube-cron-job-card": CronJobCard;
   }
 }

@@ -6,20 +6,20 @@
  * asynchronous.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { LikeRow } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { LikeRow } from "../types/index.js";
 
-@customElement('hometube-like-button')
+@customElement("hometube-like-button")
 export class LikeButton extends LitElement {
-  @property({ type: String, attribute: 'video-id' })
-  videoId = '';
+  @property({ type: String, attribute: "video-id" })
+  videoId = "";
 
   @state() private liked = false;
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -56,13 +56,13 @@ export class LikeButton extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('videoId')) void this.refresh();
+    if (changed.has("videoId")) void this.refresh();
   }
 
   private async refresh(): Promise<void> {
     if (!this.videoId) return;
     try {
-      const likes = await api.get<LikeRow[]>('/api/likes');
+      const likes = await api.get<LikeRow[]>("/api/likes");
       this.liked = likes.some((l) => l.video_id === this.videoId);
     } catch {
       // Silent.
@@ -72,7 +72,7 @@ export class LikeButton extends LitElement {
   private async onToggle(): Promise<void> {
     if (this.busy || !this.videoId) return;
     this.busy = true;
-    this.error = '';
+    this.error = "";
     const wasLiked = this.liked;
     try {
       if (wasLiked) {
@@ -83,8 +83,7 @@ export class LikeButton extends LitElement {
         this.liked = true;
       }
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.busy = false;
     }
@@ -94,24 +93,22 @@ export class LikeButton extends LitElement {
     return html`
       <button
         type="button"
-        class=${this.liked ? 'liked' : ''}
+        class=${this.liked ? "liked" : ""}
         ?disabled=${this.busy}
         aria-pressed=${this.liked}
-        aria-label=${this.liked ? 'Unlike video' : 'Like video'}
+        aria-label=${this.liked ? "Unlike video" : "Like video"}
         @click=${this.onToggle}
       >
-        <span class="icon" aria-hidden="true">${this.liked ? '♥' : '♡'}</span>
-        ${this.liked ? 'Liked' : 'Like'}
+        <span class="icon" aria-hidden="true">${this.liked ? "♥" : "♡"}</span>
+        ${this.liked ? "Liked" : "Like"}
       </button>
-      ${this.error
-        ? html`<span class="error" role="alert">${this.error}</span>`
-        : null}
+      ${this.error ? html`<span class="error" role="alert">${this.error}</span>` : null}
     `;
   }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-like-button': LikeButton;
+    "hometube-like-button": LikeButton;
   }
 }

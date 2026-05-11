@@ -16,26 +16,26 @@
  * underlying data row by row.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, query, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, query, state } from "lit/decorators.js";
 
 interface DailyEntry {
   date: string;
   minutes: number;
 }
 
-@customElement('hometube-activity-chart')
+@customElement("hometube-activity-chart")
 export class ActivityChart extends LitElement {
   /**
    * JSON string `[{date:"YYYY-MM-DD", minutes:N}]`. Setting this as an
    * attribute lets server-rendered HTML pre-populate the chart.
    */
   @property({ type: String })
-  data = '[]';
+  data = "[]";
 
   @state() private parsed: DailyEntry[] = [];
 
-  @query('canvas') private canvas!: HTMLCanvasElement;
+  @query("canvas") private canvas!: HTMLCanvasElement;
 
   static styles = css`
     :host {
@@ -62,7 +62,7 @@ export class ActivityChart extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('data')) {
+    if (changed.has("data")) {
       this.parsed = this.parseData();
     }
     this.draw();
@@ -71,12 +71,12 @@ export class ActivityChart extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.parsed = this.parseData();
-    window.addEventListener('resize', this.onResize);
+    window.addEventListener("resize", this.onResize);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener("resize", this.onResize);
   }
 
   private onResize = (): void => {
@@ -88,8 +88,7 @@ export class ActivityChart extends LitElement {
       const v = JSON.parse(this.data);
       if (!Array.isArray(v)) return [];
       return v.filter(
-        (x): x is DailyEntry =>
-          typeof x?.date === 'string' && typeof x?.minutes === 'number',
+        (x): x is DailyEntry => typeof x?.date === "string" && typeof x?.minutes === "number",
       );
     } catch {
       return [];
@@ -99,7 +98,7 @@ export class ActivityChart extends LitElement {
   private draw(): void {
     const canvas = this.canvas;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
@@ -111,17 +110,14 @@ export class ActivityChart extends LitElement {
     ctx.clearRect(0, 0, rect.width, rect.height);
 
     const styles = getComputedStyle(this);
-    const barColor =
-      styles.getPropertyValue('--wa-color-brand-fill').trim() || '#2563eb';
-    const textColor =
-      styles.getPropertyValue('--wa-color-text-quiet').trim() || '#6b7280';
-    const axisColor =
-      styles.getPropertyValue('--wa-color-surface-border').trim() || '#d1d5db';
+    const barColor = styles.getPropertyValue("--wa-color-brand-fill").trim() || "#2563eb";
+    const textColor = styles.getPropertyValue("--wa-color-text-quiet").trim() || "#6b7280";
+    const axisColor = styles.getPropertyValue("--wa-color-surface-border").trim() || "#d1d5db";
 
     if (this.parsed.length === 0) {
       ctx.fillStyle = textColor;
-      ctx.font = '12px system-ui, sans-serif';
-      ctx.fillText('No activity yet.', 8, 20);
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.fillText("No activity yet.", 8, 20);
       return;
     }
 
@@ -144,9 +140,9 @@ export class ActivityChart extends LitElement {
 
     // Y-axis labels (0, max/2, max).
     ctx.fillStyle = textColor;
-    ctx.font = '11px system-ui, sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'right';
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
     const yTicks = [0, Math.round(maxMinutes / 2), maxMinutes];
     for (const t of yTicks) {
       const y = padTop + h - (t / maxMinutes) * h;
@@ -173,7 +169,7 @@ export class ActivityChart extends LitElement {
 
     // X-axis labels: first / middle / last.
     ctx.fillStyle = textColor;
-    ctx.textAlign = 'center';
+    ctx.textAlign = "center";
     const labels: { i: number; date: string }[] = [];
     if (this.parsed.length > 0) {
       const first = this.parsed[0];
@@ -196,23 +192,23 @@ export class ActivityChart extends LitElement {
 
   private shortDate(iso: string): string {
     // "YYYY-MM-DD" → "Mar 14"
-    const parts = iso.split('-');
+    const parts = iso.split("-");
     if (parts.length !== 3) return iso;
     const month = Number(parts[1]);
     const day = Number(parts[2]);
     const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
     ];
     if (Number.isNaN(month) || Number.isNaN(day) || month < 1 || month > 12) {
       return iso;
@@ -221,7 +217,7 @@ export class ActivityChart extends LitElement {
   }
 
   private summary(): string {
-    if (this.parsed.length === 0) return 'No activity yet.';
+    if (this.parsed.length === 0) return "No activity yet.";
     let total = 0;
     let peakDay = this.parsed[0]!;
     for (const d of this.parsed) {
@@ -261,6 +257,6 @@ export class ActivityChart extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-activity-chart': ActivityChart;
+    "hometube-activity-chart": ActivityChart;
   }
 }

@@ -7,23 +7,23 @@
  * `hometube:video-ended`) to optionally auto-advance.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api } from '../services/api.js';
-import type { ChildSettings, UpNextItem } from '../types/index.js';
+import { api } from "../services/api.js";
+import type { ChildSettings, UpNextItem } from "../types/index.js";
 
-@customElement('hometube-up-next')
+@customElement("hometube-up-next")
 export class UpNext extends LitElement {
-  @property({ type: String, attribute: 'video-id' })
-  videoId = '';
+  @property({ type: String, attribute: "video-id" })
+  videoId = "";
 
   @property({ type: String })
-  from = '';
+  from = "";
 
   @state() private items: UpNextItem[] = [];
   @state() private settings: ChildSettings | null = null;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -88,22 +88,16 @@ export class UpNext extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    document.addEventListener(
-      'hometube:video-ended',
-      this.onVideoEnded as EventListener,
-    );
+    document.addEventListener("hometube:video-ended", this.onVideoEnded as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    document.removeEventListener(
-      'hometube:video-ended',
-      this.onVideoEnded as EventListener,
-    );
+    document.removeEventListener("hometube:video-ended", this.onVideoEnded as EventListener);
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('videoId') || changed.has('from')) {
+    if (changed.has("videoId") || changed.has("from")) {
       void this.load();
     }
   }
@@ -111,15 +105,13 @@ export class UpNext extends LitElement {
   private async load(): Promise<void> {
     if (!this.videoId) return;
     const params = new URLSearchParams();
-    if (this.from) params.set('from', this.from);
-    params.set('current_video', this.videoId);
-    params.set('limit', '10');
+    if (this.from) params.set("from", this.from);
+    params.set("current_video", this.videoId);
+    params.set("limit", "10");
     try {
       const [items, settings] = await Promise.all([
         api.get<UpNextItem[]>(`/api/feed/up-next?${params.toString()}`),
-        api
-          .get<ChildSettings>('/api/children/me/settings')
-          .catch(() => null),
+        api.get<ChildSettings>("/api/children/me/settings").catch(() => null),
       ]);
       this.items = items;
       this.settings = settings;
@@ -136,12 +128,12 @@ export class UpNext extends LitElement {
     if (!next) return;
     const url = new URL(window.location.href);
     url.pathname = `/child/video/${encodeURIComponent(next.video_id)}`;
-    if (this.from) url.searchParams.set('from', this.from);
-    else url.searchParams.delete('from');
+    if (this.from) url.searchParams.set("from", this.from);
+    else url.searchParams.delete("from");
     // Track auto-advance count via sessionStorage so the player can
     // refuse it if the autoplay_max_consecutive cap is reached.
-    const key = 'hometube-autoplay-count';
-    const current = Number(sessionStorage.getItem(key) ?? '0');
+    const key = "hometube-autoplay-count";
+    const current = Number(sessionStorage.getItem(key) ?? "0");
     sessionStorage.setItem(key, String(current + 1));
     if (
       this.settings.autoplay_max_consecutive != null &&
@@ -149,7 +141,7 @@ export class UpNext extends LitElement {
     ) {
       // Cap reached — surface a continue prompt instead of navigating.
       this.dispatchEvent(
-        new CustomEvent('hometube:autoplay-cap-reached', {
+        new CustomEvent("hometube:autoplay-cap-reached", {
           bubbles: true,
           composed: true,
           detail: { nextVideoId: next.video_id },
@@ -176,7 +168,7 @@ export class UpNext extends LitElement {
                     <a
                       href="/child/video/${encodeURIComponent(it.video_id)}${this.from
                         ? `?from=${encodeURIComponent(this.from)}`
-                        : ''}"
+                        : ""}"
                     >
                       ${it.thumbnail_url
                         ? html`<img src=${it.thumbnail_url} alt="" />`
@@ -184,9 +176,7 @@ export class UpNext extends LitElement {
                       <div>
                         <div class="row-title">${it.title}</div>
                         ${it.channel_title
-                          ? html`<div class="row-channel">
-                              ${it.channel_title}
-                            </div>`
+                          ? html`<div class="row-channel">${it.channel_title}</div>`
                           : null}
                       </div>
                     </a>
@@ -201,6 +191,6 @@ export class UpNext extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-up-next': UpNext;
+    "hometube-up-next": UpNext;
   }
 }

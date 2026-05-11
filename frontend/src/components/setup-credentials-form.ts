@@ -12,10 +12,10 @@
  * advance to the next step.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
 export interface CredentialsPayload {
   google_client_id: string;
@@ -25,24 +25,24 @@ export interface CredentialsPayload {
 }
 
 type Status =
-  | { kind: 'idle' }
-  | { kind: 'testing' }
-  | { kind: 'tested-ok' }
-  | { kind: 'saving' }
-  | { kind: 'saved' }
-  | { kind: 'error'; message: string };
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "tested-ok" }
+  | { kind: "saving" }
+  | { kind: "saved" }
+  | { kind: "error"; message: string };
 
-@customElement('hometube-setup-credentials-form')
+@customElement("hometube-setup-credentials-form")
 export class SetupCredentialsForm extends LitElement {
   /**
    * Pre-populated redirect URI computed server-side from the request
    * `Host` header. Editable, so the parent can override it (e.g., when
    * accessing through a reverse proxy).
    */
-  @property({ type: String, attribute: 'suggested-redirect-uri' })
-  suggestedRedirectUri = '';
+  @property({ type: String, attribute: "suggested-redirect-uri" })
+  suggestedRedirectUri = "";
 
-  @state() private status: Status = { kind: 'idle' };
+  @state() private status: Status = { kind: "idle" };
 
   static styles = css`
     :host {
@@ -102,58 +102,57 @@ export class SetupCredentialsForm extends LitElement {
   private getValues(): CredentialsPayload {
     const root = this.renderRoot as ShadowRoot;
     const v = (id: string) =>
-      (root.getElementById(id) as HTMLInputElement | null)?.value.trim() ??
-      '';
+      (root.getElementById(id) as HTMLInputElement | null)?.value.trim() ?? "";
     return {
-      google_client_id: v('client-id'),
-      google_client_secret: v('client-secret'),
-      youtube_api_key: v('api-key'),
-      redirect_uri: v('redirect-uri') || this.suggestedRedirectUri,
+      google_client_id: v("client-id"),
+      google_client_secret: v("client-secret"),
+      youtube_api_key: v("api-key"),
+      redirect_uri: v("redirect-uri") || this.suggestedRedirectUri,
     };
   }
 
   private async onTest(e: Event): Promise<void> {
     e.preventDefault();
-    this.status = { kind: 'testing' };
+    this.status = { kind: "testing" };
     try {
-      await api.post('/api/setup/test-credentials', this.getValues());
-      this.status = { kind: 'tested-ok' };
+      await api.post("/api/setup/test-credentials", this.getValues());
+      this.status = { kind: "tested-ok" };
     } catch (err) {
-      this.status = { kind: 'error', message: this.errorMessage(err) };
+      this.status = { kind: "error", message: this.errorMessage(err) };
     }
   }
 
   private async onSubmit(e: Event): Promise<void> {
     e.preventDefault();
-    this.status = { kind: 'saving' };
+    this.status = { kind: "saving" };
     const payload = this.getValues();
     try {
-      await api.post('/api/setup/credentials', payload);
-      this.status = { kind: 'saved' };
+      await api.post("/api/setup/credentials", payload);
+      this.status = { kind: "saved" };
       this.dispatchEvent(
-        new CustomEvent('setup-credentials-saved', {
+        new CustomEvent("setup-credentials-saved", {
           bubbles: true,
           composed: true,
           detail: payload,
         }),
       );
     } catch (err) {
-      this.status = { kind: 'error', message: this.errorMessage(err) };
+      this.status = { kind: "error", message: this.errorMessage(err) };
     }
   }
 
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
-      if (typeof err.body === 'string' && err.body.length > 0) return err.body;
+      if (typeof err.body === "string" && err.body.length > 0) return err.body;
       return `Error: ${err.message}`;
     }
     if (err instanceof Error) return err.message;
-    return 'Unknown error';
+    return "Unknown error";
   }
 
   override render() {
     const status = this.status;
-    const busy = status.kind === 'testing' || status.kind === 'saving';
+    const busy = status.kind === "testing" || status.kind === "saving";
 
     return html`
       <form @submit=${this.onSubmit} novalidate>
@@ -165,20 +164,14 @@ export class SetupCredentialsForm extends LitElement {
             rel="noreferrer noopener"
             >YouTube Data API</a
           >
-          enabled and OAuth2 credentials of type "Web application".
-          Add this redirect URI to your OAuth client:
+          enabled and OAuth2 credentials of type "Web application". Add this redirect URI to your
+          OAuth client:
           <code>${this.suggestedRedirectUri}</code>.
         </p>
 
         <label for="client-id">
           Google Client ID
-          <input
-            id="client-id"
-            name="client-id"
-            type="text"
-            autocomplete="off"
-            required
-          />
+          <input id="client-id" name="client-id" type="text" autocomplete="off" required />
         </label>
 
         <label for="client-secret">
@@ -194,13 +187,7 @@ export class SetupCredentialsForm extends LitElement {
 
         <label for="api-key">
           YouTube Data API Key
-          <input
-            id="api-key"
-            name="api-key"
-            type="password"
-            autocomplete="off"
-            required
-          />
+          <input id="api-key" name="api-key" type="password" autocomplete="off" required />
         </label>
 
         <label for="redirect-uri">
@@ -215,30 +202,21 @@ export class SetupCredentialsForm extends LitElement {
         </label>
 
         <div class="actions">
-          <button
-            type="button"
-            class="secondary"
-            ?disabled=${busy}
-            @click=${this.onTest}
-          >
-            ${status.kind === 'testing' ? 'Testing…' : 'Test connection'}
+          <button type="button" class="secondary" ?disabled=${busy} @click=${this.onTest}>
+            ${status.kind === "testing" ? "Testing…" : "Test connection"}
           </button>
           <button type="submit" ?disabled=${busy}>
-            ${status.kind === 'saving' ? 'Saving…' : 'Save & continue'}
+            ${status.kind === "saving" ? "Saving…" : "Save & continue"}
           </button>
         </div>
 
-        ${status.kind === 'tested-ok'
-          ? html`<p class="status ok" role="status">
-              Looks good — Google is reachable.
-            </p>`
+        ${status.kind === "tested-ok"
+          ? html`<p class="status ok" role="status">Looks good — Google is reachable.</p>`
           : null}
-        ${status.kind === 'saved'
-          ? html`<p class="status ok" role="status">
-              Credentials saved.
-            </p>`
+        ${status.kind === "saved"
+          ? html`<p class="status ok" role="status">Credentials saved.</p>`
           : null}
-        ${status.kind === 'error'
+        ${status.kind === "error"
           ? html`<p class="status error" role="alert">${status.message}</p>`
           : null}
       </form>
@@ -248,6 +226,6 @@ export class SetupCredentialsForm extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-setup-credentials-form': SetupCredentialsForm;
+    "hometube-setup-credentials-form": SetupCredentialsForm;
   }
 }

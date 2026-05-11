@@ -6,7 +6,8 @@
 //!
 //! Routes:
 //! - `GET /api/videos/:videoId` — metadata + child access check
-//! - `GET /api/videos/:videoId/stream` — DASH manifest + filtered formats
+//! - `GET /api/videos/:videoId/stream` — JSON metadata (formats list + manifest text)
+//! - `GET /api/videos/:videoId/stream/manifest.mpd` — rewritten DASH XML
 //! - `GET /api/videos/:videoId/captions` — caption track list
 //! - `GET /api/videos/:videoId/captions/:lang` — WebVTT track
 //! - `GET /api/proxy/segment` — signed DASH segment proxy
@@ -167,6 +168,49 @@ pub async fn get_stream(
         manifest,
         formats,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// /api/videos/:videoId/stream/manifest.mpd
+// ---------------------------------------------------------------------------
+
+/// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
+/// DASH XML body directly. vidstack's dash.js provider fetches this URL
+/// to bootstrap playback; we cannot reuse the JSON `/stream` endpoint
+/// because it returns the manifest as a string field inside JSON.
+pub async fn get_stream_manifest(
+    State(state): State<AppState>,
+    current: CurrentAccount,
+    Path(video_id): Path<String>,
+) -> AppResult<Response> {
+    let cache = video_cache(&state);
+    let result = cache
+        .get_or_extract(&state.db, &state.config, &video_id)
+        .await?;
+    enforce_access(&state.db, &current, &video_id, &result).await?;
+
+    let manifest_url = result
+        .manifest_url
+        .clone()
+        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
+    let url = manifest_url.ok_or(AppError::NotFound)?;
+
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let res = reqwest::get(&url).await?;
+    if !res.status().is_success() {
+        warn!(%url, status = %res.status(), "non-2xx fetching DASH manifest");
+        return Err(AppError::NotFound);
+    }
+    let body = res.text().await?;
+    let rewritten = dash::rewrite_manifest(&secret, &video_id, &body)?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/dash+xml".parse().unwrap(),
+    );
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    Ok((StatusCode::OK, headers, rewritten).into_response())
 }
 
 // ---------------------------------------------------------------------------

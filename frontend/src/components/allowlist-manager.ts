@@ -10,10 +10,10 @@
  * dropdown changes.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 import {
   pickThumbnail,
   type AllowlistedChannel,
@@ -21,23 +21,23 @@ import {
   type AllowlistedVideo,
   type SearchItem,
   type SearchResponse,
-} from '../types/index.js';
+} from "../types/index.js";
 
-type Kind = 'channel' | 'playlist' | 'video';
+type Kind = "channel" | "playlist" | "video";
 
-@customElement('hometube-allowlist-manager')
+@customElement("hometube-allowlist-manager")
 export class AllowlistManager extends LitElement {
-  @property({ type: Number, attribute: 'child-id' })
+  @property({ type: Number, attribute: "child-id" })
   childId: number | null = null;
 
-  @state() private activeTab: Kind = 'channel';
+  @state() private activeTab: Kind = "channel";
   @state() private channels: AllowlistedChannel[] = [];
   @state() private playlists: AllowlistedPlaylist[] = [];
   @state() private videos: AllowlistedVideo[] = [];
-  @state() private searchQ = '';
+  @state() private searchQ = "";
   @state() private searchResults: SearchItem[] = [];
   @state() private searching = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -50,8 +50,8 @@ export class AllowlistManager extends LitElement {
       align-items: center;
       margin-block: 1rem;
     }
-    input[type='search'],
-    input[type='text'] {
+    input[type="search"],
+    input[type="text"] {
       flex: 1 1 16rem;
       padding: 0.5rem;
       border: 1px solid var(--wa-color-surface-border, #ccc);
@@ -118,7 +118,7 @@ export class AllowlistManager extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('childId') && this.childId != null) {
+    if (changed.has("childId") && this.childId != null) {
       void this.refreshAll();
     }
   }
@@ -127,15 +127,9 @@ export class AllowlistManager extends LitElement {
     if (this.childId == null) return;
     try {
       const [c, p, v] = await Promise.all([
-        api.get<AllowlistedChannel[]>(
-          `/api/children/${this.childId}/allowlist/channels`,
-        ),
-        api.get<AllowlistedPlaylist[]>(
-          `/api/children/${this.childId}/allowlist/playlists`,
-        ),
-        api.get<AllowlistedVideo[]>(
-          `/api/children/${this.childId}/allowlist/videos`,
-        ),
+        api.get<AllowlistedChannel[]>(`/api/children/${this.childId}/allowlist/channels`),
+        api.get<AllowlistedPlaylist[]>(`/api/children/${this.childId}/allowlist/playlists`),
+        api.get<AllowlistedVideo[]>(`/api/children/${this.childId}/allowlist/videos`),
       ]);
       this.channels = c;
       this.playlists = p;
@@ -148,13 +142,13 @@ export class AllowlistManager extends LitElement {
   private setTab(kind: Kind): void {
     this.activeTab = kind;
     this.searchResults = [];
-    this.searchQ = '';
+    this.searchQ = "";
   }
 
   private async runSearch(): Promise<void> {
     if (!this.searchQ.trim()) return;
     this.searching = true;
-    this.error = '';
+    this.error = "";
     try {
       const res = await api.get<SearchResponse>(
         `/api/parent/search?q=${encodeURIComponent(this.searchQ)}&type=${this.activeTab}`,
@@ -171,9 +165,9 @@ export class AllowlistManager extends LitElement {
     if (this.childId == null) return;
     const base = `/api/children/${this.childId}/allowlist/${this.activeTab}s`;
     const payload =
-      this.activeTab === 'channel'
+      this.activeTab === "channel"
         ? { channel_id: item.id }
-        : this.activeTab === 'playlist'
+        : this.activeTab === "playlist"
           ? { playlist_id: item.id }
           : { video_id: item.id };
     try {
@@ -201,12 +195,12 @@ export class AllowlistManager extends LitElement {
     }
     return html`
       <div role="tablist" class="row">
-        ${(['channel', 'playlist', 'video'] as Kind[]).map(
+        ${(["channel", "playlist", "video"] as Kind[]).map(
           (k) => html`
             <button
               role="tab"
-              class=${this.activeTab === k ? '' : 'secondary'}
-              aria-selected=${this.activeTab === k ? 'true' : 'false'}
+              class=${this.activeTab === k ? "" : "secondary"}
+              aria-selected=${this.activeTab === k ? "true" : "false"}
               @click=${() => this.setTab(k)}
             >
               ${k.charAt(0).toUpperCase() + k.slice(1)}s
@@ -222,19 +216,17 @@ export class AllowlistManager extends LitElement {
           type="search"
           placeholder=${`Search ${this.activeTab}s on YouTube`}
           .value=${this.searchQ}
-          @input=${(e: Event) =>
-            (this.searchQ = (e.target as HTMLInputElement).value)}
+          @input=${(e: Event) => (this.searchQ = (e.target as HTMLInputElement).value)}
           @keydown=${(e: KeyboardEvent) => {
-            if (e.key === 'Enter') void this.runSearch();
+            if (e.key === "Enter") void this.runSearch();
           }}
         />
         <button @click=${() => void this.runSearch()} ?disabled=${this.searching}>
-          ${this.searching ? 'Searching…' : 'Search'}
+          ${this.searching ? "Searching…" : "Search"}
         </button>
       </div>
 
       ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
-
       ${this.searchResults.length > 0
         ? html`
             <h3>Add a result</h3>
@@ -242,17 +234,11 @@ export class AllowlistManager extends LitElement {
               ${this.searchResults.map(
                 (item) => html`
                   <div class="card">
-                    <img
-                      src=${pickThumbnail(item.thumbnails) ?? ''}
-                      alt=""
-                      loading="lazy"
-                    />
+                    <img src=${pickThumbnail(item.thumbnails) ?? ""} alt="" loading="lazy" />
                     <div class="meta">
                       <strong>${item.title}</strong>
-                      <span class="empty">${item.channel_title ?? ''}</span>
-                      <div
-                        style="display: flex; gap: 0.25rem; flex-wrap: wrap;"
-                      >
+                      <span class="empty">${item.channel_title ?? ""}</span>
+                      <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
                         <a
                           class="secondary"
                           style="padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--wa-color-surface-border); text-decoration: none; color: inherit; font: inherit;"
@@ -285,19 +271,14 @@ export class AllowlistManager extends LitElement {
   }
 
   private renderCurrent() {
-    if (this.activeTab === 'channel') {
-      if (this.channels.length === 0)
-        return html`<p class="empty">No channels yet.</p>`;
+    if (this.activeTab === "channel") {
+      if (this.channels.length === 0) return html`<p class="empty">No channels yet.</p>`;
       return html`
         <div class="grid">
           ${this.channels.map(
             (c) => html`
               <div class="card">
-                <img
-                  src=${c.channel_thumbnail_url ?? ''}
-                  alt=""
-                  loading="lazy"
-                />
+                <img src=${c.channel_thumbnail_url ?? ""} alt="" loading="lazy" />
                 <div class="meta">
                   <strong>${c.channel_title}</strong>
                   <button
@@ -314,19 +295,14 @@ export class AllowlistManager extends LitElement {
         </div>
       `;
     }
-    if (this.activeTab === 'playlist') {
-      if (this.playlists.length === 0)
-        return html`<p class="empty">No playlists yet.</p>`;
+    if (this.activeTab === "playlist") {
+      if (this.playlists.length === 0) return html`<p class="empty">No playlists yet.</p>`;
       return html`
         <div class="grid">
           ${this.playlists.map(
             (p) => html`
               <div class="card">
-                <img
-                  src=${p.playlist_thumbnail_url ?? ''}
-                  alt=""
-                  loading="lazy"
-                />
+                <img src=${p.playlist_thumbnail_url ?? ""} alt="" loading="lazy" />
                 <div class="meta">
                   <strong>${p.playlist_title}</strong>
                   <button
@@ -343,17 +319,16 @@ export class AllowlistManager extends LitElement {
         </div>
       `;
     }
-    if (this.videos.length === 0)
-      return html`<p class="empty">No videos yet.</p>`;
+    if (this.videos.length === 0) return html`<p class="empty">No videos yet.</p>`;
     return html`
       <div class="grid">
         ${this.videos.map(
           (v) => html`
             <div class="card">
-              <img src=${v.video_thumbnail_url ?? ''} alt="" loading="lazy" />
+              <img src=${v.video_thumbnail_url ?? ""} alt="" loading="lazy" />
               <div class="meta">
                 <strong>${v.video_title}</strong>
-                <span class="empty">${v.channel_title ?? ''}</span>
+                <span class="empty">${v.channel_title ?? ""}</span>
                 <button
                   type="button"
                   class="secondary"
@@ -372,6 +347,6 @@ export class AllowlistManager extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-allowlist-manager': AllowlistManager;
+    "hometube-allowlist-manager": AllowlistManager;
   }
 }

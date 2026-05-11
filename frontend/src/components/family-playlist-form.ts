@@ -10,26 +10,23 @@
  * (manager / detail) can refresh.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, query, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type {
-  AccountSummary,
-  FamilyPlaylistDetail,
-} from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { AccountSummary, FamilyPlaylistDetail } from "../types/index.js";
 
-@customElement('hometube-family-playlist-form')
+@customElement("hometube-family-playlist-form")
 export class FamilyPlaylistForm extends LitElement {
   @state() private existing: FamilyPlaylistDetail | null = null;
-  @state() private titleValue = '';
-  @state() private description = '';
+  @state() private titleValue = "";
+  @state() private description = "";
   @state() private childIds: number[] = [];
   @state() private childrenList: AccountSummary[] = [];
-  @state() private error = '';
+  @state() private error = "";
   @state() private saving = false;
 
-  @query('wa-dialog') private dialog!: HTMLElement & {
+  @query("wa-dialog") private dialog!: HTMLElement & {
     open?: boolean;
     show?: () => void;
     hide?: () => void;
@@ -49,7 +46,7 @@ export class FamilyPlaylistForm extends LitElement {
       font-weight: 600;
       font-size: 0.95rem;
     }
-    input[type='text'],
+    input[type="text"],
     textarea {
       width: 100%;
       padding: 0.5rem;
@@ -101,18 +98,16 @@ export class FamilyPlaylistForm extends LitElement {
   /** Open in create mode (no existing) or edit mode (existing). */
   open(existing?: FamilyPlaylistDetail): void {
     this.existing = existing ?? null;
-    this.titleValue = existing?.title ?? '';
-    this.description = existing?.description ?? '';
+    this.titleValue = existing?.title ?? "";
+    this.description = existing?.description ?? "";
     this.childIds = existing ? [...existing.child_ids] : [];
-    this.error = '';
+    this.error = "";
     this.dialog?.show?.();
   }
 
   private async loadChildren(): Promise<void> {
     try {
-      this.childrenList = await api.get<AccountSummary[]>(
-        '/api/accounts?type=child',
-      );
+      this.childrenList = await api.get<AccountSummary[]>("/api/accounts?type=child");
     } catch {
       // ignore: the form still works for the title/description path.
     }
@@ -131,34 +126,28 @@ export class FamilyPlaylistForm extends LitElement {
   private onSubmit = async (e: Event): Promise<void> => {
     e.preventDefault();
     if (!this.titleValue.trim()) {
-      this.error = 'Title is required';
+      this.error = "Title is required";
       return;
     }
     this.saving = true;
-    this.error = '';
+    this.error = "";
     try {
       let saved: FamilyPlaylistDetail;
       if (this.existing) {
-        saved = await api.put<FamilyPlaylistDetail>(
-          `/api/family-playlists/${this.existing.id}`,
-          {
-            title: this.titleValue,
-            description: this.description,
-            child_ids: this.childIds,
-          },
-        );
+        saved = await api.put<FamilyPlaylistDetail>(`/api/family-playlists/${this.existing.id}`, {
+          title: this.titleValue,
+          description: this.description,
+          child_ids: this.childIds,
+        });
       } else {
-        saved = await api.post<FamilyPlaylistDetail>(
-          '/api/family-playlists',
-          {
-            title: this.titleValue,
-            description: this.description,
-            child_ids: this.childIds,
-          },
-        );
+        saved = await api.post<FamilyPlaylistDetail>("/api/family-playlists", {
+          title: this.titleValue,
+          description: this.description,
+          child_ids: this.childIds,
+        });
       }
       this.dispatchEvent(
-        new CustomEvent('hometube:family-playlist-saved', {
+        new CustomEvent("hometube:family-playlist-saved", {
           detail: saved,
           bubbles: true,
           composed: true,
@@ -166,17 +155,14 @@ export class FamilyPlaylistForm extends LitElement {
       );
       this.dialog?.hide?.();
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.saving = false;
     }
   };
 
   override render() {
-    const dialogLabel = this.existing
-      ? 'Edit family playlist'
-      : 'Create family playlist';
+    const dialogLabel = this.existing ? "Edit family playlist" : "Create family playlist";
     return html`
       <wa-dialog label=${dialogLabel} aria-label=${dialogLabel}>
         <form @submit=${this.onSubmit}>
@@ -186,8 +172,7 @@ export class FamilyPlaylistForm extends LitElement {
               type="text"
               required
               .value=${this.titleValue}
-              @input=${(e: Event) =>
-                (this.titleValue = (e.target as HTMLInputElement).value)}
+              @input=${(e: Event) => (this.titleValue = (e.target as HTMLInputElement).value)}
             />
           </label>
           <label>
@@ -195,8 +180,7 @@ export class FamilyPlaylistForm extends LitElement {
             <textarea
               rows="3"
               .value=${this.description}
-              @input=${(e: Event) =>
-                (this.description = (e.target as HTMLTextAreaElement).value)}
+              @input=${(e: Event) => (this.description = (e.target as HTMLTextAreaElement).value)}
             ></textarea>
           </label>
           <fieldset class="members">
@@ -210,29 +194,20 @@ export class FamilyPlaylistForm extends LitElement {
                         type="checkbox"
                         .checked=${this.childIds.includes(c.id)}
                         @change=${(e: Event) =>
-                          this.toggleChild(
-                            c.id,
-                            (e.target as HTMLInputElement).checked,
-                          )}
+                          this.toggleChild(c.id, (e.target as HTMLInputElement).checked)}
                       />
                       ${c.display_name}
                     </label>
                   `,
                 )}
           </fieldset>
-          ${this.error
-            ? html`<p class="error" role="alert">${this.error}</p>`
-            : nothing}
+          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
           <div class="actions">
-            <button
-              type="button"
-              @click=${() => this.dialog?.hide?.()}
-              ?disabled=${this.saving}
-            >
+            <button type="button" @click=${() => this.dialog?.hide?.()} ?disabled=${this.saving}>
               Cancel
             </button>
             <button class="primary" type="submit" ?disabled=${this.saving}>
-              ${this.saving ? 'Saving…' : 'Save'}
+              ${this.saving ? "Saving…" : "Save"}
             </button>
           </div>
         </form>
@@ -243,6 +218,6 @@ export class FamilyPlaylistForm extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-family-playlist-form': FamilyPlaylistForm;
+    "hometube-family-playlist-form": FamilyPlaylistForm;
   }
 }

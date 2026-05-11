@@ -8,21 +8,21 @@
  * Emits a bubbling `setup-pin-saved` CustomEvent on success.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 
 type Status =
-  | { kind: 'idle' }
-  | { kind: 'saving' }
-  | { kind: 'saved' }
-  | { kind: 'error'; message: string };
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "saved" }
+  | { kind: "error"; message: string };
 
-@customElement('hometube-setup-pin-input')
+@customElement("hometube-setup-pin-input")
 export class SetupPinInput extends LitElement {
-  @state() private status: Status = { kind: 'idle' };
-  @state() private localError = '';
+  @state() private status: Status = { kind: "idle" };
+  @state() private localError = "";
 
   static styles = css`
     :host {
@@ -69,37 +69,37 @@ export class SetupPinInput extends LitElement {
 
   private getValue(id: string): string {
     return (
-      (this.renderRoot as ShadowRoot).getElementById(id) as HTMLInputElement | null
-    )?.value.trim() ?? '';
+      (
+        (this.renderRoot as ShadowRoot).getElementById(id) as HTMLInputElement | null
+      )?.value.trim() ?? ""
+    );
   }
 
   private validate(pin: string, confirm: string): string | null {
-    if (!/^\d{4,6}$/.test(pin)) return 'PIN must be 4-6 digits.';
+    if (!/^\d{4,6}$/.test(pin)) return "PIN must be 4-6 digits.";
     if (pin !== confirm) return "PINs don't match.";
     return null;
   }
 
   private async onSubmit(e: Event): Promise<void> {
     e.preventDefault();
-    const pin = this.getValue('pin');
-    const confirm = this.getValue('pin-confirm');
+    const pin = this.getValue("pin");
+    const confirm = this.getValue("pin-confirm");
     const validation = this.validate(pin, confirm);
     if (validation) {
       this.localError = validation;
-      this.status = { kind: 'idle' };
+      this.status = { kind: "idle" };
       return;
     }
-    this.localError = '';
-    this.status = { kind: 'saving' };
+    this.localError = "";
+    this.status = { kind: "saving" };
     try {
-      await api.put('/api/auth/pin', { pin });
-      this.status = { kind: 'saved' };
-      this.dispatchEvent(
-        new CustomEvent('setup-pin-saved', { bubbles: true, composed: true }),
-      );
+      await api.put("/api/auth/pin", { pin });
+      this.status = { kind: "saved" };
+      this.dispatchEvent(new CustomEvent("setup-pin-saved", { bubbles: true, composed: true }));
     } catch (err) {
       this.status = {
-        kind: 'error',
+        kind: "error",
         message: this.errorMessage(err),
       };
     }
@@ -107,21 +107,18 @@ export class SetupPinInput extends LitElement {
 
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
-      if (typeof err.body === 'string' && err.body.length > 0) return err.body;
+      if (typeof err.body === "string" && err.body.length > 0) return err.body;
       return err.message;
     }
     if (err instanceof Error) return err.message;
-    return 'Unknown error';
+    return "Unknown error";
   }
 
   override render() {
-    const busy = this.status.kind === 'saving';
+    const busy = this.status.kind === "saving";
     return html`
       <form @submit=${this.onSubmit} novalidate>
-        <p>
-          Pick a 4-6 digit PIN. You'll enter it any time you switch to
-          your parent profile.
-        </p>
+        <p>Pick a 4-6 digit PIN. You'll enter it any time you switch to your parent profile.</p>
 
         <label for="pin">
           PIN
@@ -151,20 +148,16 @@ export class SetupPinInput extends LitElement {
           />
         </label>
 
-        <button type="submit" ?disabled=${busy}>
-          ${busy ? 'Saving…' : 'Save PIN'}
-        </button>
+        <button type="submit" ?disabled=${busy}>${busy ? "Saving…" : "Save PIN"}</button>
 
         ${this.localError
           ? html`<p class="status error" role="alert">${this.localError}</p>`
           : null}
-        ${this.status.kind === 'saved'
+        ${this.status.kind === "saved"
           ? html`<p class="status ok" role="status">PIN saved.</p>`
           : null}
-        ${this.status.kind === 'error'
-          ? html`<p class="status error" role="alert">
-              ${this.status.message}
-            </p>`
+        ${this.status.kind === "error"
+          ? html`<p class="status error" role="alert">${this.status.message}</p>`
           : null}
       </form>
     `;
@@ -173,6 +166,6 @@ export class SetupPinInput extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-setup-pin-input': SetupPinInput;
+    "hometube-setup-pin-input": SetupPinInput;
   }
 }

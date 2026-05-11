@@ -6,23 +6,23 @@
  * consecutive-cap.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { api, ApiError } from '../services/api.js';
-import type { ChildSettings } from '../types/index.js';
+import { api, ApiError } from "../services/api.js";
+import type { ChildSettings } from "../types/index.js";
 
-const QUALITY_OPTIONS = ['unlimited', '480p', '720p', '1080p'] as const;
+const QUALITY_OPTIONS = ["unlimited", "480p", "720p", "1080p"] as const;
 
-@customElement('hometube-child-settings-form')
+@customElement("hometube-child-settings-form")
 export class ChildSettingsForm extends LitElement {
-  @property({ type: Number, attribute: 'child-id' })
+  @property({ type: Number, attribute: "child-id" })
   childId: number | null = null;
 
   @state() private settings: ChildSettings | null = null;
   @state() private saving = false;
-  @state() private message = '';
-  @state() private error = '';
+  @state() private message = "";
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -41,7 +41,7 @@ export class ChildSettingsForm extends LitElement {
       justify-content: space-between;
     }
     select,
-    input[type='number'] {
+    input[type="number"] {
       padding: 0.25rem 0.5rem;
       border: 1px solid var(--wa-color-surface-border, #ccc);
       border-radius: 0.375rem;
@@ -72,7 +72,7 @@ export class ChildSettingsForm extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('childId') && this.childId != null) {
+    if (changed.has("childId") && this.childId != null) {
       void this.refresh();
     }
   }
@@ -80,18 +80,13 @@ export class ChildSettingsForm extends LitElement {
   private async refresh(): Promise<void> {
     if (this.childId == null) return;
     try {
-      this.settings = await api.get<ChildSettings>(
-        `/api/children/${this.childId}/settings`,
-      );
+      this.settings = await api.get<ChildSettings>(`/api/children/${this.childId}/settings`);
     } catch (err) {
       this.error = (err as Error).message;
     }
   }
 
-  private updateField<K extends keyof ChildSettings>(
-    key: K,
-    value: ChildSettings[K],
-  ): void {
+  private updateField<K extends keyof ChildSettings>(key: K, value: ChildSettings[K]): void {
     if (!this.settings) return;
     this.settings = { ...this.settings, [key]: value };
   }
@@ -100,8 +95,8 @@ export class ChildSettingsForm extends LitElement {
     e.preventDefault();
     if (this.childId == null || !this.settings) return;
     this.saving = true;
-    this.message = '';
-    this.error = '';
+    this.message = "";
+    this.error = "";
     try {
       await api.put(`/api/children/${this.childId}/settings`, {
         downloads_enabled: this.settings.downloads_enabled,
@@ -110,7 +105,7 @@ export class ChildSettingsForm extends LitElement {
         autoplay_enabled: this.settings.autoplay_enabled,
         autoplay_max_consecutive: this.settings.autoplay_max_consecutive,
       });
-      this.message = 'Saved.';
+      this.message = "Saved.";
     } catch (err) {
       this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
@@ -135,7 +130,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.downloads_enabled}
             @change=${(e: Event) =>
-              this.updateField('downloads_enabled', (e.target as HTMLInputElement).checked)}
+              this.updateField("downloads_enabled", (e.target as HTMLInputElement).checked)}
           />
         </label>
 
@@ -143,21 +138,18 @@ export class ChildSettingsForm extends LitElement {
           Maximum video quality
           <select
             id="max-quality"
-            .value=${s.max_quality ?? 'unlimited'}
+            .value=${s.max_quality ?? "unlimited"}
             @change=${(e: Event) => {
               const v = (e.target as HTMLSelectElement).value;
               this.updateField(
-                'max_quality',
-                v === 'unlimited' ? null : (v as '480p' | '720p' | '1080p'),
+                "max_quality",
+                v === "unlimited" ? null : (v as "480p" | "720p" | "1080p"),
               );
             }}
           >
             ${QUALITY_OPTIONS.map(
               (q) =>
-                html`<option
-                  value=${q}
-                  ?selected=${(s.max_quality ?? 'unlimited') === q}
-                >
+                html`<option value=${q} ?selected=${(s.max_quality ?? "unlimited") === q}>
                   ${q}
                 </option>`,
             )}
@@ -171,10 +163,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.playback_speed_locked}
             @change=${(e: Event) =>
-              this.updateField(
-                'playback_speed_locked',
-                (e.target as HTMLInputElement).checked,
-              )}
+              this.updateField("playback_speed_locked", (e.target as HTMLInputElement).checked)}
           />
         </label>
 
@@ -185,7 +174,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.autoplay_enabled}
             @change=${(e: Event) =>
-              this.updateField('autoplay_enabled', (e.target as HTMLInputElement).checked)}
+              this.updateField("autoplay_enabled", (e.target as HTMLInputElement).checked)}
           />
         </label>
 
@@ -197,28 +186,17 @@ export class ChildSettingsForm extends LitElement {
             min="1"
             max="20"
             step="1"
-            .value=${s.autoplay_max_consecutive == null
-              ? ''
-              : String(s.autoplay_max_consecutive)}
+            .value=${s.autoplay_max_consecutive == null ? "" : String(s.autoplay_max_consecutive)}
             @input=${(e: Event) => {
               const v = (e.target as HTMLInputElement).value;
-              this.updateField(
-                'autoplay_max_consecutive',
-                v === '' ? null : Number(v),
-              );
+              this.updateField("autoplay_max_consecutive", v === "" ? null : Number(v));
             }}
           />
         </label>
 
-        <button type="submit" ?disabled=${this.saving}>
-          ${this.saving ? 'Saving…' : 'Save'}
-        </button>
-        ${this.message
-          ? html`<p class="ok" role="status">${this.message}</p>`
-          : nothing}
-        ${this.error
-          ? html`<p class="error" role="alert">${this.error}</p>`
-          : nothing}
+        <button type="submit" ?disabled=${this.saving}>${this.saving ? "Saving…" : "Save"}</button>
+        ${this.message ? html`<p class="ok" role="status">${this.message}</p>` : nothing}
+        ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
       </form>
     `;
   }
@@ -226,6 +204,6 @@ export class ChildSettingsForm extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-child-settings-form': ChildSettingsForm;
+    "hometube-child-settings-form": ChildSettingsForm;
   }
 }

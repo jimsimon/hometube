@@ -15,22 +15,22 @@
  * screen-readers get periodic updates without taking focus.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
+import { LitElement, html, css } from "lit";
+import { customElement, query, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
-import type { SleepTimerRow } from '../types/index.js';
+import { ApiError, api } from "../services/api.js";
+import type { SleepTimerRow } from "../types/index.js";
 
 const MINUTE_OPTIONS = [15, 30, 45, 60];
 
-@customElement('hometube-sleep-timer')
+@customElement("hometube-sleep-timer")
 export class SleepTimer extends LitElement {
   @state() private timer: SleepTimerRow | null = null;
   @state() private now = Math.floor(Date.now() / 1000);
   @state() private busy = false;
-  @state() private error = '';
+  @state() private error = "";
 
-  @query('wa-dropdown') private dropdown!: HTMLElement & {
+  @query("wa-dropdown") private dropdown!: HTMLElement & {
     show?: () => void;
     hide?: () => void;
   };
@@ -102,11 +102,8 @@ export class SleepTimer extends LitElement {
 
   private async refresh(): Promise<void> {
     try {
-      this.timer = await api.get<SleepTimerRow | null>('/api/timer');
-      if (
-        this.timer?.timer_type === 'minutes' &&
-        this.timer.expires_at != null
-      ) {
+      this.timer = await api.get<SleepTimerRow | null>("/api/timer");
+      if (this.timer?.timer_type === "minutes" && this.timer.expires_at != null) {
         this.startTick();
       } else {
         this.stopTick();
@@ -120,14 +117,11 @@ export class SleepTimer extends LitElement {
     this.stopTick();
     this.tickHandle = window.setInterval(() => {
       this.now = Math.floor(Date.now() / 1000);
-      if (
-        this.timer?.expires_at != null &&
-        this.now >= this.timer.expires_at
-      ) {
+      if (this.timer?.expires_at != null && this.now >= this.timer.expires_at) {
         this.fireExpired();
         this.stopTick();
         // Clear server-side state too.
-        void api.delete('/api/timer').catch(() => {});
+        void api.delete("/api/timer").catch(() => {});
         this.timer = null;
       }
     }, 1_000);
@@ -142,25 +136,21 @@ export class SleepTimer extends LitElement {
 
   private fireExpired(): void {
     this.dispatchEvent(
-      new CustomEvent('hometube:sleep-timer-expired', {
+      new CustomEvent("hometube:sleep-timer-expired", {
         bubbles: true,
         composed: true,
       }),
     );
   }
 
-  private async setTimer(
-    type: 'after_video' | 'minutes',
-    minutes?: number,
-  ): Promise<void> {
+  private async setTimer(type: "after_video" | "minutes", minutes?: number): Promise<void> {
     this.busy = true;
-    this.error = '';
+    this.error = "";
     try {
-      await api.post('/api/timer', { type, minutes: minutes ?? null });
+      await api.post("/api/timer", { type, minutes: minutes ?? null });
       await this.refresh();
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.busy = false;
       this.dropdown?.hide?.();
@@ -170,7 +160,7 @@ export class SleepTimer extends LitElement {
   private async cancel(): Promise<void> {
     this.busy = true;
     try {
-      await api.delete('/api/timer');
+      await api.delete("/api/timer");
       this.timer = null;
       this.stopTick();
     } catch (err) {
@@ -182,13 +172,13 @@ export class SleepTimer extends LitElement {
   }
 
   private formatRemaining(): string {
-    if (!this.timer) return '';
-    if (this.timer.timer_type === 'after_video') return 'After this video';
-    if (this.timer.expires_at == null) return '';
+    if (!this.timer) return "";
+    if (this.timer.timer_type === "after_video") return "After this video";
+    if (this.timer.expires_at == null) return "";
     const remain = Math.max(0, this.timer.expires_at - this.now);
     const m = Math.floor(remain / 60);
     const s = remain % 60;
-    return `${m}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
   }
 
   override render() {
@@ -199,24 +189,20 @@ export class SleepTimer extends LitElement {
         <button
           slot="trigger"
           type="button"
-          class="trigger ${isActive ? 'active' : ''}"
-          aria-label=${isActive
-            ? `Sleep timer active: ${remaining}`
-            : 'Set sleep timer'}
+          class="trigger ${isActive ? "active" : ""}"
+          aria-label=${isActive ? `Sleep timer active: ${remaining}` : "Set sleep timer"}
         >
           ⏱
           ${isActive
-            ? html`<span class="countdown" aria-live="polite"
-                >${remaining}</span
-              >`
-            : ' Sleep timer'}
+            ? html`<span class="countdown" aria-live="polite">${remaining}</span>`
+            : " Sleep timer"}
         </button>
         <div class="menu" role="menu">
           <button
             type="button"
             role="menuitem"
             ?disabled=${this.busy}
-            @click=${() => void this.setTimer('after_video')}
+            @click=${() => void this.setTimer("after_video")}
           >
             Stop after this video
           </button>
@@ -226,7 +212,7 @@ export class SleepTimer extends LitElement {
                 type="button"
                 role="menuitem"
                 ?disabled=${this.busy}
-                @click=${() => void this.setTimer('minutes', m)}
+                @click=${() => void this.setTimer("minutes", m)}
               >
                 Stop in ${m} minutes
               </button>
@@ -245,15 +231,13 @@ export class SleepTimer extends LitElement {
             : null}
         </div>
       </wa-dropdown>
-      ${this.error
-        ? html`<div class="error" role="alert">${this.error}</div>`
-        : null}
+      ${this.error ? html`<div class="error" role="alert">${this.error}</div>` : null}
     `;
   }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-sleep-timer': SleepTimer;
+    "hometube-sleep-timer": SleepTimer;
   }
 }

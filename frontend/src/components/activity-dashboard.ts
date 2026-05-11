@@ -13,27 +13,27 @@
  * `child-changed` event wiring on the activity page template.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
-import { ApiError, api } from '../services/api.js';
+import { ApiError, api } from "../services/api.js";
 import type {
   ActivityHistoryEntry,
   ActivitySummary,
   SearchLogEntry,
   TopChannel,
-} from '../types/index.js';
+} from "../types/index.js";
 
-import './activity-chart.js';
-import './loading-spinner.js';
-import './error-banner.js';
+import "./activity-chart.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 const HISTORY_PAGE_SIZE = 25;
 const SEARCH_PAGE_SIZE = 25;
 
-@customElement('hometube-activity-dashboard')
+@customElement("hometube-activity-dashboard")
 export class ActivityDashboard extends LitElement {
-  @property({ type: Number, attribute: 'child-id' })
+  @property({ type: Number, attribute: "child-id" })
   childId: number | null = null;
 
   @state() private today: ActivitySummary | null = null;
@@ -44,7 +44,7 @@ export class ActivityDashboard extends LitElement {
   @state() private searchLog: SearchLogEntry[] = [];
 
   @state() private loading = false;
-  @state() private error = '';
+  @state() private error = "";
 
   static styles = css`
     :host {
@@ -106,7 +106,7 @@ export class ActivityDashboard extends LitElement {
   `;
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('childId') && this.childId != null) {
+    if (changed.has("childId") && this.childId != null) {
       void this.loadAll();
     }
   }
@@ -114,21 +114,13 @@ export class ActivityDashboard extends LitElement {
   private async loadAll(): Promise<void> {
     if (this.childId == null) return;
     this.loading = true;
-    this.error = '';
+    this.error = "";
     try {
       const [today, week, month, top, history, searchLog] = await Promise.all([
-        api.get<ActivitySummary>(
-          `/api/children/${this.childId}/activity/summary?period=day`,
-        ),
-        api.get<ActivitySummary>(
-          `/api/children/${this.childId}/activity/summary?period=week`,
-        ),
-        api.get<ActivitySummary>(
-          `/api/children/${this.childId}/activity/summary?period=month`,
-        ),
-        api.get<TopChannel[]>(
-          `/api/children/${this.childId}/activity/top-channels?period=month`,
-        ),
+        api.get<ActivitySummary>(`/api/children/${this.childId}/activity/summary?period=day`),
+        api.get<ActivitySummary>(`/api/children/${this.childId}/activity/summary?period=week`),
+        api.get<ActivitySummary>(`/api/children/${this.childId}/activity/summary?period=month`),
+        api.get<TopChannel[]>(`/api/children/${this.childId}/activity/top-channels?period=month`),
         api.get<ActivityHistoryEntry[]>(
           `/api/children/${this.childId}/activity/history?limit=${HISTORY_PAGE_SIZE}`,
         ),
@@ -143,8 +135,7 @@ export class ActivityDashboard extends LitElement {
       this.history = history;
       this.searchLog = searchLog;
     } catch (err) {
-      this.error =
-        err instanceof ApiError ? String(err.body) : (err as Error).message;
+      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
       this.loading = false;
     }
@@ -192,14 +183,10 @@ export class ActivityDashboard extends LitElement {
 
   override render() {
     if (this.childId == null) {
-      return html`<p class="empty">
-        Pick a child from the menu above to see activity.
-      </p>`;
+      return html`<p class="empty">Pick a child from the menu above to see activity.</p>`;
     }
     if (this.loading && this.today == null) {
-      return html`<hometube-loading-spinner
-        label="Loading activity…"
-      ></hometube-loading-spinner>`;
+      return html`<hometube-loading-spinner label="Loading activity…"></hometube-loading-spinner>`;
     }
 
     return html`
@@ -207,14 +194,13 @@ export class ActivityDashboard extends LitElement {
         ? html`<hometube-error-banner
             message=${this.error}
             dismissible
-            @hometube:error-dismiss=${() => (this.error = '')}
+            @hometube:error-dismiss=${() => (this.error = "")}
           ></hometube-error-banner>`
         : nothing}
 
       <div class="summary-cards" role="region" aria-label="Activity summary">
-        ${this.summaryCard('Today', this.today)}
-        ${this.summaryCard('This week', this.week)}
-        ${this.summaryCard('This month', this.month)}
+        ${this.summaryCard("Today", this.today)} ${this.summaryCard("This week", this.week)}
+        ${this.summaryCard("This month", this.month)}
       </div>
 
       <h2>Last 30 days</h2>
@@ -238,7 +224,7 @@ export class ActivityDashboard extends LitElement {
                 ${this.topChannels.map(
                   (c) => html`
                     <tr>
-                      <td>${c.channel_title ?? 'Unknown'}</td>
+                      <td>${c.channel_title ?? "Unknown"}</td>
                       <td>${this.formatMinutes(c.total_seconds)}</td>
                       <td>${c.videos_watched}</td>
                     </tr>
@@ -267,11 +253,9 @@ export class ActivityDashboard extends LitElement {
                     <tr>
                       <td>${this.formatDate(h.started_at)}</td>
                       <td>${h.video_title ?? h.video_id}</td>
-                      <td>${h.channel_title ?? '—'}</td>
+                      <td>${h.channel_title ?? "—"}</td>
                       <td>
-                        ${h.duration_seconds != null
-                          ? this.formatMinutes(h.duration_seconds)
-                          : '—'}
+                        ${h.duration_seconds != null ? this.formatMinutes(h.duration_seconds) : "—"}
                       </td>
                     </tr>
                   `,
@@ -279,10 +263,7 @@ export class ActivityDashboard extends LitElement {
               </tbody>
             </table>
             ${this.history.length >= HISTORY_PAGE_SIZE
-              ? html`<button
-                  type="button"
-                  @click=${() => void this.loadMoreHistory()}
-                >
+              ? html`<button type="button" @click=${() => void this.loadMoreHistory()}>
                   Load more history
                 </button>`
               : nothing}
@@ -313,10 +294,7 @@ export class ActivityDashboard extends LitElement {
               </tbody>
             </table>
             ${this.searchLog.length >= SEARCH_PAGE_SIZE
-              ? html`<button
-                  type="button"
-                  @click=${() => void this.loadMoreSearch()}
-                >
+              ? html`<button type="button" @click=${() => void this.loadMoreSearch()}>
                   Load more searches
                 </button>`
               : nothing}
@@ -328,12 +306,9 @@ export class ActivityDashboard extends LitElement {
     return html`
       <div class="card">
         <div class="label">${label}</div>
-        <div class="value">
-          ${summary ? this.formatMinutes(summary.total_seconds) : '—'}
-        </div>
+        <div class="value">${summary ? this.formatMinutes(summary.total_seconds) : "—"}</div>
         <div class="label">
-          ${summary?.videos_watched ?? 0} videos · ${summary?.sessions ?? 0}
-          sessions
+          ${summary?.videos_watched ?? 0} videos · ${summary?.sessions ?? 0} sessions
         </div>
       </div>
     `;
@@ -342,6 +317,6 @@ export class ActivityDashboard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'hometube-activity-dashboard': ActivityDashboard;
+    "hometube-activity-dashboard": ActivityDashboard;
   }
 }
