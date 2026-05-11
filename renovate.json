@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies"
+    },
+    {
+      "matchManagers": ["npm"],
+      "groupName": "frontend dependencies"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "groupName": "docker"
+    }
+  ],
+  "schedule": ["every weekend"],
+  "labels": ["dependencies"],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10
+}

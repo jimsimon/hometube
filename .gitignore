@@ -1,0 +1,49 @@
+# ---------- Rust ----------
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# ---------- Node / Frontend ----------
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.vite/
+frontend/.cache/
+*.tsbuildinfo
+
+# ---------- Playwright / E2E ----------
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+e2e/playwright/.cache/
+
+# ---------- App data / runtime ----------
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---------- Editor / OS ----------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- Env / secrets ----------
+.env
+.env.local
+.env.*.local
+
+# ---------- Build artifacts ----------
+*.log
+.tilt-cache/
+tilt_modules/
+
+# ---------- Kilo ----------
+.kilo/
+kilo.json
