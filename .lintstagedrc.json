@@ -1,0 +1,9 @@
+{
+  "frontend/src/**/*.{ts,js}": [
+    "sh -c 'cd frontend && npx oxfmt'",
+    "sh -c 'cd frontend && npx oxlint'"
+  ],
+  "src/**/*.rs": [
+    "cargo fmt -- --check"
+  ]
+}

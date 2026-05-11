@@ -1,0 +1,6 @@
+{
+  "src/**/*.{ts,js}": [
+    "oxfmt",
+    "oxlint"
+  ]
+}

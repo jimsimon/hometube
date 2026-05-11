@@ -1,0 +1,77 @@
+/* HomeTube global styles.
+ *
+ * Web Awesome supplies the design tokens (colors, spacing, typography) via
+ * <wa-page>. We only add minimal layout primitives here.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--wa-font-family, system-ui, sans-serif);
+  color: var(--wa-color-text-normal);
+  background: var(--wa-color-surface-default);
+  min-height: 100dvh;
+}
+
+a {
+  color: var(--wa-color-brand-on-quiet);
+}
+
+header[slot='header'] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wa-space-m);
+  padding: var(--wa-space-m) var(--wa-space-l);
+  border-bottom: 1px solid var(--wa-color-surface-border);
+}
+
+footer[slot='footer'] {
+  padding: var(--wa-space-m) var(--wa-space-l);
+  border-top: 1px solid var(--wa-color-surface-border);
+  text-align: center;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.25rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+main {
+  padding: var(--wa-space-l);
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.hero {
+  padding: var(--wa-space-2xl) 0;
+}
+
+.hero h1 {
+  margin: 0 0 var(--wa-space-m);
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+}
+
+.hero p {
+  max-width: 44rem;
+  line-height: 1.6;
+}
+
+/* Responsive grid for video/channel/playlist cards. */
+.card-grid {
+  display: grid;
+  gap: var(--wa-space-m);
+  grid-template-columns: repeat(auto-fill, minmax(min(16rem, 100%), 1fr));
+}

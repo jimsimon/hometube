@@ -1,0 +1,17 @@
+#!/bin/sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# Run lint-staged for frontend formatters/linters.
+if [ -d frontend ]; then
+  (cd frontend && npx lint-staged) || exit 1
+fi
+
+# Backend format check (only fails the commit if something is unformatted).
+if command -v cargo >/dev/null 2>&1; then
+  cargo fmt --check || {
+    echo "cargo fmt --check failed; run 'cargo fmt' and re-stage." >&2
+    exit 1
+  }
+fi

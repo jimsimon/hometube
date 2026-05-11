@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <h1>{{ title }}</h1>
+  <p>
+    A self-hosted YouTube frontend for kids. The setup wizard, profile
+    picker, and parent dashboards land in later phases — for now this
+    page just verifies the server, templates, and theme system are wired
+    together.
+  </p>
+
+  <p>
+    <a href="/api/health">/api/health</a>
+  </p>
+</section>
+{% endblock %}

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}HomeTube{% endblock %}</title>
+
+    <!-- Web Awesome stylesheet (theme tokens, base styles). -->
+    <link
+      rel="stylesheet"
+      href="https://early.webawesome.com/webawesome@3.0.0-beta.5/dist/styles/webawesome.css"
+    />
+    <!-- Web Awesome auto-loader: lazily registers components as it
+         encounters them in the DOM. -->
+    <script
+      type="module"
+      src="https://early.webawesome.com/webawesome@3.0.0-beta.5/dist/webawesome.loader.js"
+    ></script>
+
+    <link rel="stylesheet" href="/assets/styles/global.css" />
+
+    <!-- Apply persisted theme as early as possible to avoid flash. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('hometube-theme') || 'system';
+          if (t === 'system') {
+            t = matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+          }
+          document.documentElement.classList.add('wa-theme-' + t);
+        } catch (e) {}
+      })();
+    </script>
+
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    <wa-page>
+      <header slot="header">
+        <a href="/" class="brand">HomeTube</a>
+        <hometube-theme-toggle></hometube-theme-toggle>
+      </header>
+
+      <main>{% block content %}{% endblock %}</main>
+
+      <footer slot="footer">
+        <small>HomeTube &mdash; AGPL-3.0</small>
+      </footer>
+    </wa-page>
+
+    <!-- Global components used on every page. -->
+    <script type="module" src="/assets/components/theme-toggle.js"></script>
+
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

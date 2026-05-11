@@ -1,0 +1,43 @@
+{
+  "name": "hometube-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HomeTube frontend — Lit web components bundled with Vite.",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "oxlint ./src",
+    "format": "oxfmt ./src",
+    "format:check": "oxfmt --check ./src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@awesome.me/webawesome": "^3.3.1",
+    "lit": "^3.3.2",
+    "vidstack": "^1.12.9"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.3",
+    "@playwright/test": "^1.59.1",
+    "@vitest/browser": "^4.1.2",
+    "@vitest/coverage-v8": "^4.1.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.2",
+    "oxfmt": "^0.48.0",
+    "oxlint": "^1.63.0",
+    "playwright": "^1.59.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.11",
+    "vitest": "^4.1.2",
+    "workbox-build": "^7.4.1",
+    "workbox-precaching": "^7.4.1",
+    "workbox-routing": "^7.4.1",
+    "workbox-strategies": "^7.4.1"
+  }
+}
