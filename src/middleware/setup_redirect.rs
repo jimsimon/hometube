@@ -28,6 +28,11 @@ const ALLOWED_PREFIXES: &[&str] = &[
     "/api/auth",
     "/api/health",
     "/assets",
+    // Service worker + offline fallback page must always be reachable
+    // so PWA installs and offline detection still work during setup.
+    "/sw.js",
+    "/offline.html",
+    "/manifest.webmanifest",
     // Phase 15: profile picker + per-parent PIN-set page must be
     // reachable independently of the wizard, but they only matter
     // *after* setup completes (the wizard handles its own multi-account

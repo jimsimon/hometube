@@ -18,8 +18,13 @@ use axum::{
     routing::{delete as delete_route, get, post, put},
     Router,
 };
+use std::path::PathBuf;
 use tower_cookies::CookieManagerLayer;
-use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 
 use crate::middleware::{
     account_type::{require_child, require_parent},
@@ -437,11 +442,25 @@ pub fn router(state: AppState) -> Router {
     // -----------------------------------------------------------------
     // Top-level router
     // -----------------------------------------------------------------
+    // Service worker, web app manifest, and offline fallback page have
+    // to live at the document root for browsers to honour them.
+    let static_root = PathBuf::from(&static_dir);
+
     Router::new()
         .merge(page_routes)
         .merge(video_page)
         .route("/api/health", get(health))
-        .nest_service("/assets", ServeDir::new(static_dir))
+        .nest_service("/assets", ServeDir::new(&static_dir))
+        .route_service("/sw.js", ServeFile::new(static_root.join("sw.js")))
+        .route_service("/sw.js.map", ServeFile::new(static_root.join("sw.js.map")))
+        .route_service(
+            "/manifest.webmanifest",
+            ServeFile::new(static_root.join("manifest.webmanifest")),
+        )
+        .route_service(
+            "/offline.html",
+            ServeFile::new(static_root.join("offline.html")),
+        )
         .merge(auth_routes)
         .merge(setup_routes)
         .merge(parent_only)

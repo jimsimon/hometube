@@ -15,7 +15,21 @@ test('setup wizard renders without errors', async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => consoleErrors.push(err.message));
   page.on('console', (msg) => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text());
+    if (msg.type() !== 'error') return;
+    const text = msg.text();
+    // The wizard polls `/api/auth/me` on load to detect whether a
+    // parent has already signed in via the OAuth callback. Before
+    // signing in, that endpoint returns 401, which the browser logs
+    // as a `Failed to load resource` console error even though the
+    // application code handles it gracefully. Suppress those to keep
+    // this smoke check focused on real runtime errors.
+    if (
+      text.includes('401 (Unauthorized)') ||
+      text.includes('/api/auth/me')
+    ) {
+      return;
+    }
+    consoleErrors.push(text);
   });
 
   await page.goto('/setup');
