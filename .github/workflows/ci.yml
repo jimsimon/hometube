@@ -86,14 +86,14 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      - name: Vitest (with coverage, 80% threshold)
-        run: |
-          npx vitest run \
-            --coverage \
-            --coverage.thresholds.lines=80 \
-            --coverage.thresholds.functions=80 \
-            --coverage.thresholds.branches=80 \
-            --coverage.thresholds.statements=80
+      # Vitest runs in browser mode (Playwright provider, headless Chromium).
+      - name: Install Playwright Chromium for vitest browser mode
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # Coverage thresholds (50% on src/services/) live in vitest.config.ts.
+      - name: Vitest (browser mode + coverage)
+        run: npx vitest run --coverage
         working-directory: frontend
 
       # ----- Backend tests + coverage -----
@@ -183,12 +183,16 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+      - name: Install e2e dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: e2e
+
       - name: Build backend (release)
         run: cargo build --release --locked
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-        working-directory: frontend
+        working-directory: e2e
 
       - name: Run server + Playwright
         run: |
@@ -205,10 +209,10 @@ jobs:
             sleep 1
           done
 
-          # Run the e2e suite. The trailing "|| EXIT=$?" lets us still
-          # tear down the server on failure.
+          # Run the e2e suite from its own package; tear down the
+          # server on failure so the runner doesn't hang.
           EXIT=0
-          npx playwright test --config e2e/playwright.config.ts || EXIT=$?
+          (cd e2e && npx playwright test) || EXIT=$?
 
           kill $SERVER_PID || true
           exit $EXIT
@@ -220,7 +224,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: frontend/playwright-report/
+          path: e2e/report/
           if-no-files-found: ignore
 
   # -----------------------------------------------------------------------

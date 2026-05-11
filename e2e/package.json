@@ -1,0 +1,16 @@
+{
+  "name": "hometube-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HomeTube end-to-end + accessibility tests (Playwright + axe-core).",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.3",
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1"
+  }
+}
