@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Setup{% endblock %}
+
+{% block content %}
+<section class="setup-wizard-page">
+  <h1>Welcome to HomeTube</h1>
+  <p>
+    A few quick steps and you'll be ready to start curating videos for
+    your family. You can re-run any step from the parent dashboard later.
+  </p>
+
+  <hometube-setup-wizard
+    suggested-redirect-uri="{{ suggested_redirect_uri }}"
+  ></hometube-setup-wizard>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/setup-wizard.js"></script>
+<script
+  type="module"
+  src="/assets/components/setup-credentials-form.js"
+></script>
+<script type="module" src="/assets/components/setup-pin-input.js"></script>
+{% endblock %}
