@@ -54,13 +54,12 @@ async fn child_search_returns_buckets_and_logs() {
     assert!(!videos.is_empty());
 
     // search_log gets a row.
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM search_log WHERE child_account_id = ?",
-    )
-    .bind(child_id)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM search_log WHERE child_account_id = ?")
+            .bind(child_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 1);
 }
 

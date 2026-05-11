@@ -554,7 +554,8 @@ mod tests {
             "Daily (midnight)",
             "Weekly (Sunday 3 AM)",
         ] {
-            let expr = preset_to_expression(label).unwrap_or_else(|| panic!("known preset {label}"));
+            let expr =
+                preset_to_expression(label).unwrap_or_else(|| panic!("known preset {label}"));
             assert_eq!(expression_to_preset(expr), *label);
         }
     }

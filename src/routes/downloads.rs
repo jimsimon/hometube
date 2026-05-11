@@ -145,7 +145,10 @@ pub async fn create(
         return Err(AppError::Forbidden);
     }
 
-    let title = result.title.clone().unwrap_or_else(|| body.video_id.clone());
+    let title = result
+        .title
+        .clone()
+        .unwrap_or_else(|| body.video_id.clone());
     let thumb = result.thumbnail.clone().or_else(|| {
         result
             .thumbnails
@@ -194,7 +197,11 @@ pub async fn update(
 ) -> AppResult<StatusCode> {
     let status = body.status.as_deref().unwrap_or("complete");
     let now = chrono::Utc::now().timestamp();
-    let downloaded_at: Option<i64> = if status == "complete" { Some(now) } else { None };
+    let downloaded_at: Option<i64> = if status == "complete" {
+        Some(now)
+    } else {
+        None
+    };
 
     if let Some(quality) = body.quality {
         sqlx::query(
@@ -275,9 +282,10 @@ pub async fn stream(
         return Err(AppError::Forbidden);
     }
 
-    let target_height: Option<i64> = q.quality.as_deref().and_then(|q| {
-        q.trim_end_matches('p').parse::<i64>().ok()
-    });
+    let target_height: Option<i64> = q
+        .quality
+        .as_deref()
+        .and_then(|q| q.trim_end_matches('p').parse::<i64>().ok());
     let mut candidates: Vec<_> = result
         .formats
         .iter()
@@ -318,10 +326,7 @@ pub async fn stream(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("video/mp4")
         .to_string();
-    let content_length = res
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .cloned();
+    let content_length = res.headers().get(header::CONTENT_LENGTH).cloned();
 
     let stream = res.bytes_stream().map_err(std::io::Error::other);
     let body = Body::from_stream(stream);

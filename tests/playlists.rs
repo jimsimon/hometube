@@ -105,7 +105,10 @@ async fn delete_soft_deletes() {
     let res = app.server.get("/api/playlists").await;
     let body: serde_json::Value = res.json();
     assert!(
-        body.as_array().unwrap().iter().all(|p| p["id"].as_i64() != Some(id)),
+        body.as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["id"].as_i64() != Some(id)),
         "deleted playlist must not appear in /api/playlists"
     );
 }
@@ -202,7 +205,10 @@ async fn cannot_modify_other_childs_playlist() {
         .server
         .post("/api/playlists")
         .clear_cookies()
-        .add_cookie(tower_cookies::cookie::Cookie::new(auth_a.name, auth_a.value))
+        .add_cookie(tower_cookies::cookie::Cookie::new(
+            auth_a.name,
+            auth_a.value,
+        ))
         .json(&json!({ "title": "A's Mix", "description": "" }))
         .await;
     let body: serde_json::Value = res.json();
@@ -214,7 +220,10 @@ async fn cannot_modify_other_childs_playlist() {
         .server
         .put(&format!("/api/playlists/{id}"))
         .clear_cookies()
-        .add_cookie(tower_cookies::cookie::Cookie::new(auth_b.name, auth_b.value))
+        .add_cookie(tower_cookies::cookie::Cookie::new(
+            auth_b.name,
+            auth_b.value,
+        ))
         .json(&json!({ "title": "Stolen" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::NOT_FOUND);

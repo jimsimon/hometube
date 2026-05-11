@@ -162,7 +162,8 @@ pub async fn boot_setup_complete(role: AccountType) -> (TestApp, AuthCookie) {
     };
 
     let auth = mint_session_cookie(&app, target_account_id).await;
-    app.server.add_cookie(Cookie::new(auth.name, auth.value.clone()));
+    app.server
+        .add_cookie(Cookie::new(auth.name, auth.value.clone()));
     (app, auth)
 }
 
@@ -201,7 +202,8 @@ pub async fn boot_with_parent_and_child(role: AccountType) -> (TestApp, AuthCook
         AccountType::Child => child_id,
     };
     let auth = mint_session_cookie(&app, target).await;
-    app.server.add_cookie(Cookie::new(auth.name, auth.value.clone()));
+    app.server
+        .add_cookie(Cookie::new(auth.name, auth.value.clone()));
     (app, auth)
 }
 
@@ -321,7 +323,10 @@ pub async fn seed_credentials(pool: &SqlitePool) {
     let pairs: &[(&str, &str)] = &[
         (KEY_GOOGLE_CLIENT_ID, "test-client-id"),
         (KEY_GOOGLE_CLIENT_SECRET, "test-client-secret"),
-        (KEY_GOOGLE_REDIRECT_URI, "http://localhost:3000/api/auth/callback"),
+        (
+            KEY_GOOGLE_REDIRECT_URI,
+            "http://localhost:3000/api/auth/callback",
+        ),
         (KEY_YOUTUBE_API_KEY, "test-yt-api-key"),
     ];
     for (k, v) in pairs {

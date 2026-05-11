@@ -379,10 +379,7 @@ pub fn router(state: AppState) -> Router {
             "/api/downloads/{video_id}",
             put(downloads::update).delete(downloads::delete),
         )
-        .route(
-            "/api/downloads/{video_id}/stream",
-            get(downloads::stream),
-        )
+        .route("/api/downloads/{video_id}/stream", get(downloads::stream))
         .route_layer(axum::middleware::from_fn(require_child));
 
     // -----------------------------------------------------------------

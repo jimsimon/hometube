@@ -51,7 +51,10 @@ async fn account_get_and_update_round_trip() {
 async fn cannot_delete_last_parent() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let parent_id = app.parent_id.unwrap();
-    let res = app.server.delete(&format!("/api/accounts/{parent_id}")).await;
+    let res = app
+        .server
+        .delete(&format!("/api/accounts/{parent_id}"))
+        .await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
@@ -59,7 +62,10 @@ async fn cannot_delete_last_parent() {
 async fn deleting_a_child_succeeds() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
-    let res = app.server.delete(&format!("/api/accounts/{child_id}")).await;
+    let res = app
+        .server
+        .delete(&format!("/api/accounts/{child_id}"))
+        .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 }
 
@@ -163,12 +169,14 @@ async fn usage_limits_round_trip() {
 
     // Set Mon-Fri.
     let limits: Vec<serde_json::Value> = (1..=5)
-        .map(|d| json!({
-            "day_of_week": d,
-            "max_hours": 2.0,
-            "allowed_start_time": "08:00",
-            "allowed_end_time": "20:00",
-        }))
+        .map(|d| {
+            json!({
+                "day_of_week": d,
+                "max_hours": 2.0,
+                "allowed_start_time": "08:00",
+                "allowed_end_time": "20:00",
+            })
+        })
         .collect();
     let res = app
         .server
@@ -281,10 +289,7 @@ async fn cron_list_runs_returns_array() {
     .await
     .unwrap();
 
-    let res = app
-        .server
-        .get(&format!("/api/cron/jobs/{id}/runs"))
-        .await;
+    let res = app.server.get(&format!("/api/cron/jobs/{id}/runs")).await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
     assert_eq!(body[0]["job_id"], id);
@@ -378,7 +383,10 @@ async fn family_members_returns_both_accounts() {
     let body: serde_json::Value = res.json();
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 2);
-    let types: Vec<&str> = arr.iter().map(|m| m["account_type"].as_str().unwrap()).collect();
+    let types: Vec<&str> = arr
+        .iter()
+        .map(|m| m["account_type"].as_str().unwrap())
+        .collect();
     assert!(types.contains(&"parent"));
     assert!(types.contains(&"child"));
 }
@@ -466,7 +474,10 @@ async fn family_delete_404_for_missing_id() {
 async fn family_delete_child_succeeds() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
-    let res = app.server.delete(&format!("/api/family/members/{child_id}")).await;
+    let res = app
+        .server
+        .delete(&format!("/api/family/members/{child_id}"))
+        .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 }
 
@@ -480,7 +491,10 @@ async fn family_reauth_returns_login_url() {
         .await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
-    assert!(body["login_url"].as_str().unwrap().contains("context=reauth"));
+    assert!(body["login_url"]
+        .as_str()
+        .unwrap()
+        .contains("context=reauth"));
 }
 
 #[tokio::test]

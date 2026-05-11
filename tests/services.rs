@@ -5,19 +5,12 @@ mod common;
 
 use common::boot;
 use hometube::models::account::AccountType;
-use hometube::services::cron::{
-    compute_next_run_at, seed_default_jobs, seed_ytdlp_info,
-};
-use hometube::services::notifications::{
-    self, dispatch_ytdlp_failure_deduped, TYPE_SYSTEM_UPDATE,
-};
-use hometube::services::setup::{
-    has_first_parent, has_google_credentials, is_setup_complete,
-};
+use hometube::services::cron::{compute_next_run_at, seed_default_jobs, seed_ytdlp_info};
+use hometube::services::notifications::{self, dispatch_ytdlp_failure_deduped, TYPE_SYSTEM_UPDATE};
+use hometube::services::setup::{has_first_parent, has_google_credentials, is_setup_complete};
 use hometube::services::video_cache::{
-    cache_size_preset_to_bytes, current_cache_size_label, set_cache_size, set_ttl_hours,
-    total_cache_bytes, total_segment_count, list_cached_videos, evict_video_public,
-    CACHE_SIZE_PRESETS,
+    cache_size_preset_to_bytes, current_cache_size_label, evict_video_public, list_cached_videos,
+    set_cache_size, set_ttl_hours, total_cache_bytes, total_segment_count, CACHE_SIZE_PRESETS,
 };
 
 #[tokio::test]
@@ -31,14 +24,7 @@ async fn setup_helpers_reflect_db_state() {
     common::seed_credentials(&app.pool).await;
     assert!(has_google_credentials(&app.pool).await.unwrap());
 
-    common::insert_account(
-        &app.pool,
-        "g1",
-        "p@e.t",
-        "P",
-        AccountType::Parent,
-    )
-    .await;
+    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
     assert!(has_first_parent(&app.pool).await.unwrap());
 }
 
@@ -83,11 +69,7 @@ async fn seed_ytdlp_info_inserts_singleton() {
 
 #[tokio::test]
 async fn cron_compute_next_run_at_handles_each_preset() {
-    for expr in &[
-        "*/15 * * * *",
-        "0 * * * *",
-        "0 3 * * *",
-    ] {
+    for expr in &["*/15 * * * *", "0 * * * *", "0 3 * * *"] {
         assert!(
             compute_next_run_at(expr).is_some(),
             "{expr} should parse as cron"
@@ -157,13 +139,12 @@ async fn broadcast_once_per_day_dedups() {
     .await
     .unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?",
-    )
-    .bind(TYPE_SYSTEM_UPDATE)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_SYSTEM_UPDATE)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 1);
 }
 

@@ -66,7 +66,12 @@ async fn anonymous_is_unauthorized_on_parent_only_routes() {
     // borrow, so we issue per-request cookies pointing at a junk value.
     let bad = Cookie::new(SESSION_COOKIE, "not-a-real-session");
     for path in READ_ENDPOINTS {
-        let res = app.server.get(path).clear_cookies().add_cookie(bad.clone()).await;
+        let res = app
+            .server
+            .get(path)
+            .clear_cookies()
+            .add_cookie(bad.clone())
+            .await;
         assert_eq!(
             res.status_code(),
             StatusCode::UNAUTHORIZED,

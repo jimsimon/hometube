@@ -174,7 +174,10 @@ async fn failed_pin_attempts_emit_notification() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert!(count >= 1, "expected at least one notification, got {count}");
+    assert!(
+        count >= 1,
+        "expected at least one notification, got {count}"
+    );
 }
 
 #[tokio::test]
@@ -210,7 +213,10 @@ async fn callback_with_state_mismatch_400() {
     let mut jar = tower_cookies::cookie::CookieJar::new();
     let payload = r#"{"csrf":"correct-csrf","pkce_verifier":"pv","role":"parent"}"#;
     jar.signed_mut(&raw_key)
-        .add(tower_cookies::cookie::Cookie::new("hometube_oauth", payload));
+        .add(tower_cookies::cookie::Cookie::new(
+            "hometube_oauth",
+            payload,
+        ));
     let signed = jar.get("hometube_oauth").unwrap().clone();
 
     let res = app

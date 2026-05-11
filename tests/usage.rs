@@ -85,7 +85,15 @@ async fn limit_exceeded_response_and_notification() {
     let child_id = auth.account_id;
 
     // Tiny limit (60s) for today so a single heartbeat tips us over.
-    insert_usage_limit(&app.pool, child_id, today_dow(), 60.0 / 3600.0, "00:00", "23:59").await;
+    insert_usage_limit(
+        &app.pool,
+        child_id,
+        today_dow(),
+        60.0 / 3600.0,
+        "00:00",
+        "23:59",
+    )
+    .await;
 
     // Pre-load usage_log with enough seconds to push past the cap.
     sqlx::query(

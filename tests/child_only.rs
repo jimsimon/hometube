@@ -57,7 +57,12 @@ async fn anonymous_child_routes_are_401() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
     let bad = Cookie::new(SESSION_COOKIE, "junk");
     for path in CHILD_GET_ENDPOINTS {
-        let res = app.server.get(path).clear_cookies().add_cookie(bad.clone()).await;
+        let res = app
+            .server
+            .get(path)
+            .clear_cookies()
+            .add_cookie(bad.clone())
+            .await;
         assert_eq!(
             res.status_code(),
             StatusCode::UNAUTHORIZED,

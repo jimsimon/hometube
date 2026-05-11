@@ -76,15 +76,9 @@ async fn allowlisted_playlist_is_allowed() {
     .await
     .unwrap();
 
-    let allowed = can_child_view(
-        &app.pool,
-        child_id,
-        "vid-x",
-        None,
-        &["pl-1".to_string()],
-    )
-    .await
-    .unwrap();
+    let allowed = can_child_view(&app.pool, child_id, "vid-x", None, &["pl-1".to_string()])
+        .await
+        .unwrap();
     assert!(allowed);
 }
 
@@ -125,16 +119,13 @@ async fn blocked_overrides_allowlist() {
     .await
     .unwrap();
 
-    let allowed = can_child_view(
-        &app.pool,
-        child_id,
-        "vid-block",
-        Some("chan-1"),
-        &[],
-    )
-    .await
-    .unwrap();
-    assert!(!allowed, "blocked video must be denied even when allowlisted");
+    let allowed = can_child_view(&app.pool, child_id, "vid-block", Some("chan-1"), &[])
+        .await
+        .unwrap();
+    assert!(
+        !allowed,
+        "blocked video must be denied even when allowlisted"
+    );
 }
 
 #[tokio::test]

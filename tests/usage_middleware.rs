@@ -48,7 +48,15 @@ async fn child_with_exhausted_limit_is_blocked() {
     let child_id = auth.account_id;
 
     // 1 minute / day limit, plus pre-baked usage that exhausts it.
-    insert_usage_limit(&app.pool, child_id, today_dow(), 60.0 / 3600.0, "00:00", "23:59").await;
+    insert_usage_limit(
+        &app.pool,
+        child_id,
+        today_dow(),
+        60.0 / 3600.0,
+        "00:00",
+        "23:59",
+    )
+    .await;
     sqlx::query(
         "INSERT INTO usage_log (child_account_id, video_id, started_at, ended_at, duration_seconds) \
          VALUES (?, 'vid-x', unixepoch() - 30, unixepoch(), 120)",

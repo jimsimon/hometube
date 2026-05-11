@@ -91,10 +91,7 @@ async fn anonymous_pages_redirect_when_setup_incomplete() {
     for path in &["/parent/home", "/child/home", "/profiles"] {
         let res = app.server.get(path).await;
         let s = res.status_code();
-        assert!(
-            s.is_redirection(),
-            "{path}: expected redirect, got {s}"
-        );
+        assert!(s.is_redirection(), "{path}: expected redirect, got {s}");
     }
 }
 
@@ -110,14 +107,7 @@ async fn setup_wizard_renders_for_anonymous_users() {
 async fn root_redirects_anonymous_after_setup_to_profile_picker() {
     let app = boot().await;
     common::seed_credentials(&app.pool).await;
-    common::insert_account(
-        &app.pool,
-        "g1",
-        "p@e.t",
-        "P",
-        AccountType::Parent,
-    )
-    .await;
+    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
     hometube::services::setup::set_config_value(
         &app.pool,
         hometube::services::setup::KEY_SETUP_COMPLETE,
@@ -151,6 +141,11 @@ async fn profiles_page_renders() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     // Strip session cookie so we hit the picker as anonymous.
     let bad = Cookie::new(SESSION_COOKIE, "junk");
-    let res = app.server.get("/profiles").clear_cookies().add_cookie(bad).await;
+    let res = app
+        .server
+        .get("/profiles")
+        .clear_cookies()
+        .add_cookie(bad)
+        .await;
     assert!(res.status_code().is_success() || res.status_code().is_redirection());
 }

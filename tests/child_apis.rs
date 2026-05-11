@@ -42,7 +42,10 @@ async fn feed_continue_watching_returns_seeded_history() {
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     let arr = body.as_array().unwrap();
-    assert!(!arr.is_empty(), "expected continue-watching to surface seeded row");
+    assert!(
+        !arr.is_empty(),
+        "expected continue-watching to surface seeded row"
+    );
 }
 
 #[tokio::test]
@@ -162,7 +165,10 @@ async fn subscriptions_unsubscribe_marks_pending_delete() {
 #[tokio::test]
 async fn subscriptions_unsubscribe_404_when_not_found() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app.server.delete("/api/subscriptions/no-such-channel").await;
+    let res = app
+        .server
+        .delete("/api/subscriptions/no-such-channel")
+        .await;
     assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
 }
 

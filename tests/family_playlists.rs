@@ -126,7 +126,10 @@ async fn delete_removes_playlist() {
     let body: serde_json::Value = res.json();
     let id = body["id"].as_i64().unwrap();
 
-    let res = app.server.delete(&format!("/api/family-playlists/{id}")).await;
+    let res = app
+        .server
+        .delete(&format!("/api/family-playlists/{id}"))
+        .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 
     let res = app.server.get(&format!("/api/family-playlists/{id}")).await;

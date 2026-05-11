@@ -12,9 +12,7 @@ mod common;
 use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
-use hometube::services::notifications::{
-    self, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED,
-};
+use hometube::services::notifications::{self, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED};
 
 #[tokio::test]
 async fn empty_initially() {
@@ -120,13 +118,12 @@ async fn mark_read_404_for_other_parents_row() {
     .await
     .unwrap();
 
-    let id: i64 = sqlx::query_scalar(
-        "SELECT id FROM parent_notifications WHERE parent_account_id = ?",
-    )
-    .bind(other_parent_id)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let id: i64 =
+        sqlx::query_scalar("SELECT id FROM parent_notifications WHERE parent_account_id = ?")
+            .bind(other_parent_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
 
     let res = app
         .server

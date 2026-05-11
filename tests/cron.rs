@@ -96,11 +96,10 @@ async fn put_disable_flips_enabled() {
 async fn put_known_preset_updates_schedule() {
     let app = boot_with_cron_seeded().await;
     // youtube_sync's allowed_presets includes "Every hour".
-    let id: i64 =
-        sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'youtube_sync'")
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'youtube_sync'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
     let res = app
         .server
         .put(&format!("/api/cron/jobs/{id}"))
@@ -115,11 +114,10 @@ async fn put_known_preset_updates_schedule() {
 #[tokio::test]
 async fn put_unsupported_preset_is_400() {
     let app = boot_with_cron_seeded().await;
-    let id: i64 =
-        sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'ytdlp_update'")
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'ytdlp_update'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
     // ytdlp_update doesn't allow "Every 15 minutes".
     let res = app
         .server
