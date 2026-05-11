@@ -68,7 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/accounts", get(accounts::list))
         .route(
             "/api/accounts/{id}",
-            get(accounts::get).put(accounts::update).delete(accounts::delete),
+            get(accounts::get)
+                .put(accounts::update)
+                .delete(accounts::delete),
         )
         // Parent-side YouTube search.
         .route("/api/parent/search", get(search::parent_search))
@@ -257,10 +259,7 @@ pub fn router(state: AppState) -> Router {
 
     let video_routes = Router::new()
         .route("/api/videos/{video_id}", get(videos::get_metadata))
-        .route(
-            "/api/videos/{video_id}/stream",
-            get(videos::get_stream),
-        )
+        .route("/api/videos/{video_id}/stream", get(videos::get_stream))
         .route(
             "/api/videos/{video_id}/captions",
             get(videos::list_captions),
@@ -277,10 +276,7 @@ pub fn router(state: AppState) -> Router {
     // player.
     // -----------------------------------------------------------------
     let child_routes = Router::new()
-        .route(
-            "/api/feed/continue-watching",
-            get(feed::continue_watching),
-        )
+        .route("/api/feed/continue-watching", get(feed::continue_watching))
         .route("/api/feed/new-videos", get(feed::new_videos))
         .route("/api/feed/up-next", get(feed::up_next))
         .route("/api/usage/heartbeat", post(usage::heartbeat))
@@ -318,10 +314,7 @@ pub fn router(state: AppState) -> Router {
                 .put(playlists::update)
                 .delete(playlists::delete),
         )
-        .route(
-            "/api/playlists/{id}/videos",
-            post(playlists::add_video),
-        )
+        .route("/api/playlists/{id}/videos", post(playlists::add_video))
         .route(
             "/api/playlists/{id}/videos/reorder",
             put(playlists::reorder_videos),
@@ -405,10 +398,7 @@ pub fn router(state: AppState) -> Router {
         .route("/parent/activity", get(pages::parent_activity))
         .route("/parent/playlists", get(pages::parent_playlists))
         .route("/parent/playlist/{id}", get(pages::parent_playlist))
-        .route(
-            "/parent/preview/{kind}/{id}",
-            get(pages::parent_preview),
-        )
+        .route("/parent/preview/{kind}/{id}", get(pages::parent_preview))
         .route("/child/home", get(pages::child_home))
         .route("/child/channels", get(pages::child_channels))
         .route("/child/channel/{channel_id}", get(pages::child_channel))

@@ -101,9 +101,7 @@ pub struct UpdateMemberBody {
 
 /// `GET /api/family/members` — return every account with derived
 /// token-expiry / last-login fields.
-pub async fn list_members(
-    State(state): State<AppState>,
-) -> AppResult<Json<Vec<FamilyMember>>> {
+pub async fn list_members(State(state): State<AppState>) -> AppResult<Json<Vec<FamilyMember>>> {
     // Pull every account, then enrich with a single "max(sessions.created_at)"
     // query. Two separate queries keep the SQL simple and survive the
     // case where an account has never had a session row.
@@ -115,12 +113,11 @@ pub async fn list_members(
         // MAX() always returns a single row, but the value is NULL when
         // the account has never had a session. The outer `Option`
         // covers the column nullability.
-        let last_login_at: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(created_at) FROM sessions WHERE account_id = ?",
-        )
-        .bind(a.id)
-        .fetch_one(&state.db)
-        .await?;
+        let last_login_at: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(created_at) FROM sessions WHERE account_id = ?")
+                .bind(a.id)
+                .fetch_one(&state.db)
+                .await?;
 
         members.push(FamilyMember {
             id: a.id,
@@ -212,9 +209,7 @@ pub async fn delete_member(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if matches!(acct.typed(), AccountType::Parent)
-        && account::parent_count(&state.db).await? <= 1
-    {
+    if matches!(acct.typed(), AccountType::Parent) && account::parent_count(&state.db).await? <= 1 {
         return Err(AppError::BadRequest(
             "cannot delete the last parent account".into(),
         ));
@@ -304,12 +299,11 @@ async fn list_one(state: &AppState, id: i64) -> AppResult<FamilyMember> {
     let a = account::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let last_login_at: Option<i64> = sqlx::query_scalar(
-        "SELECT MAX(created_at) FROM sessions WHERE account_id = ?",
-    )
-    .bind(a.id)
-    .fetch_one(&state.db)
-    .await?;
+    let last_login_at: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(created_at) FROM sessions WHERE account_id = ?")
+            .bind(a.id)
+            .fetch_one(&state.db)
+            .await?;
     let now = Utc::now().timestamp();
     Ok(FamilyMember {
         id: a.id,

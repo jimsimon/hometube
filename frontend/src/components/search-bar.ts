@@ -19,7 +19,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state, query } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { api, ApiError } from '../services/api.js';
 
@@ -78,8 +78,6 @@ export class SearchBar extends LitElement {
   @state() private suggestions: Suggestion[] = [];
   @state() private suggestionsOpen = false;
   @state() private highlighted = -1;
-
-  @query('input[type="search"]') private input!: HTMLInputElement;
 
   private debounceTimer: number | null = null;
   private lastFetchToken = 0;

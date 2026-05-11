@@ -194,9 +194,9 @@ pub async fn callback(
     // ---- Re-auth flow: update an existing row in place. ----
     if let Some(pending_inner) = pending.as_ref() {
         if pending_inner.context == "reauth" {
-            let target_id = pending_inner.account_id.ok_or_else(|| {
-                AppError::BadRequest("reauth flow missing account_id".into())
-            })?;
+            let target_id = pending_inner
+                .account_id
+                .ok_or_else(|| AppError::BadRequest("reauth flow missing account_id".into()))?;
             let target = account::find_by_id(&state.db, target_id)
                 .await?
                 .ok_or(AppError::NotFound)?;

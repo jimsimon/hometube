@@ -155,17 +155,14 @@ pub async fn update_job(
                 "preset '{preset}' is not allowed for this job"
             )));
         }
-        let expression = preset_to_expression(&preset).ok_or_else(|| {
-            AppError::BadRequest(format!("unknown preset '{preset}'"))
-        })?;
-        sqlx::query(
-            "UPDATE cron_jobs SET schedule = ?, schedule_preset = ? WHERE id = ?",
-        )
-        .bind(expression)
-        .bind(&preset)
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+        let expression = preset_to_expression(&preset)
+            .ok_or_else(|| AppError::BadRequest(format!("unknown preset '{preset}'")))?;
+        sqlx::query("UPDATE cron_jobs SET schedule = ?, schedule_preset = ? WHERE id = ?")
+            .bind(expression)
+            .bind(&preset)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
     }
 
     // Re-register all jobs with the scheduler. The simplest thing that
@@ -274,8 +271,7 @@ fn into_view(
     ) = row;
     let allowed_presets: Vec<String> =
         serde_json::from_str(&allowed_presets_json).unwrap_or_default();
-    let resolved_preset =
-        schedule_preset.unwrap_or_else(|| expression_to_preset(&schedule));
+    let resolved_preset = schedule_preset.unwrap_or_else(|| expression_to_preset(&schedule));
     CronJobView {
         id,
         name,

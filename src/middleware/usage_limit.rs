@@ -140,10 +140,7 @@ fn parse_hhmm(s: &str) -> Option<i64> {
 /// Insert a `time_limit_reached` notification for every parent unless
 /// one already exists today. Mirrors the helper in `routes::usage` but
 /// implemented here to keep the middleware self-contained.
-async fn notify_parents_limit_reached(
-    pool: &SqlitePool,
-    child_id: i64,
-) -> Result<(), sqlx::Error> {
+async fn notify_parents_limit_reached(pool: &SqlitePool, child_id: i64) -> Result<(), sqlx::Error> {
     let parents: Vec<(i64,)> =
         sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
             .fetch_all(pool)

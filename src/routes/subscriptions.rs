@@ -49,9 +49,17 @@ pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<SubscriptionRow>>> {
-    let rows: Vec<(i64, String, String, Option<String>, String, String, i64, i64)> =
-        sqlx::query_as(
-            "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
                     s.source, s.sync_status, s.subscribed_at, \
                     CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
              FROM child_subscriptions s \
@@ -59,15 +67,24 @@ pub async fn list(
                ON a.child_account_id = s.child_account_id AND a.channel_id = s.channel_id \
              WHERE s.child_account_id = ? AND s.is_deleted = 0 \
              ORDER BY visible DESC, s.subscribed_at DESC",
-        )
-        .bind(current.id)
-        .fetch_all(&state.db)
-        .await?;
+    )
+    .bind(current.id)
+    .fetch_all(&state.db)
+    .await?;
 
     let out = rows
         .into_iter()
         .map(
-            |(id, channel_id, channel_title, channel_thumbnail_url, source, sync_status, subscribed_at, visible)| SubscriptionRow {
+            |(
+                id,
+                channel_id,
+                channel_title,
+                channel_thumbnail_url,
+                source,
+                sync_status,
+                subscribed_at,
+                visible,
+            )| SubscriptionRow {
                 id,
                 channel_id,
                 channel_title,
@@ -172,7 +189,16 @@ async fn fetch_one(
     child_id: i64,
     channel_id: &str,
 ) -> AppResult<SubscriptionRow> {
-    let row: (i64, String, String, Option<String>, String, String, i64, i64) = sqlx::query_as(
+    let row: (
+        i64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        i64,
+    ) = sqlx::query_as(
         "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
                 s.source, s.sync_status, s.subscribed_at, \
                 CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
@@ -185,7 +211,16 @@ async fn fetch_one(
     .bind(channel_id)
     .fetch_one(&state.db)
     .await?;
-    let (id, channel_id, channel_title, channel_thumbnail_url, source, sync_status, subscribed_at, visible) = row;
+    let (
+        id,
+        channel_id,
+        channel_title,
+        channel_thumbnail_url,
+        source,
+        sync_status,
+        subscribed_at,
+        visible,
+    ) = row;
     Ok(SubscriptionRow {
         id,
         channel_id,

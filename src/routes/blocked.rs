@@ -107,9 +107,7 @@ pub async fn delete(
 
 async fn require_child(state: &AppState, child_id: i64) -> AppResult<()> {
     if !access::is_child_account(&state.db, child_id).await? {
-        return Err(AppError::BadRequest(
-            "target account is not a child".into(),
-        ));
+        return Err(AppError::BadRequest("target account is not a child".into()));
     }
     Ok(())
 }

@@ -62,11 +62,7 @@ async fn is_blocked(pool: &SqlitePool, child_id: i64, video_id: &str) -> AppResu
     Ok(row.0 > 0)
 }
 
-async fn is_allowlisted_video(
-    pool: &SqlitePool,
-    child_id: i64,
-    video_id: &str,
-) -> AppResult<bool> {
+async fn is_allowlisted_video(pool: &SqlitePool, child_id: i64, video_id: &str) -> AppResult<bool> {
     let row: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM allowlisted_videos WHERE child_account_id = ? AND video_id = ?",
     )
@@ -111,11 +107,10 @@ async fn is_allowlisted_playlist(
 /// Used by parent-only routes that take a `:id` path parameter and need
 /// to refuse parent IDs.
 pub async fn is_child_account(pool: &SqlitePool, account_id: i64) -> AppResult<bool> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT account_type FROM accounts WHERE id = ?")
-            .bind(account_id)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT account_type FROM accounts WHERE id = ?")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(matches!(row, Some((t,)) if t == "child"))
 }
 
@@ -125,12 +120,11 @@ pub async fn child_allowlisted_playlist_ids(
     pool: &SqlitePool,
     child_id: i64,
 ) -> AppResult<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT playlist_id FROM allowlisted_playlists WHERE child_account_id = ?",
-    )
-    .bind(child_id)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT playlist_id FROM allowlisted_playlists WHERE child_account_id = ?")
+            .bind(child_id)
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
@@ -139,11 +133,10 @@ pub async fn child_allowlisted_channel_ids(
     pool: &SqlitePool,
     child_id: i64,
 ) -> AppResult<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT channel_id FROM allowlisted_channels WHERE child_account_id = ?",
-    )
-    .bind(child_id)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT channel_id FROM allowlisted_channels WHERE child_account_id = ?")
+            .bind(child_id)
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|(c,)| c).collect())
 }

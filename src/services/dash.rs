@@ -67,7 +67,13 @@ pub fn sign_query(secret: &[u8], params: &[(&str, String)]) -> String {
     pairs.sort();
     let canonical = pairs
         .iter()
-        .map(|(k, v)| format!("{}={}", youtube::percent_encode(k), youtube::percent_encode(v)))
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                youtube::percent_encode(k),
+                youtube::percent_encode(v)
+            )
+        })
         .collect::<Vec<_>>()
         .join("&");
 
@@ -180,12 +186,7 @@ pub fn rewrite_manifest(secret: &[u8], video_id: &str, manifest: &str) -> AppRes
 /// Build the proxy URL for a segment. The `sq` parameter is the segment
 /// sequence number; the rest of the URL is recoverable from the cached
 /// metadata + format ID.
-pub fn build_segment_proxy_url(
-    secret: &[u8],
-    video_id: &str,
-    format_id: &str,
-    sq: &str,
-) -> String {
+pub fn build_segment_proxy_url(secret: &[u8], video_id: &str, format_id: &str, sq: &str) -> String {
     let params: Vec<(&str, String)> = vec![
         ("video_id", video_id.to_string()),
         ("format", format_id.to_string()),
@@ -274,8 +275,11 @@ mod tests {
         let sig = sign_query(secret, &params);
         assert!(verify_query(secret, &params, &sig));
 
-        let bad: Vec<(&str, String)> =
-            vec![("video_id", "other".into()), ("format", "137".into()), ("sq", "42".into())];
+        let bad: Vec<(&str, String)> = vec![
+            ("video_id", "other".into()),
+            ("format", "137".into()),
+            ("sq", "42".into()),
+        ];
         assert!(!verify_query(secret, &bad, &sig));
     }
 }

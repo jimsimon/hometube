@@ -173,10 +173,9 @@ pub async fn find_by_google_id(pool: &SqlitePool, google_id: &str) -> AppResult<
 /// Total parent-account count — used to enforce the "first account is a
 /// parent" rule and to guard parent deletions.
 pub async fn parent_count(pool: &SqlitePool) -> AppResult<i64> {
-    let row: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE account_type = 'parent'")
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE account_type = 'parent'")
+        .fetch_one(pool)
+        .await?;
     Ok(row.0)
 }
 
@@ -273,13 +272,15 @@ pub async fn list_profiles(pool: &SqlitePool) -> AppResult<Vec<ProfileSummary>> 
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, display_name, avatar_url, account_type, pin_hash)| ProfileSummary {
-            id,
-            display_name,
-            avatar_url,
-            account_type,
-            has_pin: pin_hash.is_some(),
-        })
+        .map(
+            |(id, display_name, avatar_url, account_type, pin_hash)| ProfileSummary {
+                id,
+                display_name,
+                avatar_url,
+                account_type,
+                has_pin: pin_hash.is_some(),
+            },
+        )
         .collect())
 }
 
@@ -294,22 +295,18 @@ pub async fn update(
         return Ok(());
     }
     if let Some(name) = display_name {
-        sqlx::query(
-            "UPDATE accounts SET display_name = ?, updated_at = unixepoch() WHERE id = ?",
-        )
-        .bind(name)
-        .bind(id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE accounts SET display_name = ?, updated_at = unixepoch() WHERE id = ?")
+            .bind(name)
+            .bind(id)
+            .execute(pool)
+            .await?;
     }
     if let Some(t) = account_type {
-        sqlx::query(
-            "UPDATE accounts SET account_type = ?, updated_at = unixepoch() WHERE id = ?",
-        )
-        .bind(t.as_str())
-        .bind(id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE accounts SET account_type = ?, updated_at = unixepoch() WHERE id = ?")
+            .bind(t.as_str())
+            .bind(id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -326,12 +323,10 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> AppResult<()> {
 
 /// Persist a (hashed) PIN for an account.
 pub async fn set_pin_hash(pool: &SqlitePool, id: i64, pin_hash: &str) -> AppResult<()> {
-    sqlx::query(
-        "UPDATE accounts SET pin_hash = ?, updated_at = unixepoch() WHERE id = ?",
-    )
-    .bind(pin_hash)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE accounts SET pin_hash = ?, updated_at = unixepoch() WHERE id = ?")
+        .bind(pin_hash)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }

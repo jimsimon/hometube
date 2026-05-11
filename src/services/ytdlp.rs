@@ -151,11 +151,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 /// auto-captions). yt-dlp performs the conversion via ffmpeg's subtitle
 /// muxer; the resulting `.vtt` file is read back into memory and the
 /// temp directory is removed.
-pub async fn extract_subtitles(
-    cfg: &Config,
-    video_id: &str,
-    lang: &str,
-) -> AppResult<String> {
+pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppResult<String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let tmp = tempdir_for_video(video_id);
     tokio::fs::create_dir_all(&tmp)
@@ -259,12 +255,10 @@ pub async fn version(cfg: &Config) -> AppResult<String> {
 // ---------------------------------------------------------------------------
 
 /// GitHub releases API endpoint for the yt-dlp project.
-const GITHUB_LATEST_URL: &str =
-    "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
+const GITHUB_LATEST_URL: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 
 /// Direct download URL for the Linux static binary.
-const LINUX_BINARY_URL: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+const LINUX_BINARY_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
 
 /// Lookup the latest published version on GitHub. Returns the
 /// `tag_name` field of the latest-release JSON.
@@ -273,7 +267,11 @@ pub async fn latest_published_version() -> AppResult<String> {
         .user_agent("hometube/0.1")
         .build()
         .map_err(AppError::Http)?;
-    let res = client.get(GITHUB_LATEST_URL).send().await.map_err(AppError::Http)?;
+    let res = client
+        .get(GITHUB_LATEST_URL)
+        .send()
+        .await
+        .map_err(AppError::Http)?;
     if !res.status().is_success() {
         return Err(AppError::Other(anyhow::anyhow!(
             "GitHub API returned {}",
@@ -290,16 +288,13 @@ pub async fn latest_published_version() -> AppResult<String> {
 /// Check whether a newer version is available compared to the value
 /// stored in `ytdlp_info.current_version`. Returns `None` if already
 /// up to date or no current_version is recorded.
-pub async fn check_for_update(
-    pool: &sqlx::SqlitePool,
-) -> AppResult<Option<String>> {
+pub async fn check_for_update(pool: &sqlx::SqlitePool) -> AppResult<Option<String>> {
     let latest = latest_published_version().await?;
-    let current: Option<String> = sqlx::query_scalar(
-        "SELECT current_version FROM ytdlp_info WHERE id = 1",
-    )
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT current_version FROM ytdlp_info WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+            .flatten();
     sqlx::query("UPDATE ytdlp_info SET last_checked_at = unixepoch() WHERE id = 1")
         .execute(pool)
         .await
@@ -324,10 +319,7 @@ pub async fn check_for_update(
 ///
 /// Best-effort: if step 3 fails the temp file is removed so we don't
 /// leave half-downloaded binaries lying around.
-pub async fn update_binary(
-    pool: &sqlx::SqlitePool,
-    cfg: &Config,
-) -> AppResult<String> {
+pub async fn update_binary(pool: &sqlx::SqlitePool, cfg: &Config) -> AppResult<String> {
     use tokio::fs;
     use tokio::io::AsyncWriteExt;
 
@@ -348,7 +340,11 @@ pub async fn update_binary(
         .user_agent("hometube/0.1")
         .build()
         .map_err(AppError::Http)?;
-    let res = client.get(LINUX_BINARY_URL).send().await.map_err(AppError::Http)?;
+    let res = client
+        .get(LINUX_BINARY_URL)
+        .send()
+        .await
+        .map_err(AppError::Http)?;
     if !res.status().is_success() {
         return Err(AppError::Other(anyhow::anyhow!(
             "yt-dlp download returned HTTP {}",

@@ -182,13 +182,11 @@ pub async fn update(
         if title.trim().is_empty() {
             return Err(AppError::BadRequest("title cannot be empty".into()));
         }
-        sqlx::query(
-            "UPDATE family_playlists SET title = ?, updated_at = unixepoch() WHERE id = ?",
-        )
-        .bind(title.trim())
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE family_playlists SET title = ?, updated_at = unixepoch() WHERE id = ?")
+            .bind(title.trim())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     }
     if body.description.is_some() {
         sqlx::query(
@@ -316,13 +314,12 @@ pub async fn remove_video(
     Path((id, video_id)): Path<(i64, String)>,
 ) -> AppResult<StatusCode> {
     require_parent(&current)?;
-    let res = sqlx::query(
-        "DELETE FROM family_playlist_videos WHERE playlist_id = ? AND video_id = ?",
-    )
-    .bind(id)
-    .bind(&video_id)
-    .execute(&state.db)
-    .await?;
+    let res =
+        sqlx::query("DELETE FROM family_playlist_videos WHERE playlist_id = ? AND video_id = ?")
+            .bind(id)
+            .bind(&video_id)
+            .execute(&state.db)
+            .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
@@ -385,11 +382,10 @@ fn require_parent(current: &CurrentAccount) -> AppResult<()> {
 }
 
 async fn ensure_exists(state: &AppState, id: i64) -> AppResult<()> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM family_playlists WHERE id = ?")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM family_playlists WHERE id = ?")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
     if count == 0 {
         Err(AppError::NotFound)
     } else {
@@ -398,20 +394,15 @@ async fn ensure_exists(state: &AppState, id: i64) -> AppResult<()> {
 }
 
 async fn child_exists(state: &AppState, child_id: i64) -> AppResult<bool> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM accounts WHERE id = ? AND account_type = 'child'",
-    )
-    .bind(child_id)
-    .fetch_one(&state.db)
-    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE id = ? AND account_type = 'child'")
+            .bind(child_id)
+            .fetch_one(&state.db)
+            .await?;
     Ok(count > 0)
 }
 
-async fn enforce_visible(
-    state: &AppState,
-    current: &CurrentAccount,
-    id: i64,
-) -> AppResult<()> {
+async fn enforce_visible(state: &AppState, current: &CurrentAccount, id: i64) -> AppResult<()> {
     if matches!(current.account_type, AccountType::Parent) {
         ensure_exists(state, id).await?;
         return Ok(());
@@ -452,16 +443,12 @@ async fn load_detail(state: &AppState, id: i64) -> AppResult<FamilyPlaylistDetai
     .fetch_all(&state.db)
     .await?;
 
-    let child_id_rows = sqlx::query(
-        "SELECT child_account_id FROM family_playlist_members WHERE playlist_id = ?",
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await?;
-    let child_ids = child_id_rows
-        .iter()
-        .map(|r| r.get::<i64, _>(0))
-        .collect();
+    let child_id_rows =
+        sqlx::query("SELECT child_account_id FROM family_playlist_members WHERE playlist_id = ?")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
+    let child_ids = child_id_rows.iter().map(|r| r.get::<i64, _>(0)).collect();
 
     Ok(FamilyPlaylistDetail {
         summary,

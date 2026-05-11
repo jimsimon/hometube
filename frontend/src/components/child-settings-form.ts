@@ -88,7 +88,7 @@ export class ChildSettingsForm extends LitElement {
     }
   }
 
-  private update<K extends keyof ChildSettings>(
+  private updateField<K extends keyof ChildSettings>(
     key: K,
     value: ChildSettings[K],
   ): void {
@@ -135,7 +135,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.downloads_enabled}
             @change=${(e: Event) =>
-              this.update('downloads_enabled', (e.target as HTMLInputElement).checked)}
+              this.updateField('downloads_enabled', (e.target as HTMLInputElement).checked)}
           />
         </label>
 
@@ -146,7 +146,7 @@ export class ChildSettingsForm extends LitElement {
             .value=${s.max_quality ?? 'unlimited'}
             @change=${(e: Event) => {
               const v = (e.target as HTMLSelectElement).value;
-              this.update(
+              this.updateField(
                 'max_quality',
                 v === 'unlimited' ? null : (v as '480p' | '720p' | '1080p'),
               );
@@ -171,7 +171,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.playback_speed_locked}
             @change=${(e: Event) =>
-              this.update(
+              this.updateField(
                 'playback_speed_locked',
                 (e.target as HTMLInputElement).checked,
               )}
@@ -185,7 +185,7 @@ export class ChildSettingsForm extends LitElement {
             type="checkbox"
             .checked=${s.autoplay_enabled}
             @change=${(e: Event) =>
-              this.update('autoplay_enabled', (e.target as HTMLInputElement).checked)}
+              this.updateField('autoplay_enabled', (e.target as HTMLInputElement).checked)}
           />
         </label>
 
@@ -202,7 +202,7 @@ export class ChildSettingsForm extends LitElement {
               : String(s.autoplay_max_consecutive)}
             @input=${(e: Event) => {
               const v = (e.target as HTMLInputElement).value;
-              this.update(
+              this.updateField(
                 'autoplay_max_consecutive',
                 v === '' ? null : Number(v),
               );

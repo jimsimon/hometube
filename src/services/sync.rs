@@ -105,8 +105,14 @@ pub async fn push_subscription_change(
         }
         Err(err) => {
             warn!(account_id, %channel_id, %err, "subscription sync failed");
-            mark_sync_error(pool, "child_subscriptions", "channel_id", channel_id, account_id)
-                .await?;
+            mark_sync_error(
+                pool,
+                "child_subscriptions",
+                "channel_id",
+                channel_id,
+                account_id,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -414,13 +420,11 @@ pub async fn push_playlist_item_change(
             })
             .await
         }
-        PlaylistItemAction::Remove => {
-            retry_push(|| async {
-                playlist_item_delete(pool, account_id, &yt_playlist, video_id).await
-            })
-            .await
-            .map(|_| String::new())
-        }
+        PlaylistItemAction::Remove => retry_push(|| async {
+            playlist_item_delete(pool, account_id, &yt_playlist, video_id).await
+        })
+        .await
+        .map(|_| String::new()),
         PlaylistItemAction::Reorder => {
             retry_push(|| async { playlist_items_reorder(pool, account_id, playlist_id).await })
                 .await
@@ -503,7 +507,9 @@ async fn playlist_item_delete(
             item.pointer("/contentDetails/videoId")
                 .and_then(|v| v.as_str())
                 == Some(video_id)
-                || item.pointer("/snippet/resourceId/videoId").and_then(|v| v.as_str())
+                || item
+                    .pointer("/snippet/resourceId/videoId")
+                    .and_then(|v| v.as_str())
                     == Some(video_id)
         })
         .and_then(|item| item.get("id").and_then(|v| v.as_str()).map(String::from));
@@ -529,13 +535,12 @@ async fn playlist_items_reorder(
     playlist_id: i64,
 ) -> AppResult<()> {
     let token = refresh_if_expired(pool, account_id).await?;
-    let yt_id: Option<String> = sqlx::query_scalar(
-        "SELECT youtube_playlist_id FROM child_playlists WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let yt_id: Option<String> =
+        sqlx::query_scalar("SELECT youtube_playlist_id FROM child_playlists WHERE id = ?")
+            .bind(playlist_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
     let Some(yt_playlist) = yt_id else {
         return Ok(());
     };
@@ -613,11 +618,7 @@ async fn playlist_items_reorder(
 /// Sync a single like row with YouTube via `videos.rate`.
 ///
 /// `pending_push` → `rating=like`. `pending_delete` → `rating=none`.
-pub async fn push_like_change(
-    pool: &SqlitePool,
-    account_id: i64,
-    video_id: &str,
-) -> AppResult<()> {
+pub async fn push_like_change(pool: &SqlitePool, account_id: i64, video_id: &str) -> AppResult<()> {
     let row: Option<(String, i64)> = sqlx::query_as(
         "SELECT sync_status, is_deleted FROM video_likes \
          WHERE child_account_id = ? AND video_id = ?",
@@ -687,7 +688,9 @@ async fn youtube_call(
 ) -> AppResult<Value> {
     let client = Client::new();
     let url = format!("{API_BASE}{path}");
-    let mut req = client.request(method.clone(), &url).bearer_auth(access_token);
+    let mut req = client
+        .request(method.clone(), &url)
+        .bearer_auth(access_token);
     for (k, v) in query {
         req = req.query(&[(k, v)]);
     }
@@ -721,7 +724,10 @@ where
     Fut: std::future::Future<Output = AppResult<T>>,
 {
     let mut last_err: Option<AppError> = None;
-    for (attempt, _) in std::iter::once(0u64).chain(BACKOFF_MS.iter().copied()).enumerate() {
+    for (attempt, _) in std::iter::once(0u64)
+        .chain(BACKOFF_MS.iter().copied())
+        .enumerate()
+    {
         if attempt > 0 {
             let delay = BACKOFF_MS[attempt - 1];
             tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -829,11 +835,7 @@ async fn sync_subscriptions(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
         std::collections::HashSet::new();
 
     loop {
-        let mut q = vec![
-            ("part", "snippet"),
-            ("mine", "true"),
-            ("maxResults", "50"),
-        ];
+        let mut q = vec![("part", "snippet"), ("mine", "true"), ("maxResults", "50")];
         if let Some(ref tok) = page_token {
             q.push(("pageToken", tok.as_str()));
         }
@@ -928,8 +930,7 @@ async fn sync_subscriptions(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
 async fn sync_likes(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
     let token = refresh_if_expired(pool, child_id).await?;
     let mut page_token: Option<String> = None;
-    let mut remote_video_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut remote_video_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let mut q = vec![
@@ -1047,10 +1048,7 @@ async fn sync_playlists(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
             .cloned()
             .unwrap_or_default();
         for item in items {
-            let yt_id = item
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            let yt_id = item.get("id").and_then(|v| v.as_str()).map(String::from);
             let snip = item.get("snippet");
             let title = snip
                 .and_then(|s| s.get("title"))
@@ -1103,9 +1101,7 @@ async fn sync_playlists(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
             };
 
             // Pull the playlist's items (best-effort, single page).
-            if let Err(err) =
-                sync_playlist_items(pool, &token, local_id, &yt_id).await
-            {
+            if let Err(err) = sync_playlist_items(pool, &token, local_id, &yt_id).await {
                 warn!(child_id, playlist=%yt_id, %err, "playlist items sync failed");
             }
         }
@@ -1193,7 +1189,9 @@ async fn sync_playlist_items(
                 })
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let position = snip.and_then(|s| s.get("position")).and_then(|v| v.as_i64());
+            let position = snip
+                .and_then(|s| s.get("position"))
+                .and_then(|v| v.as_i64());
             let Some(video_id) = video_id else {
                 continue;
             };
@@ -1228,31 +1226,24 @@ async fn sync_playlist_items(
     }
 
     // Drop locally-stored items that disappeared from YouTube.
-    let local: Vec<(String,)> = sqlx::query_as(
-        "SELECT video_id FROM child_playlist_videos WHERE playlist_id = ?",
-    )
-    .bind(local_playlist_id)
-    .fetch_all(pool)
-    .await?;
+    let local: Vec<(String,)> =
+        sqlx::query_as("SELECT video_id FROM child_playlist_videos WHERE playlist_id = ?")
+            .bind(local_playlist_id)
+            .fetch_all(pool)
+            .await?;
     for (video_id,) in local {
         if !seen.contains(&video_id) {
-            sqlx::query(
-                "DELETE FROM child_playlist_videos WHERE playlist_id = ? AND video_id = ?",
-            )
-            .bind(local_playlist_id)
-            .bind(&video_id)
-            .execute(pool)
-            .await?;
+            sqlx::query("DELETE FROM child_playlist_videos WHERE playlist_id = ? AND video_id = ?")
+                .bind(local_playlist_id)
+                .bind(&video_id)
+                .execute(pool)
+                .await?;
         }
     }
     Ok(())
 }
 
-async fn youtube_get(
-    token: &str,
-    path: &str,
-    query: &[(&str, &str)],
-) -> AppResult<Value> {
+async fn youtube_get(token: &str, path: &str, query: &[(&str, &str)]) -> AppResult<Value> {
     let client = Client::new();
     let url = format!("{API_BASE}{path}");
     let mut req = client.get(&url).bearer_auth(token);
@@ -1270,11 +1261,7 @@ async fn youtube_get(
     res.json::<Value>().await.map_err(AppError::Http)
 }
 
-async fn update_sync_state(
-    pool: &SqlitePool,
-    account_id: i64,
-    data_type: &str,
-) -> AppResult<()> {
+async fn update_sync_state(pool: &SqlitePool, account_id: i64, data_type: &str) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO sync_state (account_id, data_type, last_synced_at) \
          VALUES (?, ?, unixepoch()) \
@@ -1288,11 +1275,7 @@ async fn update_sync_state(
     Ok(())
 }
 
-async fn notify_sync_error(
-    pool: &SqlitePool,
-    child_id: i64,
-    err: &str,
-) -> AppResult<()> {
+async fn notify_sync_error(pool: &SqlitePool, child_id: i64, err: &str) -> AppResult<()> {
     let parents: Vec<(i64,)> =
         sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
             .fetch_all(pool)

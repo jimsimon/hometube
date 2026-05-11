@@ -22,10 +22,10 @@ import type {
 @customElement('hometube-family-playlist-form')
 export class FamilyPlaylistForm extends LitElement {
   @state() private existing: FamilyPlaylistDetail | null = null;
-  @state() private title = '';
+  @state() private titleValue = '';
   @state() private description = '';
   @state() private childIds: number[] = [];
-  @state() private children: AccountSummary[] = [];
+  @state() private childrenList: AccountSummary[] = [];
   @state() private error = '';
   @state() private saving = false;
 
@@ -101,7 +101,7 @@ export class FamilyPlaylistForm extends LitElement {
   /** Open in create mode (no existing) or edit mode (existing). */
   open(existing?: FamilyPlaylistDetail): void {
     this.existing = existing ?? null;
-    this.title = existing?.title ?? '';
+    this.titleValue = existing?.title ?? '';
     this.description = existing?.description ?? '';
     this.childIds = existing ? [...existing.child_ids] : [];
     this.error = '';
@@ -110,7 +110,7 @@ export class FamilyPlaylistForm extends LitElement {
 
   private async loadChildren(): Promise<void> {
     try {
-      this.children = await api.get<AccountSummary[]>(
+      this.childrenList = await api.get<AccountSummary[]>(
         '/api/accounts?type=child',
       );
     } catch {
@@ -130,7 +130,7 @@ export class FamilyPlaylistForm extends LitElement {
 
   private onSubmit = async (e: Event): Promise<void> => {
     e.preventDefault();
-    if (!this.title.trim()) {
+    if (!this.titleValue.trim()) {
       this.error = 'Title is required';
       return;
     }
@@ -142,7 +142,7 @@ export class FamilyPlaylistForm extends LitElement {
         saved = await api.put<FamilyPlaylistDetail>(
           `/api/family-playlists/${this.existing.id}`,
           {
-            title: this.title,
+            title: this.titleValue,
             description: this.description,
             child_ids: this.childIds,
           },
@@ -151,7 +151,7 @@ export class FamilyPlaylistForm extends LitElement {
         saved = await api.post<FamilyPlaylistDetail>(
           '/api/family-playlists',
           {
-            title: this.title,
+            title: this.titleValue,
             description: this.description,
             child_ids: this.childIds,
           },
@@ -185,9 +185,9 @@ export class FamilyPlaylistForm extends LitElement {
             <input
               type="text"
               required
-              .value=${this.title}
+              .value=${this.titleValue}
               @input=${(e: Event) =>
-                (this.title = (e.target as HTMLInputElement).value)}
+                (this.titleValue = (e.target as HTMLInputElement).value)}
             />
           </label>
           <label>
@@ -201,9 +201,9 @@ export class FamilyPlaylistForm extends LitElement {
           </label>
           <fieldset class="members">
             <legend>Children with access</legend>
-            ${this.children.length === 0
+            ${this.childrenList.length === 0
               ? html`<span class="error">No child accounts found.</span>`
-              : this.children.map(
+              : this.childrenList.map(
                   (c) => html`
                     <label class="row">
                       <input

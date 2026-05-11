@@ -76,9 +76,7 @@ struct ParentHomeTemplate {
 /// `GET /parent/home` — the allowlist + child-management dashboard.
 /// Children get redirected to their own home; anonymous users go to the
 /// placeholder.
-pub async fn parent_home(
-    current: Option<CurrentAccount>,
-) -> AppResult<Response> {
+pub async fn parent_home(current: Option<CurrentAccount>) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Parent) => {
             let tpl = ParentHomeTemplate {
@@ -348,9 +346,7 @@ struct ChildHomeTemplate {
 
 /// `GET /child/home` — kid-friendly browse page with continue-watching +
 /// new-videos rows.
-pub async fn child_home(
-    current: Option<CurrentAccount>,
-) -> AppResult<Response> {
+pub async fn child_home(current: Option<CurrentAccount>) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Child) => {
             let tpl = ChildHomeTemplate {
@@ -576,10 +572,7 @@ pub async fn child_video(
             render_video_unavailable(
                 c.display_name,
                 video_id,
-                Some(
-                    "We couldn't load this video right now. Please try again later."
-                        .to_string(),
-                ),
+                Some("We couldn't load this video right now. Please try again later.".to_string()),
             )
         }
     }

@@ -25,7 +25,7 @@ mod state;
 use crate::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
 use crate::services::dash;
 use crate::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
-use crate::services::video_cache::{KEY_METADATA_CACHE_TTL_HOURS, DEFAULT_TTL_HOURS};
+use crate::services::video_cache::{DEFAULT_TTL_HOURS, KEY_METADATA_CACHE_TTL_HOURS};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

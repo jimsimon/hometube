@@ -181,13 +181,11 @@ pub async fn delete_playlist(
     Path((child_id, playlist_id)): Path<(i64, String)>,
 ) -> AppResult<StatusCode> {
     require_child_id(&state, child_id).await?;
-    sqlx::query(
-        "DELETE FROM allowlisted_playlists WHERE child_account_id = ? AND playlist_id = ?",
-    )
-    .bind(child_id)
-    .bind(playlist_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("DELETE FROM allowlisted_playlists WHERE child_account_id = ? AND playlist_id = ?")
+        .bind(child_id)
+        .bind(playlist_id)
+        .execute(&state.db)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -283,9 +281,7 @@ pub async fn delete_video(
 
 async fn require_child_id(state: &AppState, child_id: i64) -> AppResult<()> {
     if !access::is_child_account(&state.db, child_id).await? {
-        return Err(AppError::BadRequest(
-            "target account is not a child".into(),
-        ));
+        return Err(AppError::BadRequest("target account is not a child".into()));
     }
     Ok(())
 }
@@ -308,10 +304,18 @@ fn parse_video_id(input: &str) -> String {
     let trimmed = input.trim();
     // youtu.be/<id>
     if let Some(rest) = trimmed.strip_prefix("https://youtu.be/") {
-        return rest.split(['?', '&', '/']).next().unwrap_or(rest).to_string();
+        return rest
+            .split(['?', '&', '/'])
+            .next()
+            .unwrap_or(rest)
+            .to_string();
     }
     if let Some(rest) = trimmed.strip_prefix("http://youtu.be/") {
-        return rest.split(['?', '&', '/']).next().unwrap_or(rest).to_string();
+        return rest
+            .split(['?', '&', '/'])
+            .next()
+            .unwrap_or(rest)
+            .to_string();
     }
     // youtube.com/watch?v=<id>
     if trimmed.contains("youtube.com/watch") {
@@ -331,7 +335,11 @@ fn parse_video_id(input: &str) -> String {
         "https://youtube.com/shorts/",
     ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return rest.split(['?', '&', '/']).next().unwrap_or(rest).to_string();
+            return rest
+                .split(['?', '&', '/'])
+                .next()
+                .unwrap_or(rest)
+                .to_string();
         }
     }
     trimmed.to_string()

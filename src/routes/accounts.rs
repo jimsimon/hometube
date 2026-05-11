@@ -106,17 +106,12 @@ pub async fn update(
 }
 
 /// `DELETE /api/accounts/:id` — remove an account.
-pub async fn delete(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> AppResult<StatusCode> {
+pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> AppResult<StatusCode> {
     let acct = account::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if matches!(acct.typed(), AccountType::Parent)
-        && account::parent_count(&state.db).await? <= 1
-    {
+    if matches!(acct.typed(), AccountType::Parent) && account::parent_count(&state.db).await? <= 1 {
         return Err(AppError::BadRequest(
             "cannot delete the last parent account".into(),
         ));

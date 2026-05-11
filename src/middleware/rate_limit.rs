@@ -99,8 +99,8 @@ pub async fn rate_limit_proxies(req: Request<axum::body::Body>, next: Next) -> R
         }
         Err(retry_after_secs) => {
             drop(map);
-            let mut response = (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded\n")
-                .into_response();
+            let mut response =
+                (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded\n").into_response();
             if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
                 response.headers_mut().insert(header::RETRY_AFTER, value);
             }
@@ -113,10 +113,7 @@ fn derive_key(req: &Request<axum::body::Body>) -> BucketKey {
     if let Some(current) = req.extensions().get::<CurrentAccount>() {
         return BucketKey::Account(current.id);
     }
-    if let Some(connect_info) = req
-        .extensions()
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-    {
+    if let Some(connect_info) = req.extensions().get::<ConnectInfo<std::net::SocketAddr>>() {
         return BucketKey::Ip(connect_info.0.ip());
     }
     // Fall back to a sentinel value if no peer info is available — the

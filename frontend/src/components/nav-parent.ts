@@ -29,7 +29,7 @@ export class NavParent extends LitElement {
   @property({ type: String, attribute: 'display-name' })
   displayName = '';
 
-  @state() private children: AccountSummary[] = [];
+  @state() private childrenList: AccountSummary[] = [];
   @state() private selectedChildId: number | null = null;
   @state() private loading = false;
   @state() private error = '';
@@ -109,7 +109,7 @@ export class NavParent extends LitElement {
     this.error = '';
     try {
       const list = await api.get<AccountSummary[]>('/api/accounts?type=child');
-      this.children = list;
+      this.childrenList = list;
       const stored = Number(localStorage.getItem(SELECTED_CHILD_KEY));
       const fromStore = list.find((c) => c.id === stored);
       const initial = fromStore ?? list[0];
@@ -166,7 +166,7 @@ export class NavParent extends LitElement {
 
         ${this.loading
           ? html`<span class="who">Loading…</span>`
-          : this.children.length === 0
+          : this.childrenList.length === 0
             ? html`<span class="who">No children yet</span>`
             : html`
                 <label class="child-picker" for="child-select">
@@ -177,7 +177,7 @@ export class NavParent extends LitElement {
                     .value=${String(this.selectedChildId ?? '')}
                     @change=${this.onChildChange}
                   >
-                    ${this.children.map(
+                    ${this.childrenList.map(
                       (c) =>
                         html`<option
                           value=${c.id}

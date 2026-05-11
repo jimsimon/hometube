@@ -14,7 +14,7 @@ import type { PlaylistSummary } from '../types/index.js';
 
 @customElement('hometube-create-playlist-dialog')
 export class CreatePlaylistDialog extends LitElement {
-  @state() private title = '';
+  @state() private titleValue = '';
   @state() private description = '';
   @state() private busy = false;
   @state() private error = '';
@@ -79,7 +79,7 @@ export class CreatePlaylistDialog extends LitElement {
 
   /** Public method: open the dialog and reset state. */
   open(): void {
-    this.title = '';
+    this.titleValue = '';
     this.description = '';
     this.error = '';
     queueMicrotask(() => this.dialog?.show?.());
@@ -91,7 +91,7 @@ export class CreatePlaylistDialog extends LitElement {
 
   private async onSubmit(e: Event): Promise<void> {
     e.preventDefault();
-    if (!this.title.trim()) {
+    if (!this.titleValue.trim()) {
       this.error = 'Title is required.';
       return;
     }
@@ -99,7 +99,7 @@ export class CreatePlaylistDialog extends LitElement {
     this.error = '';
     try {
       await api.post<PlaylistSummary>('/api/playlists', {
-        title: this.title.trim(),
+        title: this.titleValue.trim(),
         description: this.description.trim() || null,
       });
       this.dispatchEvent(
@@ -126,9 +126,9 @@ export class CreatePlaylistDialog extends LitElement {
             <input
               type="text"
               required
-              .value=${this.title}
+              .value=${this.titleValue}
               @input=${(e: Event) =>
-                (this.title = (e.target as HTMLInputElement).value)}
+                (this.titleValue = (e.target as HTMLInputElement).value)}
             />
           </label>
           <label>

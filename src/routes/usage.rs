@@ -192,14 +192,12 @@ async fn upsert_usage_log(
     };
 
     if let Some((id, dur)) = extend {
-        sqlx::query(
-            "UPDATE usage_log SET ended_at = ?, duration_seconds = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(dur + elapsed)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE usage_log SET ended_at = ?, duration_seconds = ? WHERE id = ?")
+            .bind(now)
+            .bind(dur + elapsed)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     } else {
         sqlx::query(
             "INSERT INTO usage_log \
@@ -222,11 +220,7 @@ async fn upsert_usage_log(
 /// Definitively close the in-flight log row for `(child, video)` so the
 /// next heartbeat starts fresh. Used when the server signals
 /// `limit_exceeded` mid-session.
-async fn close_open_log(
-    state: &AppState,
-    child_id: i64,
-    video_id: &str,
-) -> AppResult<()> {
+async fn close_open_log(state: &AppState, child_id: i64, video_id: &str) -> AppResult<()> {
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
         "UPDATE usage_log \

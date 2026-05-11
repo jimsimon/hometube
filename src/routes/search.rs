@@ -53,9 +53,7 @@ pub async fn parent_search(
     let kind = SearchType::parse(&q.kind)
         .ok_or_else(|| AppError::BadRequest("type must be channel|playlist|video".into()))?;
     let yt = YoutubeClient::from_db(&state.db).await?;
-    let items = yt
-        .search(&q.q, kind, q.max_results.unwrap_or(15))
-        .await?;
+    let items = yt.search(&q.q, kind, q.max_results.unwrap_or(15)).await?;
     Ok(Json(SearchResponse { items }))
 }
 
@@ -157,12 +155,10 @@ pub async fn child_search(
     let want_videos = matches!(kind_label.as_str(), "video" | "all");
 
     if want_channels {
-        results.channels =
-            search_channels(&state, current.id, &pattern, limit).await?;
+        results.channels = search_channels(&state, current.id, &pattern, limit).await?;
     }
     if want_playlists {
-        results.playlists =
-            search_playlists(&state, current.id, &pattern, limit).await?;
+        results.playlists = search_playlists(&state, current.id, &pattern, limit).await?;
     }
     if want_videos {
         results.videos = search_videos(&state, current.id, &pattern, limit).await?;
@@ -394,9 +390,7 @@ async fn search_videos(
 /// `thumbnails` map. Currently unused locally but exposed for future
 /// suggestion endpoints.
 #[allow(dead_code)]
-pub fn pick_thumb_url(
-    thumbs: &std::collections::HashMap<String, ThumbnailInfo>,
-) -> Option<String> {
+pub fn pick_thumb_url(thumbs: &std::collections::HashMap<String, ThumbnailInfo>) -> Option<String> {
     for key in ["maxres", "high", "standard", "medium", "default"] {
         if let Some(t) = thumbs.get(key) {
             return Some(t.url.clone());

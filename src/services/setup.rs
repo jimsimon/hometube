@@ -69,9 +69,8 @@ pub async fn has_google_credentials(pool: &SqlitePool) -> AppResult<bool> {
 
 /// True if at least one parent account exists.
 pub async fn has_first_parent(pool: &SqlitePool) -> AppResult<bool> {
-    let row: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE account_type = 'parent'")
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE account_type = 'parent'")
+        .fetch_one(pool)
+        .await?;
     Ok(row.0 > 0)
 }

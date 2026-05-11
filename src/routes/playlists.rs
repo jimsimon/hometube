@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::services::sync::{
-    push_playlist_change, push_playlist_item_change, PlaylistItemAction,
-};
+use crate::services::sync::{push_playlist_change, push_playlist_item_change, PlaylistItemAction};
 use crate::services::youtube::YoutubeClient;
 use crate::state::AppState;
 
@@ -64,7 +62,18 @@ pub async fn list(
     let out = rows
         .into_iter()
         .map(
-            |(id, yt_id, title, description, is_own, source, sync_status, video_count, created_at, updated_at)| {
+            |(
+                id,
+                yt_id,
+                title,
+                description,
+                is_own,
+                source,
+                sync_status,
+                video_count,
+                created_at,
+                updated_at,
+            )| {
                 PlaylistSummary {
                     id,
                     youtube_playlist_id: yt_id,
@@ -344,13 +353,12 @@ pub async fn remove_video(
             "library playlists are read-only".into(),
         ));
     }
-    let result = sqlx::query(
-        "DELETE FROM child_playlist_videos WHERE playlist_id = ? AND video_id = ?",
-    )
-    .bind(playlist_id)
-    .bind(&video_id)
-    .execute(&state.db)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM child_playlist_videos WHERE playlist_id = ? AND video_id = ?")
+            .bind(playlist_id)
+            .bind(&video_id)
+            .execute(&state.db)
+            .await?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
@@ -397,13 +405,12 @@ pub async fn reorder_videos(
             "library playlists are read-only".into(),
         ));
     }
-    let yt_id: Option<String> = sqlx::query_scalar(
-        "SELECT youtube_playlist_id FROM child_playlists WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .fetch_optional(&state.db)
-    .await?
-    .flatten();
+    let yt_id: Option<String> =
+        sqlx::query_scalar("SELECT youtube_playlist_id FROM child_playlists WHERE id = ?")
+            .bind(playlist_id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
     if let Some(id) = yt_id.as_deref() {
         // YouTube refuses reorder on system playlists.
         if id == "LL" || id == "WL" {
@@ -554,12 +561,10 @@ async fn require_owner(state: &AppState, child_id: i64, playlist_id: i64) -> App
 }
 
 async fn is_own(state: &AppState, playlist_id: i64) -> AppResult<bool> {
-    let v: i64 = sqlx::query_scalar(
-        "SELECT is_own FROM child_playlists WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .fetch_one(&state.db)
-    .await?;
+    let v: i64 = sqlx::query_scalar("SELECT is_own FROM child_playlists WHERE id = ?")
+        .bind(playlist_id)
+        .fetch_one(&state.db)
+        .await?;
     Ok(v != 0)
 }
 
@@ -575,7 +580,18 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         .bind(playlist_id)
         .fetch_one(&state.db)
         .await?;
-    let (id, yt_id, title, description, is_own, source, sync_status, video_count, created_at, updated_at) = row;
+    let (
+        id,
+        yt_id,
+        title,
+        description,
+        is_own,
+        source,
+        sync_status,
+        video_count,
+        created_at,
+        updated_at,
+    ) = row;
     Ok(PlaylistSummary {
         id,
         youtube_playlist_id: yt_id,

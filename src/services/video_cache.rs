@@ -183,8 +183,7 @@ pub fn cache_size_preset_to_bytes(label: &str) -> u64 {
 }
 
 /// Recognised size presets, in order of presentation.
-pub const CACHE_SIZE_PRESETS: &[&str] =
-    &["5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited"];
+pub const CACHE_SIZE_PRESETS: &[&str] = &["5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited"];
 
 /// Resolve the configured max size, defaulting to [`DEFAULT_CACHE_MAX_SIZE`].
 pub async fn current_cache_size_label(pool: &SqlitePool) -> String {
@@ -220,10 +219,9 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
     let mut evicted_bytes: u64 = 0;
 
     // Allowlist-based cleanup.
-    let video_ids: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT video_id FROM segment_cache")
-            .fetch_all(pool)
-            .await?;
+    let video_ids: Vec<(String,)> = sqlx::query_as("SELECT DISTINCT video_id FROM segment_cache")
+        .fetch_all(pool)
+        .await?;
 
     for (video_id,) in &video_ids {
         let allowlisted = video_is_anywhere_allowlisted(pool, video_id).await?;
@@ -282,41 +280,39 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
     Ok((msg, output))
 }
 
-async fn video_is_anywhere_allowlisted(
-    pool: &SqlitePool,
-    video_id: &str,
-) -> AppResult<bool> {
+async fn video_is_anywhere_allowlisted(pool: &SqlitePool, video_id: &str) -> AppResult<bool> {
     // Direct allowlist by video.
-    let direct: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM allowlisted_videos WHERE video_id = ?",
-    )
-    .bind(video_id)
-    .fetch_one(pool)
-    .await?;
+    let direct: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM allowlisted_videos WHERE video_id = ?")
+            .bind(video_id)
+            .fetch_one(pool)
+            .await?;
     if direct > 0 {
         return Ok(true);
     }
 
     // Allowlist via channel: check whether the cached metadata records
     // a channel_id that any child has allowlisted.
-    let channel_id: Option<String> = sqlx::query_scalar(
-        "SELECT metadata_json FROM video_metadata_cache WHERE video_id = ?",
-    )
-    .bind(video_id)
-    .fetch_optional(pool)
-    .await?
-    .and_then(|json: String| {
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
-            .and_then(|v| v.get("channel_id").and_then(|c| c.as_str()).map(String::from))
-    });
+    let channel_id: Option<String> =
+        sqlx::query_scalar("SELECT metadata_json FROM video_metadata_cache WHERE video_id = ?")
+            .bind(video_id)
+            .fetch_optional(pool)
+            .await?
+            .and_then(|json: String| {
+                serde_json::from_str::<serde_json::Value>(&json)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("channel_id")
+                            .and_then(|c| c.as_str())
+                            .map(String::from)
+                    })
+            });
     if let Some(ch) = channel_id {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = ?",
-        )
-        .bind(&ch)
-        .fetch_one(pool)
-        .await?;
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = ?")
+                .bind(&ch)
+                .fetch_one(pool)
+                .await?;
         if n > 0 {
             return Ok(true);
         }
@@ -367,12 +363,11 @@ async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)>
 
 /// Total bytes currently in the segment cache.
 pub async fn total_cache_bytes(pool: &SqlitePool) -> AppResult<u64> {
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(file_size_bytes), 0) FROM segment_cache",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let total: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size_bytes), 0) FROM segment_cache")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
     Ok(total.max(0) as u64)
 }
 
@@ -387,9 +382,7 @@ pub async fn total_segment_count(pool: &SqlitePool) -> AppResult<i64> {
 
 /// Per-video aggregate (video_id, total bytes, segment count). Sorted
 /// by descending size.
-pub async fn list_cached_videos(
-    pool: &SqlitePool,
-) -> AppResult<Vec<(String, i64, i64)>> {
+pub async fn list_cached_videos(pool: &SqlitePool) -> AppResult<Vec<(String, i64, i64)>> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
         "SELECT video_id, COALESCE(SUM(file_size_bytes), 0), COUNT(*) \
          FROM segment_cache GROUP BY video_id ORDER BY 2 DESC",
@@ -400,23 +393,21 @@ pub async fn list_cached_videos(
 }
 
 /// Manually evict a single video (parent UI).
-pub async fn evict_video_public(
-    pool: &SqlitePool,
-    video_id: &str,
-) -> AppResult<(u64, u64)> {
+pub async fn evict_video_public(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)> {
     evict_video(pool, video_id).await
 }
 
 /// Wipe the entire segment cache + on-disk files we know about.
 pub async fn clear_all(pool: &SqlitePool) -> AppResult<()> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT file_path FROM segment_cache")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT file_path FROM segment_cache")
+        .fetch_all(pool)
+        .await?;
     for (path,) in rows {
         let _ = tokio::fs::remove_file(&path).await;
     }
-    sqlx::query("DELETE FROM segment_cache").execute(pool).await?;
+    sqlx::query("DELETE FROM segment_cache")
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM video_metadata_cache")
         .execute(pool)
         .await?;

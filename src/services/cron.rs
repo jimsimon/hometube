@@ -114,9 +114,9 @@ impl Scheduler {
     /// Build a new scheduler. Does **not** start it — call [`Self::start`]
     /// after registering jobs.
     pub async fn new(pool: SqlitePool, cfg: Config) -> AppResult<Self> {
-        let sched = JobScheduler::new()
-            .await
-            .map_err(|e| crate::error::AppError::Other(anyhow::anyhow!("creating scheduler: {e}")))?;
+        let sched = JobScheduler::new().await.map_err(|e| {
+            crate::error::AppError::Other(anyhow::anyhow!("creating scheduler: {e}"))
+        })?;
         Ok(Self {
             inner: Arc::new(Mutex::new(sched)),
             pool,
@@ -128,10 +128,9 @@ impl Scheduler {
     /// (the underlying library tolerates it).
     pub async fn start(&self) -> AppResult<()> {
         let sched = self.inner.lock().await;
-        sched
-            .start()
-            .await
-            .map_err(|e| crate::error::AppError::Other(anyhow::anyhow!("starting scheduler: {e}")))?;
+        sched.start().await.map_err(|e| {
+            crate::error::AppError::Other(anyhow::anyhow!("starting scheduler: {e}"))
+        })?;
         Ok(())
     }
 
@@ -139,11 +138,10 @@ impl Scheduler {
     /// for a single job are logged and skipped — the scheduler always
     /// starts even if a malformed expression slipped in.
     pub async fn register_all(&self) -> AppResult<()> {
-        let rows: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
-            "SELECT id, name, job_type, schedule, enabled FROM cron_jobs",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(i64, String, String, String, i64)> =
+            sqlx::query_as("SELECT id, name, job_type, schedule, enabled FROM cron_jobs")
+                .fetch_all(&self.pool)
+                .await?;
 
         for (job_id, name, job_type, schedule, enabled) in rows {
             if enabled == 0 {
@@ -195,14 +193,12 @@ impl Scheduler {
     /// Trigger a single job immediately, off the scheduler. Returns the
     /// `cron_job_runs.id` of the new run row.
     pub async fn run_now(&self, job_id: i64) -> AppResult<i64> {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT name, job_type FROM cron_jobs WHERE id = ?",
-        )
-        .bind(job_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let (name, job_type) =
-            row.ok_or_else(|| crate::error::AppError::NotFound)?;
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT name, job_type FROM cron_jobs WHERE id = ?")
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let (name, job_type) = row.ok_or_else(|| crate::error::AppError::NotFound)?;
 
         // Insert the run row up front so the API can return its ID
         // before the (possibly long-running) handler completes.
@@ -304,7 +300,11 @@ async fn finalize_run(
     _name: &str,
     outcome: &RunOutcome,
 ) -> AppResult<()> {
-    let status = if outcome.success { "success" } else { "failure" };
+    let status = if outcome.success {
+        "success"
+    } else {
+        "failure"
+    };
     sqlx::query(
         "UPDATE cron_job_runs SET finished_at = unixepoch(), status = ?, \
             message = ?, output = ? WHERE id = ?",
@@ -455,10 +455,9 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
 /// Best-effort `--version` lookup so the parent UI shows something
 /// useful on first boot.
 pub async fn seed_ytdlp_info(pool: &SqlitePool, cfg: &Config) -> AppResult<()> {
-    let exists: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM ytdlp_info WHERE id = 1")
-            .fetch_one(pool)
-            .await?;
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ytdlp_info WHERE id = 1")
+        .fetch_one(pool)
+        .await?;
     if exists > 0 {
         return Ok(());
     }
@@ -477,9 +476,5 @@ pub async fn seed_ytdlp_info(pool: &SqlitePool, cfg: &Config) -> AppResult<()> {
 
 /// In-process counters for cache hit / miss accounting. Keyed by static
 /// strings so they live for the program's lifetime.
-pub static CACHE_HIT_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub static CACHE_MISS_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-
+pub static CACHE_HIT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CACHE_MISS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

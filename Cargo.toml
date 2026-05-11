@@ -17,7 +17,6 @@ tower-cookies = { version = "0.11", features = ["signed"] }
 
 # Templates
 askama = "0.13"
-askama_axum = "0.5"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
@@ -27,7 +26,7 @@ oauth2 = "5"
 openidconnect = "4"
 
 # HTTP Client (YouTube API + video stream proxying)
-reqwest = { version = "0.13", features = ["stream", "json"] }
+reqwest = { version = "0.13", features = ["stream", "json", "query"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

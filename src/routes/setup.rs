@@ -50,18 +50,25 @@ pub async fn save_credentials(
     Json(body): Json<CredentialsBody>,
 ) -> AppResult<StatusCode> {
     validate_credentials(&body).await?;
-    setup::set_config_value(&state.db, setup::KEY_GOOGLE_CLIENT_ID, &body.google_client_id)
-        .await?;
+    setup::set_config_value(
+        &state.db,
+        setup::KEY_GOOGLE_CLIENT_ID,
+        &body.google_client_id,
+    )
+    .await?;
     setup::set_config_value(
         &state.db,
         setup::KEY_GOOGLE_CLIENT_SECRET,
         &body.google_client_secret,
     )
     .await?;
-    setup::set_config_value(&state.db, setup::KEY_YOUTUBE_API_KEY, &body.youtube_api_key)
-        .await?;
-    setup::set_config_value(&state.db, setup::KEY_GOOGLE_REDIRECT_URI, &body.redirect_uri)
-        .await?;
+    setup::set_config_value(&state.db, setup::KEY_YOUTUBE_API_KEY, &body.youtube_api_key).await?;
+    setup::set_config_value(
+        &state.db,
+        setup::KEY_GOOGLE_REDIRECT_URI,
+        &body.redirect_uri,
+    )
+    .await?;
     info!("Google credentials saved via setup wizard");
     Ok(StatusCode::NO_CONTENT)
 }

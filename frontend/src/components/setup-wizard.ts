@@ -56,7 +56,6 @@ export class SetupWizard extends LitElement {
   suggestedRedirectUri = '';
 
   @state() private step: Step = 'welcome';
-  @state() private status: SetupStatus | null = null;
   @state() private currentAccount: CurrentAccount | null = null;
   @state() private completing = false;
   @state() private completeError = '';
@@ -124,7 +123,6 @@ export class SetupWizard extends LitElement {
   private async refreshStatus(): Promise<void> {
     try {
       const status = await api.get<SetupStatus>('/api/setup/status');
-      this.status = status;
 
       // Check if there's an active session (user just came back from
       // OAuth). 401 simply means "not signed in".

@@ -128,7 +128,7 @@ pub struct PageQuery {
     pub before: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct HistoryEntry {
     pub video_id: String,
     pub video_title: Option<String>,
@@ -172,7 +172,7 @@ pub async fn history(
     Ok(Json(rows))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct TopChannel {
     pub channel_title: Option<String>,
     pub total_seconds: i64,
@@ -210,7 +210,7 @@ pub async fn top_channels(
     Ok(Json(rows))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct SearchLogEntry {
     pub id: i64,
     pub query: String,
@@ -246,16 +246,12 @@ pub async fn search_log(
 /// Verify that `child_id` actually refers to a child account. Helpers
 /// can call this to fail fast on bad input.
 #[allow(dead_code)]
-pub(crate) async fn ensure_child_exists(
-    state: &AppState,
-    child_id: i64,
-) -> AppResult<()> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM accounts WHERE id = ? AND account_type = 'child'",
-    )
-    .bind(child_id)
-    .fetch_one(&state.db)
-    .await?;
+pub(crate) async fn ensure_child_exists(state: &AppState, child_id: i64) -> AppResult<()> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE id = ? AND account_type = 'child'")
+            .bind(child_id)
+            .fetch_one(&state.db)
+            .await?;
     if count == 0 {
         return Err(AppError::NotFound);
     }

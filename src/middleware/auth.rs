@@ -8,12 +8,7 @@
 
 use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
-use axum::{
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::State, http::Request, middleware::Next, response::Response};
 use tower_cookies::{Cookie, Cookies};
 use tracing::debug;
 

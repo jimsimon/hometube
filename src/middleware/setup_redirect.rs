@@ -38,7 +38,9 @@ const ALLOWED_PREFIXES: &[&str] = &[
 
 fn is_allowed(uri: &Uri) -> bool {
     let path = uri.path();
-    ALLOWED_PREFIXES.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")))
+    ALLOWED_PREFIXES
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
 pub async fn setup_redirect(

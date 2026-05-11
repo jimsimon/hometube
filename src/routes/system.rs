@@ -58,11 +58,9 @@ pub async fn get_ytdlp(State(state): State<AppState>) -> AppResult<Json<YtdlpSta
                 LATEST_VERSION_FETCHED_AT.store(Utc::now().timestamp(), Ordering::Relaxed);
             }
             // Persist the last_checked_at column.
-            let _ = sqlx::query(
-                "UPDATE ytdlp_info SET last_checked_at = unixepoch() WHERE id = 1",
-            )
-            .execute(&pool)
-            .await;
+            let _ = sqlx::query("UPDATE ytdlp_info SET last_checked_at = unixepoch() WHERE id = 1")
+                .execute(&pool)
+                .await;
         });
     }
 
@@ -86,9 +84,7 @@ pub struct UpdateResponse {
 ///
 /// Resolves the `ytdlp_update` job from `cron_jobs` and triggers it via
 /// the scheduler.
-pub async fn update_ytdlp(
-    State(state): State<AppState>,
-) -> AppResult<Json<UpdateResponse>> {
+pub async fn update_ytdlp(State(state): State<AppState>) -> AppResult<Json<UpdateResponse>> {
     let sched = state
         .scheduler
         .as_ref()

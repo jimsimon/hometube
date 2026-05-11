@@ -107,7 +107,10 @@ pub async fn new_videos(
     let mut items: Vec<NewVideoItem> = Vec::new();
 
     for channel_id in &channels {
-        match yt.list_channel_videos(channel_id, PER_SOURCE_LIMIT, None).await {
+        match yt
+            .list_channel_videos(channel_id, PER_SOURCE_LIMIT, None)
+            .await
+        {
             Ok(page) => {
                 for it in page.items {
                     items.push(NewVideoItem {
@@ -126,7 +129,10 @@ pub async fn new_videos(
         }
     }
     for playlist_id in &playlists {
-        match yt.list_playlist_items(playlist_id, PER_SOURCE_LIMIT, None).await {
+        match yt
+            .list_playlist_items(playlist_id, PER_SOURCE_LIMIT, None)
+            .await
+        {
             Ok(page) => {
                 for it in page.items {
                     items.push(NewVideoItem {
@@ -228,7 +234,9 @@ pub async fn up_next(
     let (kind, id) = parse_from(q.from.as_deref());
 
     let raw: Vec<UpNextItem> = match (kind, id) {
-        (Some("playlist"), Some(playlist_id)) => up_next_from_playlist(&state, current.id, playlist_id).await?,
+        (Some("playlist"), Some(playlist_id)) => {
+            up_next_from_playlist(&state, current.id, playlist_id).await?
+        }
         (Some("channel"), Some(channel_id)) => up_next_from_channel(&state, channel_id).await?,
         _ => up_next_from_new_videos(&state, current.id).await?,
     };
@@ -335,10 +343,7 @@ async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<V
         .collect())
 }
 
-async fn up_next_from_new_videos(
-    state: &AppState,
-    child_id: i64,
-) -> AppResult<Vec<UpNextItem>> {
+async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<Vec<UpNextItem>> {
     let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
         Ok(y) => y,
         Err(_) => return Ok(Vec::new()),

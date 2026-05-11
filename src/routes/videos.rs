@@ -140,12 +140,7 @@ pub async fn get_stream(
     let manifest_url = result
         .manifest_url
         .clone()
-        .or_else(|| {
-            result
-                .formats
-                .iter()
-                .find_map(|f| f.manifest_url.clone())
-        });
+        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
     let manifest = match manifest_url {
         Some(url) => {
             let secret = dash::ensure_proxy_secret(&state.db).await?;
@@ -247,15 +242,12 @@ pub async fn get_caption(
                 .or_else(|| tracks.first())
         })
         .or_else(|| {
-            result
-                .automatic_captions
-                .get(&lang)
-                .and_then(|tracks| {
-                    tracks
-                        .iter()
-                        .find(|t| t.ext == "vtt")
-                        .or_else(|| tracks.first())
-                })
+            result.automatic_captions.get(&lang).and_then(|tracks| {
+                tracks
+                    .iter()
+                    .find(|t| t.ext == "vtt")
+                    .or_else(|| tracks.first())
+            })
         })
         .cloned();
 
@@ -284,14 +276,16 @@ pub async fn get_caption(
 /// Build the `text/vtt` HTTP response.
 fn vtt_response(body: String) -> Response {
     let mut response = (StatusCode::OK, body).into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, "text/vtt; charset=utf-8".parse().unwrap());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "text/vtt; charset=utf-8".parse().unwrap(),
+    );
     // Help vidstack cache cross-track switches by allowing a short
     // browser cache lifetime.
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600".parse().unwrap(),
+    );
     response
 }
 
@@ -309,8 +303,7 @@ struct CaptionEntry {
 }
 
 fn caption_cache() -> &'static Mutex<HashMap<(String, String), CaptionEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), CaptionEntry>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), CaptionEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -372,12 +365,10 @@ pub async fn get_segment(
         lookup_cached_segment(&state.db, &q.video_id, &q.format, &q.sq).await?
     {
         debug!(video = %q.video_id, fmt = %q.format, sq = %q.sq, "segment cache hit");
-        crate::services::cron::CACHE_HIT_COUNTER
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::services::cron::CACHE_HIT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return serve_file(&path, size, &headers).await;
     }
-    crate::services::cron::CACHE_MISS_COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::services::cron::CACHE_MISS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Miss: resolve the upstream URL via the cached metadata.
     let cache = video_cache(&state);
@@ -513,7 +504,8 @@ pub async fn get_audio(
     // audio-only format available so the player can transition in a
     // single hop.
     let chosen_format = if q.format.is_empty() {
-        best_audio_format_id(&result).ok_or_else(|| AppError::BadRequest("no audio formats".into()))?
+        best_audio_format_id(&result)
+            .ok_or_else(|| AppError::BadRequest("no audio formats".into()))?
     } else {
         q.format.clone()
     };
@@ -681,12 +673,11 @@ async fn enforce_access(
 }
 
 async fn max_height_for_child(pool: &SqlitePool, child_id: i64) -> AppResult<Option<i64>> {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT max_quality FROM child_settings WHERE child_account_id = ?",
-    )
-    .bind(child_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT max_quality FROM child_settings WHERE child_account_id = ?")
+            .bind(child_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(match row.and_then(|(q,)| q) {
         Some(s) => match s.as_str() {
             "480p" => Some(480),
@@ -709,15 +700,8 @@ fn pick_thumbnail(result: &ExtractResult) -> Option<String> {
         .map(|t| t.url.clone())
 }
 
-fn build_upstream_segment_url(
-    result: &ExtractResult,
-    format_id: &str,
-    sq: &str,
-) -> Option<String> {
-    let format = result
-        .formats
-        .iter()
-        .find(|f| f.format_id == format_id)?;
+fn build_upstream_segment_url(result: &ExtractResult, format_id: &str, sq: &str) -> Option<String> {
+    let format = result.formats.iter().find(|f| f.format_id == format_id)?;
 
     if let Some(url) = &format.url {
         // Replace `&sq=<old>` with `&sq=<new>` if it's there; otherwise
@@ -840,11 +824,7 @@ fn parse_sq(sq: &str) -> i64 {
     sq.parse().unwrap_or(0)
 }
 
-async fn serve_file(
-    path: &PathBuf,
-    _size: i64,
-    _headers: &HeaderMap,
-) -> AppResult<Response> {
+async fn serve_file(path: &PathBuf, _size: i64, _headers: &HeaderMap) -> AppResult<Response> {
     // TODO(phase-12): honour the `Range` header on cache hits so the
     // player can seek inside an already-cached segment without a full
     // re-download. Segments are typically only 2-5 MB so the

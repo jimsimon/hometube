@@ -183,7 +183,11 @@ impl YoutubeClient {
     /// Issue a GET to `path` with `query` (already including `key`),
     /// returning the parsed JSON body. Results are cached for
     /// [`CACHE_TTL`].
-    async fn get_json(&self, path: &str, query: Vec<(&str, String)>) -> AppResult<serde_json::Value> {
+    async fn get_json(
+        &self,
+        path: &str,
+        query: Vec<(&str, String)>,
+    ) -> AppResult<serde_json::Value> {
         let mut full_query = query;
         full_query.push(("key", self.api_key.clone()));
         let url = build_canonical_url(&format!("{API_BASE}{path}"), &full_query);
@@ -201,12 +205,7 @@ impl YoutubeClient {
             }
         }
 
-        let res = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(AppError::Http)?;
+        let res = self.http.get(&url).send().await.map_err(AppError::Http)?;
         if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
@@ -328,7 +327,9 @@ impl YoutubeClient {
     ) -> AppResult<Page<PlaylistItem>> {
         let channel = self.get_channel(channel_id).await?;
         if let Some(uploads) = channel.and_then(|c| c.uploads_playlist_id) {
-            return self.list_playlist_items(&uploads, max_results, page_token).await;
+            return self
+                .list_playlist_items(&uploads, max_results, page_token)
+                .await;
         }
 
         // Fallback: search by channel ID, ordered by date.
@@ -356,7 +357,10 @@ impl YoutubeClient {
             .get("nextPageToken")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        Ok(Page { items, next_page_token })
+        Ok(Page {
+            items,
+            next_page_token,
+        })
     }
 
     /// List the items of a playlist (`playlistItems.list`).
@@ -387,7 +391,10 @@ impl YoutubeClient {
             .get("nextPageToken")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        Ok(Page { items, next_page_token })
+        Ok(Page {
+            items,
+            next_page_token,
+        })
     }
 }
 
@@ -420,7 +427,11 @@ fn parse_search_item(v: &serde_json::Value) -> Option<SearchItem> {
     Some(SearchItem {
         kind: kind_short.to_string(),
         id: id.to_string(),
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         description: snip
             .get("description")
             .and_then(|x| x.as_str())
@@ -450,8 +461,15 @@ fn parse_search_item_as_playlist_item(v: &serde_json::Value) -> Option<PlaylistI
     let snip = v.get("snippet")?;
     Some(PlaylistItem {
         video_id: id,
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        channel_id: snip.get("channelId").and_then(|x| x.as_str()).map(String::from),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        channel_id: snip
+            .get("channelId")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         channel_title: snip
             .get("channelTitle")
             .and_then(|x| x.as_str())
@@ -460,7 +478,10 @@ fn parse_search_item_as_playlist_item(v: &serde_json::Value) -> Option<PlaylistI
             .get("thumbnails")
             .map(parse_thumbnails)
             .unwrap_or_default(),
-        published_at: snip.get("publishedAt").and_then(|x| x.as_str()).map(String::from),
+        published_at: snip
+            .get("publishedAt")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         position: None,
     })
 }
@@ -472,7 +493,11 @@ fn parse_channel(v: &serde_json::Value) -> Option<ChannelInfo> {
     let content = v.get("contentDetails");
     Some(ChannelInfo {
         id,
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         description: snip
             .get("description")
             .and_then(|x| x.as_str())
@@ -504,13 +529,20 @@ fn parse_playlist(v: &serde_json::Value) -> Option<PlaylistInfo> {
     let content = v.get("contentDetails");
     Some(PlaylistInfo {
         id,
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         description: snip
             .get("description")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string(),
-        channel_id: snip.get("channelId").and_then(|x| x.as_str()).map(String::from),
+        channel_id: snip
+            .get("channelId")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         channel_title: snip
             .get("channelTitle")
             .and_then(|x| x.as_str())
@@ -519,7 +551,9 @@ fn parse_playlist(v: &serde_json::Value) -> Option<PlaylistInfo> {
             .get("thumbnails")
             .map(parse_thumbnails)
             .unwrap_or_default(),
-        item_count: content.and_then(|c| c.get("itemCount")).and_then(|n| n.as_i64()),
+        item_count: content
+            .and_then(|c| c.get("itemCount"))
+            .and_then(|n| n.as_i64()),
     })
 }
 
@@ -530,13 +564,20 @@ fn parse_video(v: &serde_json::Value) -> Option<VideoInfo> {
     let content = v.get("contentDetails");
     Some(VideoInfo {
         id,
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         description: snip
             .get("description")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string(),
-        channel_id: snip.get("channelId").and_then(|x| x.as_str()).map(String::from),
+        channel_id: snip
+            .get("channelId")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         channel_title: snip
             .get("channelTitle")
             .and_then(|x| x.as_str())
@@ -545,7 +586,10 @@ fn parse_video(v: &serde_json::Value) -> Option<VideoInfo> {
             .get("thumbnails")
             .map(parse_thumbnails)
             .unwrap_or_default(),
-        published_at: snip.get("publishedAt").and_then(|x| x.as_str()).map(String::from),
+        published_at: snip
+            .get("publishedAt")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         duration: content
             .and_then(|c| c.get("duration"))
             .and_then(|d| d.as_str())
@@ -570,7 +614,11 @@ fn parse_playlist_item(v: &serde_json::Value) -> Option<PlaylistItem> {
         })?;
     Some(PlaylistItem {
         video_id: video_id.to_string(),
-        title: snip.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: snip
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         channel_id: snip
             .get("videoOwnerChannelId")
             .and_then(|x| x.as_str())
@@ -597,8 +645,7 @@ fn parse_playlist_item(v: &serde_json::Value) -> Option<PlaylistItem> {
 /// key, then by value, and percent-encoded. The `key` (API key) is
 /// included so two clients with different keys do not share a cache slot.
 pub(crate) fn build_canonical_url(base: &str, query: &[(&str, String)]) -> String {
-    let mut pairs: Vec<(&str, &str)> =
-        query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
     pairs.sort();
     let qs = pairs
         .iter()

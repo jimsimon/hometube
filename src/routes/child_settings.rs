@@ -183,12 +183,10 @@ pub async fn update_settings(
 }
 
 async fn ensure_settings_row(state: &AppState, child_id: i64) -> AppResult<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO child_settings (child_account_id) VALUES (?)",
-    )
-    .bind(child_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("INSERT OR IGNORE INTO child_settings (child_account_id) VALUES (?)")
+        .bind(child_id)
+        .execute(&state.db)
+        .await?;
     Ok(())
 }
 
@@ -242,9 +240,7 @@ pub async fn update_limits(
                 "max_hours must be between 0 and 24".into(),
             ));
         }
-        if !is_valid_hhmm(&row.allowed_start_time)
-            || !is_valid_hhmm(&row.allowed_end_time)
-        {
+        if !is_valid_hhmm(&row.allowed_start_time) || !is_valid_hhmm(&row.allowed_end_time) {
             return Err(AppError::BadRequest(
                 "allowed_start_time and allowed_end_time must be HH:MM".into(),
             ));
@@ -373,8 +369,7 @@ pub async fn usage_stats(
     .fetch_optional(&state.db)
     .await?;
     let today_limit_seconds = max_hours.map(|h| (h * 3600.0) as i64);
-    let today_remaining_seconds =
-        today_limit_seconds.map(|lim| (lim - today_seconds).max(0));
+    let today_remaining_seconds = today_limit_seconds.map(|lim| (lim - today_seconds).max(0));
 
     // Weekly: walk the last seven days locally.
     let mut weekly = Vec::with_capacity(7);
@@ -410,18 +405,16 @@ pub async fn usage_stats(
     let today_used_min = today_seconds / 60;
     let today_limit_min = today_limit_seconds.map(|s| s / 60);
     let today_remaining_min = today_remaining_seconds.map(|s| s / 60);
-    let allowed_window: Option<crate::routes::usage::AllowedWindow> = sqlx::query_as::<
-        _,
-        (String, String),
-    >(
-        "SELECT allowed_start_time, allowed_end_time FROM usage_limits \
+    let allowed_window: Option<crate::routes::usage::AllowedWindow> =
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT allowed_start_time, allowed_end_time FROM usage_limits \
          WHERE child_account_id = ? AND day_of_week = ?",
-    )
-    .bind(child_id)
-    .bind(dow)
-    .fetch_optional(&state.db)
-    .await?
-    .map(|(start, end)| crate::routes::usage::AllowedWindow { start, end });
+        )
+        .bind(child_id)
+        .bind(dow)
+        .fetch_optional(&state.db)
+        .await?
+        .map(|(start, end)| crate::routes::usage::AllowedWindow { start, end });
 
     let mut week = Vec::with_capacity(7);
     for (offset, daily) in (0i64..7).zip(weekly.iter()) {
@@ -486,9 +479,7 @@ pub async fn usage_stats(
 
 async fn require_child(state: &AppState, child_id: i64) -> AppResult<()> {
     if !access::is_child_account(&state.db, child_id).await? {
-        return Err(AppError::BadRequest(
-            "target account is not a child".into(),
-        ));
+        return Err(AppError::BadRequest("target account is not a child".into()));
     }
     Ok(())
 }
