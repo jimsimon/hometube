@@ -12,6 +12,7 @@
 //!
 //! Parent-only / child-only gates are applied at the sub-router level.
 
+use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::{
     routing::{delete as delete_route, get, post, put},
@@ -37,6 +38,7 @@ pub mod cache;
 pub mod channels;
 pub mod child_settings;
 pub mod cron;
+pub mod family;
 pub mod feed;
 pub mod likes;
 pub mod pages;
@@ -126,6 +128,19 @@ pub fn router(state: AppState) -> Router {
         // System / yt-dlp
         .route("/api/system/ytdlp", get(system::get_ytdlp))
         .route("/api/system/ytdlp/update", post(system::update_ytdlp))
+        // Family management (Phase 13)
+        .route(
+            "/api/family/members",
+            get(family::list_members).post(family::add_member),
+        )
+        .route(
+            "/api/family/members/{id}",
+            put(family::update_member).delete(family::delete_member),
+        )
+        .route(
+            "/api/family/members/{id}/reauth",
+            post(family::reauth_member),
+        )
         // Cache management
         .route("/api/cache/stats", get(cache::stats))
         .route(
@@ -293,7 +308,10 @@ pub fn router(state: AppState) -> Router {
     let page_routes = Router::new()
         .route("/", get(pages::root_or_setup))
         .route("/setup", get(pages::setup_wizard))
+        .route("/setup/pin", get(pages::set_pin))
+        .route("/profiles", get(pages::profile_picker))
         .route("/parent/home", get(pages::parent_home))
+        .route("/parent/family", get(pages::parent_family))
         .route("/parent/system", get(pages::parent_system))
         .route("/child/home", get(pages::child_home))
         .route("/child/channels", get(pages::child_channels))
@@ -324,6 +342,20 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
 }
 
-async fn health() -> &'static str {
-    "ok"
+/// `GET /api/health` — liveness probe used by the Docker `HEALTHCHECK`
+/// directive. Returns 200 with `ok` when the server can still talk to
+/// SQLite; 503 with a short message otherwise.
+async fn health(
+    State(state): State<AppState>,
+) -> Result<&'static str, (axum::http::StatusCode, &'static str)> {
+    match sqlx::query("SELECT 1").execute(&state.db).await {
+        Ok(_) => Ok("ok"),
+        Err(err) => {
+            tracing::warn!(error = %err, "health check failed: db unreachable");
+            Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "db unreachable",
+            ))
+        }
+    }
 }

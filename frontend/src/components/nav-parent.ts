@@ -143,7 +143,7 @@ export class NavParent extends LitElement {
     try {
       await api.post('/api/auth/logout');
     } finally {
-      window.location.href = '/';
+      window.location.href = '/profiles';
     }
   };
 
@@ -191,6 +191,7 @@ export class NavParent extends LitElement {
         <span class="who" aria-hidden="true">
           ${this.displayName ? `Signed in as ${this.displayName}` : ''}
         </span>
+        <a href="/profiles">Switch profile</a>
         <button type="button" @click=${this.onLogout}>Log out</button>
         ${this.error
           ? html`<span class="error" role="alert">${this.error}</span>`

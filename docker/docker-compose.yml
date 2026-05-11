@@ -1,0 +1,27 @@
+# HomeTube — Docker Compose stack.
+#
+# Single service. All configuration happens in the setup wizard the
+# first time you open the app — there are intentionally no environment
+# variables here.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: hometube:local
+    ports:
+      - "3000:3000"
+    volumes:
+      # SQLite DB, segment cache, downloaded yt-dlp binary updates.
+      - app-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  app-data:

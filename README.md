@@ -56,6 +56,12 @@ docker run -p 3000:3000 -v hometube-data:/app/data \
 
 Then open <http://localhost:3000> and follow the setup wizard.
 
+See [`docs/deployment.md`](docs/deployment.md) for a full deploy
+walkthrough, backups, and reverse-proxy notes, and
+[`docs/google-cloud-setup.md`](docs/google-cloud-setup.md) for the
+step-by-step on creating the Google Cloud project that the setup
+wizard asks for.
+
 ## License
 
 [AGPL-3.0](LICENSE) — self-hostable, modifications must remain open source,

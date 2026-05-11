@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Family{% endblock %}
+
+{% block content %}
+{% include "partials/nav-parent.html" %}
+
+<section class="parent-family" aria-label="Family management">
+  <header class="page-header">
+    <h1>Family</h1>
+    <p class="subtitle">
+      Add or remove parents and children, change roles, and re-authenticate
+      stale Google accounts.
+    </p>
+  </header>
+
+  <hometube-family-manager></hometube-family-manager>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-parent.js"></script>
+<script type="module" src="/assets/components/family-manager.js"></script>
+<script type="module" src="/assets/components/family-member-card.js"></script>
+<script type="module" src="/assets/components/add-member-dialog.js"></script>
+{% endblock %}

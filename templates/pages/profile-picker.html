@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Choose a profile{% endblock %}
+
+{% block content %}
+<section class="profile-picker-page" aria-labelledby="profile-picker-heading">
+  <header class="page-header">
+    <h1 id="profile-picker-heading">Who's watching?</h1>
+    <p class="subtitle">
+      Tap a profile to continue. Parents will be asked for a PIN.
+    </p>
+  </header>
+
+  <hometube-profile-picker></hometube-profile-picker>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/profile-picker.js"></script>
+<script type="module" src="/assets/components/pin-entry-dialog.js"></script>
+{% endblock %}

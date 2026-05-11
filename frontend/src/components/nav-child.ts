@@ -105,7 +105,7 @@ export class NavChild extends LitElement {
     try {
       await api.post('/api/auth/logout');
     } finally {
-      window.location.href = '/';
+      window.location.href = '/profiles';
     }
   };
 
@@ -127,6 +127,7 @@ export class NavChild extends LitElement {
         ${this.displayName
           ? html`<span aria-hidden="true">${this.displayName}</span>`
           : null}
+        <a href="/profiles" aria-label="Switch profile">Switch</a>
         <button type="button" @click=${this.onLogout}>Log out</button>
       </nav>
 

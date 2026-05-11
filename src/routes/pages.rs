@@ -18,22 +18,6 @@ use crate::services::video_cache::VideoCache;
 use crate::state::AppState;
 
 #[derive(Template)]
-#[template(path = "pages/home.html")]
-struct HomeTemplate {
-    title: &'static str,
-}
-
-/// Placeholder home page used when no profile is signed in. Once an
-/// account is on the request, [`root_or_setup`] redirects to the
-/// role-appropriate home.
-pub async fn home() -> AppResult<impl IntoResponse> {
-    let tpl = HomeTemplate {
-        title: "HomeTube",
-    };
-    Ok(Html(tpl.render()?))
-}
-
-#[derive(Template)]
 #[template(path = "pages/setup-wizard.html")]
 struct SetupWizardTemplate {
     suggested_redirect_uri: String,
@@ -63,8 +47,8 @@ pub async fn setup_wizard(
 
 /// `GET /` — until setup is complete, bounce to the wizard. Otherwise
 /// route the user to the parent or child home page based on their
-/// signed-in role. Anonymous users see a placeholder until they pick a
-/// profile.
+/// signed-in role. Anonymous users are sent to `/profiles` so they can
+/// pick a profile (Phase 15).
 pub async fn root_or_setup(
     State(state): State<AppState>,
     current: Option<CurrentAccount>,
@@ -79,7 +63,7 @@ pub async fn root_or_setup(
         Some(c) if matches!(c.account_type, AccountType::Child) => {
             Ok(Redirect::to("/child/home").into_response())
         }
-        _ => Ok(home().await?.into_response()),
+        _ => Ok(Redirect::to("/profiles").into_response()),
     }
 }
 
@@ -107,6 +91,82 @@ pub async fn parent_home(
         }
         _ => Ok(Redirect::to("/").into_response()),
     }
+}
+
+#[derive(Template)]
+#[template(path = "pages/parent/family.html")]
+struct ParentFamilyTemplate {
+    display_name: String,
+}
+
+/// `GET /parent/family` — family-management page (Phase 13).
+pub async fn parent_family(current: Option<CurrentAccount>) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            let tpl = ParentFamilyTemplate {
+                display_name: c.display_name,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "pages/profile-picker.html")]
+struct ProfilePickerTemplate {}
+
+/// `GET /profiles` — Netflix-style profile picker (Phase 15).
+///
+/// Available with or without an active session. If setup hasn't been
+/// completed yet (no parent accounts at all) we redirect to the wizard
+/// instead of showing an empty grid.
+pub async fn profile_picker(State(state): State<AppState>) -> AppResult<Response> {
+    if !setup::is_setup_complete(&state.db).await? {
+        return Ok(Redirect::to("/setup").into_response());
+    }
+    let tpl = ProfilePickerTemplate {};
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Template)]
+#[template(path = "pages/set-pin.html")]
+struct SetPinTemplate {
+    display_name: String,
+    /// `true` for the "freshly added parent must set a PIN" path.
+    for_new_parent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPinQuery {
+    /// Set to `1` when the page was reached via the family flow.
+    /// Surfaces a slightly different message + redirects to
+    /// `/parent/family` on success.
+    #[serde(default)]
+    pub for_new_parent: Option<String>,
+}
+
+/// `GET /setup/pin` — single-form page that POSTs to `/api/auth/pin`.
+/// Used both during the setup wizard and by the family-management flow
+/// to force newly-added parents to set a PIN before continuing.
+pub async fn set_pin(
+    current: Option<CurrentAccount>,
+    Query(q): Query<SetPinQuery>,
+) -> AppResult<Response> {
+    let Some(c) = current else {
+        return Ok(Redirect::to("/profiles").into_response());
+    };
+    if !matches!(c.account_type, AccountType::Parent) {
+        return Ok(Redirect::to("/child/home").into_response());
+    }
+    let tpl = SetPinTemplate {
+        display_name: c.display_name,
+        for_new_parent: matches!(q.for_new_parent.as_deref(), Some("1") | Some("true")),
+    };
+    Ok(Html(tpl.render()?).into_response())
 }
 
 #[derive(Template)]

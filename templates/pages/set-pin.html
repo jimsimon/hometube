@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Set a PIN{% endblock %}
+
+{% block content %}
+<section class="set-pin-page" aria-labelledby="set-pin-heading">
+  <header class="page-header">
+    <h1 id="set-pin-heading">Set a parent PIN</h1>
+    {% if for_new_parent %}
+    <p class="subtitle">
+      Welcome, {{ display_name }}. Pick a 4-6 digit PIN to protect your
+      parent profile. You'll be asked for it whenever someone switches
+      to your profile from the picker.
+    </p>
+    {% else %}
+    <p class="subtitle">
+      Update the PIN for {{ display_name }}'s parent profile.
+    </p>
+    {% endif %}
+  </header>
+
+  <hometube-setup-pin-input></hometube-setup-pin-input>
+
+  <p style="margin-top: 1.5rem;">
+    {% if for_new_parent %}
+      <a href="/parent/family">Continue to family management</a>
+    {% else %}
+      <a href="/parent/home">Back to parent dashboard</a>
+    {% endif %}
+  </p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/setup-pin-input.js"></script>
+<script type="module">
+  // After the PIN is saved, jump straight back to the appropriate page
+  // instead of leaving the user staring at a static success message.
+  document.addEventListener('setup-pin-saved', () => {
+    const params = new URLSearchParams(location.search);
+    const target = params.get('for_new_parent') === '1'
+      ? '/parent/family'
+      : '/parent/home';
+    setTimeout(() => {
+      window.location.href = target;
+    }, 750);
+  });
+</script>
+{% endblock %}

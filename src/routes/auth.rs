@@ -36,6 +36,7 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::auth::{CurrentAccount, SESSION_COOKIE};
 use crate::models::account::{self, AccountType};
 use crate::models::session;
+use crate::routes::family;
 use crate::services::oauth as oauth_svc;
 use crate::services::setup;
 use crate::state::AppState;
@@ -61,6 +62,14 @@ pub struct LoginQuery {
     /// Optional intended role: `parent` or `child`.
     #[serde(default)]
     pub role: Option<String>,
+    /// Optional flow context. Currently understood values:
+    /// - `add_member` — add a new family member from `/parent/family`
+    /// - `reauth` — re-authenticate an existing account
+    /// In both cases the actual state lives in the
+    /// [`family::PENDING_MEMBER_COOKIE`] cookie; the query parameter is
+    /// purely informational so the login URL is self-describing.
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +121,21 @@ pub async fn login(
 }
 
 /// `GET /api/auth/callback` — finish the OAuth flow.
+///
+/// The callback supports three distinct flows, distinguished by the
+/// presence (and contents) of the [`family::PENDING_MEMBER_COOKIE`]:
+///
+/// 1. **Default sign-in** — no pending-member cookie. The user is
+///    creating or refreshing the account they're signing in with;
+///    on success, redirect to `/` (or `/setup` if setup isn't done).
+/// 2. **Add member** — pending cookie with `context=add_member`. The
+///    new account is created with the cookie's chosen role + display
+///    name override, and the user is sent on to `/parent/family`.
+/// 3. **Re-authenticate** — pending cookie with `context=reauth` and
+///    an `account_id`. Tokens for that existing row are refreshed; if
+///    the Google account presented in the callback doesn't match the
+///    target row's `google_id` the request is rejected with 400 so a
+///    parent can't accidentally swap one child's identity for another.
 pub async fn callback(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -129,6 +153,11 @@ pub async fn callback(
     let mut clear = Cookie::new(OAUTH_COOKIE, "");
     clear.set_path("/");
     signed.remove(clear);
+
+    let pending = family::read_pending_cookie(&cookies, &state);
+    // Always clear the pending-member cookie now — even if we error
+    // out, we don't want a stale cookie hanging around.
+    family::clear_pending_cookie(&cookies, &state);
 
     if flow_state.csrf != q.state {
         return Err(AppError::BadRequest("OAuth state mismatch".into()));
@@ -155,15 +184,68 @@ pub async fn callback(
             .unwrap_or(3600);
 
     let info = oauth_svc::userinfo(&access_token).await?;
-    let display_name = info.name.clone().unwrap_or_else(|| info.email.clone());
+    let pending_display = pending.as_ref().and_then(|p| p.display_name.clone());
+    let display_name = pending_display
+        .clone()
+        .or(info.name.clone())
+        .unwrap_or_else(|| info.email.clone());
     let avatar = info.picture.as_deref();
 
-    // First account is always a parent.
+    // ---- Re-auth flow: update an existing row in place. ----
+    if let Some(pending_inner) = pending.as_ref() {
+        if pending_inner.context == "reauth" {
+            let target_id = pending_inner.account_id.ok_or_else(|| {
+                AppError::BadRequest("reauth flow missing account_id".into())
+            })?;
+            let target = account::find_by_id(&state.db, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if target.google_id != info.sub {
+                warn!(
+                    target_id,
+                    expected = %target.google_id,
+                    got = %info.sub,
+                    "reauth Google account mismatch"
+                );
+                return Err(AppError::BadRequest(
+                    "Google account mismatch: signed in with a different Google account".into(),
+                ));
+            }
+            account::update_profile_and_tokens(
+                &state.db,
+                target.id,
+                &info.email,
+                &display_name,
+                avatar,
+                &access_token,
+                &refresh_token,
+                expires_at,
+            )
+            .await?;
+            info!(account_id = target.id, "reauth completed");
+
+            // Don't replace the active session — the parent triggering
+            // reauth keeps theirs. Just send them back to the family page.
+            let target_url = pending_inner
+                .redirect_to
+                .clone()
+                .unwrap_or_else(|| "/parent/family".into());
+            return Ok(Redirect::to(&target_url).into_response());
+        }
+    }
+
+    // ---- Add-member / default sign-in flow ----
+    // First account is always a parent. Otherwise the role comes from
+    // the pending cookie (if present + sane) or the OAuth flow cookie.
     let total = account::total_count(&state.db).await?;
+    let role_str: String = pending
+        .as_ref()
+        .and_then(|p| p.role.clone())
+        .unwrap_or_else(|| flow_state.role.clone());
     let resolved_role = if total == 0 {
         AccountType::Parent
     } else {
-        match flow_state.role.as_str() {
+        match role_str.as_str() {
             "parent" => AccountType::Parent,
             "child" => AccountType::Child,
             other => {
@@ -173,6 +255,7 @@ pub async fn callback(
         }
     };
 
+    let mut newly_created_parent_id: Option<i64> = None;
     let account_id = match account::find_by_google_id(&state.db, &info.sub).await? {
         Some(existing) => {
             account::update_profile_and_tokens(
@@ -189,7 +272,7 @@ pub async fn callback(
             existing.id
         }
         None => {
-            account::insert(
+            let id = account::insert(
                 &state.db,
                 &info.sub,
                 &info.email,
@@ -200,7 +283,11 @@ pub async fn callback(
                 &refresh_token,
                 expires_at,
             )
-            .await?
+            .await?;
+            if matches!(resolved_role, AccountType::Parent) {
+                newly_created_parent_id = Some(id);
+            }
+            id
         }
     };
 
@@ -209,12 +296,28 @@ pub async fn callback(
     let sess = session::create(&state.db, account_id).await?;
     set_session_cookie(&signed, &sess.id);
 
-    let target = if setup::is_setup_complete(&state.db).await? {
-        "/"
+    // Where do we go from here?
+    //
+    // - If we were in the `add_member` flow and just minted a new
+    //   parent, force them through `/setup/pin` first so they can't
+    //   skip the PIN step (per the plan's "PIN-required-for-parents"
+    //   enforcement note).
+    // - Otherwise, honor the pending cookie's `redirect_to` if any.
+    // - Otherwise, fall back to `/setup` (until setup is done) or `/`.
+    let is_add_member = pending
+        .as_ref()
+        .map(|p| p.context == "add_member")
+        .unwrap_or(false);
+    let target = if is_add_member && newly_created_parent_id.is_some() {
+        "/setup/pin?for_new_parent=1".to_string()
+    } else if let Some(redirect_to) = pending.as_ref().and_then(|p| p.redirect_to.clone()) {
+        redirect_to
+    } else if setup::is_setup_complete(&state.db).await? {
+        "/".to_string()
     } else {
-        "/setup"
+        "/setup".to_string()
     };
-    Ok(Redirect::to(target).into_response())
+    Ok(Redirect::to(&target).into_response())
 }
 
 /// `POST /api/auth/logout` — drop the session row + cookie.
@@ -253,6 +356,12 @@ pub async fn profiles(
 
 /// `POST /api/auth/switch` — switch the current session to another
 /// account. Parents must supply a matching PIN.
+///
+/// Failed PIN attempts emit a `tracing::warn!` and, when the rate
+/// crosses 5 failures within a 5-minute window, also create a
+/// `system_update` notification for every parent so the family is made
+/// aware. The rate-limit check is best-effort and never blocks the
+/// switch decision itself.
 pub async fn switch(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -265,11 +374,21 @@ pub async fn switch(
 
     if matches!(target.typed(), AccountType::Parent) {
         let provided = body.pin.as_deref().unwrap_or("");
-        let stored = target
-            .pin_hash
-            .as_deref()
-            .ok_or_else(|| AppError::BadRequest("parent has no PIN configured".into()))?;
-        verify_pin(stored, provided)?;
+        let stored = target.pin_hash.as_deref().ok_or_else(|| {
+            AppError::BadRequest(
+                "this parent profile doesn't have a PIN yet; visit /setup/pin while signed in"
+                    .into(),
+            )
+        })?;
+        if let Err(err) = verify_pin(stored, provided) {
+            warn!(account_id = target.id, "PIN attempt failed");
+            // Track recent failures via parent_notifications metadata.
+            // We never fail the request because of this bookkeeping.
+            if let Err(e) = record_failed_pin(&state, target.id).await {
+                warn!(error = %e, "could not record failed PIN attempt");
+            }
+            return Err(err);
+        }
     }
 
     // Drop the old session row, if any.
@@ -282,6 +401,64 @@ pub async fn switch(
     set_session_cookie(&signed, &sess.id);
 
     Ok((StatusCode::OK, Json(account::AccountSummary::from(&target))).into_response())
+}
+
+/// Insert a soft "system_update" notification for every parent if more
+/// than five PIN failures have happened against `target_id` in the
+/// past five minutes.
+async fn record_failed_pin(state: &AppState, target_id: i64) -> AppResult<()> {
+    let now = Utc::now().timestamp();
+    let window_start = now - 5 * 60;
+    let metadata = serde_json::json!({
+        "kind": "pin_attempt_failed",
+        "target_account_id": target_id,
+        "at": now,
+    })
+    .to_string();
+    let title = "Failed PIN attempt".to_string();
+    let message = format!(
+        "Someone tried to switch to a parent profile (id {target_id}) and entered the wrong PIN."
+    );
+
+    // Count recent failures from `parent_notifications` metadata. The
+    // metadata column is JSON — we use a substring filter so we don't
+    // need an extension. False positives are fine, this is only a soft
+    // alert.
+    let recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parent_notifications \
+         WHERE notification_type = 'system_update' \
+           AND metadata LIKE '%pin_attempt_failed%' \
+           AND metadata LIKE ? \
+           AND created_at >= ?",
+    )
+    .bind(format!("%\"target_account_id\":{}%", target_id))
+    .bind(window_start)
+    .fetch_one(&state.db)
+    .await?;
+
+    // Only spam parents on every 5th failure within the window.
+    if recent_count >= 5 && recent_count % 5 != 0 {
+        return Ok(());
+    }
+
+    let parents: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
+            .fetch_all(&state.db)
+            .await?;
+    for (pid,) in parents {
+        sqlx::query(
+            "INSERT INTO parent_notifications \
+                (parent_account_id, notification_type, title, message, metadata) \
+             VALUES (?, 'system_update', ?, ?, ?)",
+        )
+        .bind(pid)
+        .bind(&title)
+        .bind(&message)
+        .bind(&metadata)
+        .execute(&state.db)
+        .await?;
+    }
+    Ok(())
 }
 
 /// `PUT /api/auth/pin` — set/update the current account's PIN.
