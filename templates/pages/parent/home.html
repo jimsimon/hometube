@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Parent dashboard{% endblock %}
+
+{% block content %}
+{% include "partials/nav-parent.html" %}
+
+<section class="parent-dashboard" aria-label="Parent dashboard">
+  <header class="page-header">
+    <h1>Content control</h1>
+    <p class="subtitle">
+      Pick a child to manage their allowlists, blocked videos, viewing
+      limits, and player settings.
+    </p>
+  </header>
+
+  <wa-tab-group id="parent-sections" placement="top">
+    <wa-tab slot="nav" panel="allowlist">Allowlist</wa-tab>
+    <wa-tab slot="nav" panel="blocked">Blocked</wa-tab>
+    <wa-tab slot="nav" panel="limits">Time limits</wa-tab>
+    <wa-tab slot="nav" panel="settings">Player settings</wa-tab>
+
+    <wa-tab-panel name="allowlist">
+      <hometube-allowlist-manager></hometube-allowlist-manager>
+    </wa-tab-panel>
+
+    <wa-tab-panel name="blocked">
+      <hometube-blocklist-manager></hometube-blocklist-manager>
+    </wa-tab-panel>
+
+    <wa-tab-panel name="limits">
+      <hometube-usage-limit-editor></hometube-usage-limit-editor>
+    </wa-tab-panel>
+
+    <wa-tab-panel name="settings">
+      <hometube-child-settings-form></hometube-child-settings-form>
+    </wa-tab-panel>
+  </wa-tab-group>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-parent.js"></script>
+<script type="module" src="/assets/components/allowlist-manager.js"></script>
+<script type="module" src="/assets/components/blocklist-manager.js"></script>
+<script type="module" src="/assets/components/usage-limit-editor.js"></script>
+<script type="module" src="/assets/components/child-settings-form.js"></script>
+<script type="module">
+  // Wire the child-changed event from <hometube-nav-parent> to every
+  // child-aware component on the page.
+  document.addEventListener('child-changed', (event) => {
+    const childId = event.detail?.childId;
+    if (childId == null) return;
+    for (const tag of [
+      'hometube-allowlist-manager',
+      'hometube-blocklist-manager',
+      'hometube-usage-limit-editor',
+      'hometube-child-settings-form',
+    ]) {
+      for (const el of document.querySelectorAll(tag)) {
+        el.setAttribute('child-id', String(childId));
+      }
+    }
+  });
+</script>
+{% endblock %}

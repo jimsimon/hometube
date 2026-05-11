@@ -9,7 +9,7 @@
 //!   the last remaining parent)
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -28,10 +28,33 @@ pub struct UpdateAccountBody {
     pub account_type: Option<String>,
 }
 
-/// `GET /api/accounts` — list every account.
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<AccountSummary>>> {
+#[derive(Debug, Deserialize, Default)]
+pub struct ListQuery {
+    /// Filter to a single account type (`"parent"` or `"child"`). Used
+    /// by the parent dashboard's child-selector dropdown.
+    #[serde(default, rename = "type")]
+    pub account_type: Option<String>,
+}
+
+/// `GET /api/accounts` — list every account, or only those matching the
+/// optional `?type=parent|child` filter.
+pub async fn list(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> AppResult<Json<Vec<AccountSummary>>> {
     let rows = account::list_all(&state.db).await?;
-    Ok(Json(rows.iter().map(AccountSummary::from).collect()))
+    let filtered: Vec<AccountSummary> = match q.account_type.as_deref() {
+        Some(s) => {
+            let want = AccountType::parse(s)
+                .ok_or_else(|| AppError::BadRequest(format!("unknown account_type {s:?}")))?;
+            rows.iter()
+                .filter(|a| a.typed() == want)
+                .map(AccountSummary::from)
+                .collect()
+        }
+        None => rows.iter().map(AccountSummary::from).collect(),
+    };
+    Ok(Json(filtered))
 }
 
 /// `GET /api/accounts/:id` — fetch a single account.

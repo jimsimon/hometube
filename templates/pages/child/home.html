@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+<section class="child-home" aria-label="Home">
+  <hometube-video-row
+    feed="continue-watching"
+    heading="Continue watching"
+  ></hometube-video-row>
+
+  <hometube-video-row
+    feed="new-videos"
+    heading="New videos"
+  ></hometube-video-row>
+</section>
+
+<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+<script type="module" src="/assets/components/video-row.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+{% endblock %}

@@ -20,7 +20,9 @@ mod routes;
 mod services;
 mod state;
 
+use crate::services::dash;
 use crate::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
+use crate::services::video_cache::{KEY_METADATA_CACHE_TTL_HOURS, DEFAULT_TTL_HOURS};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -36,6 +38,11 @@ async fn main() -> anyhow::Result<()> {
     // Cookie signing key: stored as a base64 blob in `app_config` so it
     // survives restarts. Generated on first run.
     let cookie_key = ensure_cookie_key(&pool).await?;
+
+    // Phase 5 startup helpers: ensure the proxy HMAC secret exists and
+    // seed the metadata-cache TTL with its default value if unset.
+    dash::ensure_proxy_secret(&pool).await?;
+    ensure_default_metadata_ttl(&pool).await?;
 
     let app_state = state::AppState::new(cfg.clone(), pool, cookie_key);
     let app = routes::router(app_state);
@@ -85,4 +92,22 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
     set_config_value(pool, KEY_COOKIE_SECRET, &encoded).await?;
     info!("generated new cookie signing key");
     Ok(Key::from(&bytes[..]))
+}
+
+/// Seed `metadata_cache_ttl_hours` with the default if the parent
+/// hasn't customised it yet. The cache reads the live value on every
+/// lookup so this is just a UX convenience for the parent settings UI.
+async fn ensure_default_metadata_ttl(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    if get_config_value(pool, KEY_METADATA_CACHE_TTL_HOURS)
+        .await?
+        .is_none()
+    {
+        set_config_value(
+            pool,
+            KEY_METADATA_CACHE_TTL_HOURS,
+            &DEFAULT_TTL_HOURS.to_string(),
+        )
+        .await?;
+    }
+    Ok(())
 }
