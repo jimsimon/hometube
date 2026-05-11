@@ -296,8 +296,12 @@ pub async fn get_segment(
         lookup_cached_segment(&state.db, &q.video_id, &q.format, &q.sq).await?
     {
         debug!(video = %q.video_id, fmt = %q.format, sq = %q.sq, "segment cache hit");
+        crate::services::cron::CACHE_HIT_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return serve_file(&path, size, &headers).await;
     }
+    crate::services::cron::CACHE_MISS_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Miss: resolve the upstream URL via the cached metadata.
     let cache = video_cache(&state);

@@ -33,8 +33,10 @@ pub mod allowlist;
 pub mod auth;
 pub mod blocked;
 pub mod bookmarks;
+pub mod cache;
 pub mod channels;
 pub mod child_settings;
+pub mod cron;
 pub mod feed;
 pub mod likes;
 pub mod pages;
@@ -42,6 +44,7 @@ pub mod playlists;
 pub mod search;
 pub mod setup;
 pub mod subscriptions;
+pub mod system;
 pub mod timer;
 pub mod usage;
 pub mod videos;
@@ -112,6 +115,29 @@ pub fn router(state: AppState) -> Router {
             "/api/children/{id}/usage-stats",
             get(child_settings::usage_stats),
         )
+        // Cron job management
+        .route("/api/cron/jobs", get(cron::list_jobs))
+        .route(
+            "/api/cron/jobs/{id}",
+            get(cron::get_job).put(cron::update_job),
+        )
+        .route("/api/cron/jobs/{id}/run", post(cron::run_now))
+        .route("/api/cron/jobs/{id}/runs", get(cron::list_runs))
+        // System / yt-dlp
+        .route("/api/system/ytdlp", get(system::get_ytdlp))
+        .route("/api/system/ytdlp/update", post(system::update_ytdlp))
+        // Cache management
+        .route("/api/cache/stats", get(cache::stats))
+        .route(
+            "/api/cache/settings",
+            get(cache::get_settings).put(cache::update_settings),
+        )
+        .route("/api/cache/videos", get(cache::list_videos))
+        .route(
+            "/api/cache/videos/{video_id}",
+            axum::routing::delete(cache::delete_video),
+        )
+        .route("/api/cache/clear", post(cache::clear_all))
         .route_layer(axum::middleware::from_fn(require_parent));
 
     // -----------------------------------------------------------------
@@ -153,7 +179,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/feed/new-videos", get(feed::new_videos))
         .route("/api/feed/up-next", get(feed::up_next))
-        .route("/api/usage/heartbeat", post(usage::heartbeat));
+        .route("/api/usage/heartbeat", post(usage::heartbeat))
+        .route("/api/search", get(search::child_search));
 
     // -----------------------------------------------------------------
     // Child-only APIs: channels, subscriptions, playlists, likes,
@@ -267,11 +294,13 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(pages::root_or_setup))
         .route("/setup", get(pages::setup_wizard))
         .route("/parent/home", get(pages::parent_home))
+        .route("/parent/system", get(pages::parent_system))
         .route("/child/home", get(pages::child_home))
         .route("/child/channels", get(pages::child_channels))
         .route("/child/channel/{channel_id}", get(pages::child_channel))
         .route("/child/playlists", get(pages::child_playlists))
-        .route("/child/playlist/{id}", get(pages::child_playlist));
+        .route("/child/playlist/{id}", get(pages::child_playlist))
+        .route("/child/search", get(pages::child_search));
 
     // -----------------------------------------------------------------
     // Top-level router

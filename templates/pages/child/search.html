@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — Search{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+<section class="child-search" aria-label="Search results">
+  <header class="page-header">
+    <h1>Search</h1>
+    <p class="subtitle">
+      Showing things you can watch{% if !q.is_empty() %} that match
+      <em>{{ q }}</em>{% endif %}.
+    </p>
+  </header>
+
+  <hometube-search-results q="{{ q }}" type="{{ kind }}"></hometube-search-results>
+</section>
+
+<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+<script type="module" src="/assets/components/search-bar.js"></script>
+<script type="module" src="/assets/components/search-results.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+<script type="module" src="/assets/components/channel-card.js"></script>
+<script type="module" src="/assets/components/playlist-card.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+{% endblock %}

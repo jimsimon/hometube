@@ -755,3 +755,565 @@ async fn mark_sync_error(
         .await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Inbound sync (YouTube → HomeTube)
+// ---------------------------------------------------------------------------
+
+/// Run a full inbound sync for every child account: subscriptions,
+/// likes, and playlists. Errors per-child are logged + recorded as
+/// `sync_error` notifications but never abort the run.
+///
+/// Returns a short human-readable summary suitable for the
+/// `cron_job_runs.message` column.
+pub async fn sync_youtube_for_all_children(pool: &SqlitePool) -> AppResult<String> {
+    let children: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'child'")
+            .fetch_all(pool)
+            .await?;
+    let total = children.len();
+    let mut succeeded = 0;
+    let mut failed: Vec<(i64, String)> = Vec::new();
+
+    for (child_id,) in children {
+        match sync_youtube_for_child(pool, child_id).await {
+            Ok(()) => succeeded += 1,
+            Err(err) => {
+                warn!(child_id, %err, "youtube sync failed");
+                let _ = notify_sync_error(pool, child_id, &err.to_string()).await;
+                failed.push((child_id, err.to_string()));
+            }
+        }
+    }
+
+    if failed.is_empty() {
+        Ok(format!("Synced {succeeded}/{total} child accounts."))
+    } else {
+        Ok(format!(
+            "Synced {succeeded}/{total} accounts; {} failed.",
+            failed.len()
+        ))
+    }
+}
+
+/// Run a single child's inbound sync. Each phase (subscriptions →
+/// likes → playlists) is independent — a failure in one doesn't abort
+/// the others, but the first failure is bubbled up as the function's
+/// return value for reporting.
+async fn sync_youtube_for_child(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
+    let mut first_err: Option<AppError> = None;
+
+    if let Err(err) = sync_subscriptions(pool, child_id).await {
+        warn!(child_id, %err, "subscriptions sync failed");
+        first_err.get_or_insert(err);
+    }
+    if let Err(err) = sync_likes(pool, child_id).await {
+        warn!(child_id, %err, "likes sync failed");
+        first_err.get_or_insert(err);
+    }
+    if let Err(err) = sync_playlists(pool, child_id).await {
+        warn!(child_id, %err, "playlists sync failed");
+        first_err.get_or_insert(err);
+    }
+
+    if let Some(err) = first_err {
+        return Err(err);
+    }
+    Ok(())
+}
+
+async fn sync_subscriptions(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
+    let token = refresh_if_expired(pool, child_id).await?;
+    let mut page_token: Option<String> = None;
+    let mut remote_channel_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    loop {
+        let mut q = vec![
+            ("part", "snippet"),
+            ("mine", "true"),
+            ("maxResults", "50"),
+        ];
+        if let Some(ref tok) = page_token {
+            q.push(("pageToken", tok.as_str()));
+        }
+        let res = youtube_get(&token, "/subscriptions", &q).await?;
+        let items = res
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let sub_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let snip = item.get("snippet");
+            let channel_id = snip
+                .and_then(|s| s.pointer("/resourceId/channelId"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let channel_title = snip
+                .and_then(|s| s.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let thumbnail_url = snip
+                .and_then(|s| s.pointer("/thumbnails/default/url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let Some(channel_id) = channel_id else {
+                continue;
+            };
+            remote_channel_ids.insert(channel_id.clone());
+
+            sqlx::query(
+                "INSERT INTO child_subscriptions \
+                    (child_account_id, channel_id, channel_title, channel_thumbnail_url, \
+                     youtube_subscription_id, source, sync_status, is_deleted) \
+                 VALUES (?, ?, ?, ?, ?, 'youtube', 'synced', 0) \
+                 ON CONFLICT(child_account_id, channel_id) DO UPDATE SET \
+                    channel_title = excluded.channel_title, \
+                    channel_thumbnail_url = excluded.channel_thumbnail_url, \
+                    youtube_subscription_id = excluded.youtube_subscription_id, \
+                    sync_status = 'synced', \
+                    is_deleted = 0, \
+                    updated_at = unixepoch()",
+            )
+            .bind(child_id)
+            .bind(&channel_id)
+            .bind(&channel_title)
+            .bind(thumbnail_url)
+            .bind(&sub_id)
+            .execute(pool)
+            .await?;
+        }
+
+        page_token = res
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    // Soft-delete youtube-sourced rows that disappeared from YouTube.
+    let local: Vec<(String,)> = sqlx::query_as(
+        "SELECT channel_id FROM child_subscriptions \
+         WHERE child_account_id = ? AND source = 'youtube' AND is_deleted = 0",
+    )
+    .bind(child_id)
+    .fetch_all(pool)
+    .await?;
+    for (channel_id,) in local {
+        if !remote_channel_ids.contains(&channel_id) {
+            sqlx::query(
+                "UPDATE child_subscriptions SET is_deleted = 1, sync_status = 'synced', \
+                    updated_at = unixepoch() \
+                 WHERE child_account_id = ? AND channel_id = ?",
+            )
+            .bind(child_id)
+            .bind(&channel_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    update_sync_state(pool, child_id, "subscriptions").await?;
+    Ok(())
+}
+
+async fn sync_likes(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
+    let token = refresh_if_expired(pool, child_id).await?;
+    let mut page_token: Option<String> = None;
+    let mut remote_video_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    loop {
+        let mut q = vec![
+            ("part", "snippet,contentDetails"),
+            ("playlistId", "LL"),
+            ("maxResults", "50"),
+        ];
+        if let Some(ref tok) = page_token {
+            q.push(("pageToken", tok.as_str()));
+        }
+        let res = match youtube_get(&token, "/playlistItems", &q).await {
+            Ok(r) => r,
+            Err(err) => {
+                // The "LL" liked-videos playlist returns 404 on
+                // accounts where it's hidden. Treat as no-op.
+                debug!(child_id, %err, "likes playlist unavailable");
+                break;
+            }
+        };
+        let items = res
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let video_id = item
+                .pointer("/contentDetails/videoId")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let snip = item.get("snippet");
+            let title = snip
+                .and_then(|s| s.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let thumb = snip
+                .and_then(|s| s.pointer("/thumbnails/default/url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let Some(video_id) = video_id else {
+                continue;
+            };
+            remote_video_ids.insert(video_id.clone());
+            sqlx::query(
+                "INSERT INTO video_likes \
+                    (child_account_id, video_id, video_title, video_thumbnail_url, \
+                     source, sync_status, is_deleted) \
+                 VALUES (?, ?, ?, ?, 'youtube', 'synced', 0) \
+                 ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
+                    video_title = excluded.video_title, \
+                    video_thumbnail_url = excluded.video_thumbnail_url, \
+                    sync_status = 'synced', \
+                    is_deleted = 0, \
+                    updated_at = unixepoch()",
+            )
+            .bind(child_id)
+            .bind(&video_id)
+            .bind(title)
+            .bind(thumb)
+            .execute(pool)
+            .await?;
+        }
+        page_token = res
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    let local: Vec<(String,)> = sqlx::query_as(
+        "SELECT video_id FROM video_likes \
+         WHERE child_account_id = ? AND source = 'youtube' AND is_deleted = 0",
+    )
+    .bind(child_id)
+    .fetch_all(pool)
+    .await?;
+    for (video_id,) in local {
+        if !remote_video_ids.contains(&video_id) {
+            sqlx::query(
+                "UPDATE video_likes SET is_deleted = 1, sync_status = 'synced', \
+                    updated_at = unixepoch() \
+                 WHERE child_account_id = ? AND video_id = ?",
+            )
+            .bind(child_id)
+            .bind(&video_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    update_sync_state(pool, child_id, "likes").await?;
+    Ok(())
+}
+
+async fn sync_playlists(pool: &SqlitePool, child_id: i64) -> AppResult<()> {
+    let token = refresh_if_expired(pool, child_id).await?;
+    let mut page_token: Option<String> = None;
+    let mut remote_playlist_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    loop {
+        let mut q = vec![
+            ("part", "snippet,contentDetails"),
+            ("mine", "true"),
+            ("maxResults", "50"),
+        ];
+        if let Some(ref tok) = page_token {
+            q.push(("pageToken", tok.as_str()));
+        }
+        let res = youtube_get(&token, "/playlists", &q).await?;
+        let items = res
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let yt_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let snip = item.get("snippet");
+            let title = snip
+                .and_then(|s| s.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let description = snip
+                .and_then(|s| s.get("description"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let Some(yt_id) = yt_id else {
+                continue;
+            };
+            remote_playlist_ids.insert(yt_id.clone());
+
+            // Insert or update.
+            let local_id: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM child_playlists \
+                 WHERE child_account_id = ? AND youtube_playlist_id = ?",
+            )
+            .bind(child_id)
+            .bind(&yt_id)
+            .fetch_optional(pool)
+            .await?;
+            let local_id = if let Some(id) = local_id {
+                sqlx::query(
+                    "UPDATE child_playlists SET title = ?, description = ?, \
+                        sync_status = 'synced', is_deleted = 0, updated_at = unixepoch() \
+                     WHERE id = ?",
+                )
+                .bind(&title)
+                .bind(&description)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                id
+            } else {
+                sqlx::query_scalar(
+                    "INSERT INTO child_playlists \
+                        (child_account_id, youtube_playlist_id, title, description, \
+                         is_own, source, sync_status) \
+                     VALUES (?, ?, ?, ?, 1, 'youtube', 'synced') RETURNING id",
+                )
+                .bind(child_id)
+                .bind(&yt_id)
+                .bind(&title)
+                .bind(&description)
+                .fetch_one(pool)
+                .await?
+            };
+
+            // Pull the playlist's items (best-effort, single page).
+            if let Err(err) =
+                sync_playlist_items(pool, &token, local_id, &yt_id).await
+            {
+                warn!(child_id, playlist=%yt_id, %err, "playlist items sync failed");
+            }
+        }
+
+        page_token = res
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    // Soft-delete youtube-sourced playlists that disappeared.
+    let local: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, youtube_playlist_id FROM child_playlists \
+         WHERE child_account_id = ? AND source = 'youtube' AND is_deleted = 0",
+    )
+    .bind(child_id)
+    .fetch_all(pool)
+    .await?;
+    for (id, yt_id) in local {
+        let still_present = yt_id
+            .as_deref()
+            .map(|y| remote_playlist_ids.contains(y))
+            .unwrap_or(false);
+        if !still_present {
+            sqlx::query(
+                "UPDATE child_playlists SET is_deleted = 1, sync_status = 'synced', \
+                    updated_at = unixepoch() WHERE id = ?",
+            )
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    update_sync_state(pool, child_id, "playlists").await?;
+    Ok(())
+}
+
+async fn sync_playlist_items(
+    pool: &SqlitePool,
+    token: &str,
+    local_playlist_id: i64,
+    youtube_playlist_id: &str,
+) -> AppResult<()> {
+    let mut page_token: Option<String> = None;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    loop {
+        let mut q = vec![
+            ("part", "snippet,contentDetails"),
+            ("playlistId", youtube_playlist_id),
+            ("maxResults", "50"),
+        ];
+        if let Some(ref tok) = page_token {
+            q.push(("pageToken", tok.as_str()));
+        }
+        let res = youtube_get(token, "/playlistItems", &q).await?;
+        let items = res
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let video_id = item
+                .pointer("/contentDetails/videoId")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let snip = item.get("snippet");
+            let title = snip
+                .and_then(|s| s.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let thumb = snip
+                .and_then(|s| s.pointer("/thumbnails/default/url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let channel_title = snip
+                .and_then(|s| {
+                    s.get("videoOwnerChannelTitle")
+                        .or_else(|| s.get("channelTitle"))
+                })
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let position = snip.and_then(|s| s.get("position")).and_then(|v| v.as_i64());
+            let Some(video_id) = video_id else {
+                continue;
+            };
+            seen.insert(video_id.clone());
+            sqlx::query(
+                "INSERT INTO child_playlist_videos \
+                    (playlist_id, video_id, video_title, video_thumbnail_url, \
+                     channel_title, position) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(playlist_id, video_id) DO UPDATE SET \
+                    video_title = excluded.video_title, \
+                    video_thumbnail_url = excluded.video_thumbnail_url, \
+                    channel_title = excluded.channel_title, \
+                    position = excluded.position",
+            )
+            .bind(local_playlist_id)
+            .bind(&video_id)
+            .bind(&title)
+            .bind(thumb)
+            .bind(channel_title)
+            .bind(position.unwrap_or(0))
+            .execute(pool)
+            .await?;
+        }
+        page_token = res
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    // Drop locally-stored items that disappeared from YouTube.
+    let local: Vec<(String,)> = sqlx::query_as(
+        "SELECT video_id FROM child_playlist_videos WHERE playlist_id = ?",
+    )
+    .bind(local_playlist_id)
+    .fetch_all(pool)
+    .await?;
+    for (video_id,) in local {
+        if !seen.contains(&video_id) {
+            sqlx::query(
+                "DELETE FROM child_playlist_videos WHERE playlist_id = ? AND video_id = ?",
+            )
+            .bind(local_playlist_id)
+            .bind(&video_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn youtube_get(
+    token: &str,
+    path: &str,
+    query: &[(&str, &str)],
+) -> AppResult<Value> {
+    let client = Client::new();
+    let url = format!("{API_BASE}{path}");
+    let mut req = client.get(&url).bearer_auth(token);
+    for (k, v) in query {
+        req = req.query(&[(*k, *v)]);
+    }
+    let res = req.send().await.map_err(AppError::Http)?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(AppError::Other(anyhow::anyhow!(
+            "YouTube API {status}: {body}"
+        )));
+    }
+    res.json::<Value>().await.map_err(AppError::Http)
+}
+
+async fn update_sync_state(
+    pool: &SqlitePool,
+    account_id: i64,
+    data_type: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO sync_state (account_id, data_type, last_synced_at) \
+         VALUES (?, ?, unixepoch()) \
+         ON CONFLICT(account_id, data_type) DO UPDATE SET \
+            last_synced_at = unixepoch()",
+    )
+    .bind(account_id)
+    .bind(data_type)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn notify_sync_error(
+    pool: &SqlitePool,
+    child_id: i64,
+    err: &str,
+) -> AppResult<()> {
+    let parents: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
+            .fetch_all(pool)
+            .await?;
+    let metadata = serde_json::json!({
+        "child_account_id": child_id,
+        "error": err,
+    })
+    .to_string();
+    for (parent_id,) in parents {
+        sqlx::query(
+            "INSERT INTO parent_notifications \
+                (parent_account_id, notification_type, title, message, metadata) \
+             VALUES (?, 'sync_error', ?, ?, ?)",
+        )
+        .bind(parent_id)
+        .bind("YouTube sync error")
+        .bind(format!("Couldn't sync child #{child_id}: {err}"))
+        .bind(&metadata)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}

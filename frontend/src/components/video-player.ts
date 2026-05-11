@@ -33,6 +33,7 @@ import { ApiError, api } from '../services/api.js';
 import type {
   Bookmark,
   ChildSettings,
+  HeartbeatResponse,
   StreamResponse,
   UsageLimitResponse,
   VideoMetadata,
@@ -59,6 +60,8 @@ export class VideoPlayer extends LitElement {
   @state() private bookmarks: Bookmark[] = [];
   @state() private error = '';
   @state() private continuePromptOpen = false;
+  /** Most-recent `remaining_seconds` from the heartbeat response. */
+  @state() private remainingSeconds: number | null = null;
 
   @query('video') private videoEl!: HTMLVideoElement;
 
@@ -143,6 +146,20 @@ export class VideoPlayer extends LitElement {
       color: black;
       font: inherit;
       cursor: pointer;
+    }
+    .countdown {
+      margin: 0.5rem 0;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.375rem;
+      background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
+      color: var(--wa-color-warning-on-quiet, #92400e);
+      font-size: 0.9rem;
+    }
+    .countdown.urgent {
+      background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
+      color: var(--wa-color-danger-on-quiet, #991b1b);
+      font-weight: 600;
+      font-size: 1rem;
     }
   `;
 
@@ -374,20 +391,22 @@ export class VideoPlayer extends LitElement {
     const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
     this.lastHeartbeatAt = now;
     try {
-      const res = await api.post<UsageLimitResponse | { remaining_seconds: number; limit_exceeded: boolean }>(
-        '/api/usage/heartbeat',
-        {
-          video_id: this.videoId,
-          position_seconds: Math.floor(this.videoEl.currentTime),
-          duration_seconds: Math.floor(this.videoEl.duration || 0) || null,
-          video_title: this.metadata.title,
-          video_thumbnail_url: this.metadata.thumbnail_url,
-          channel_title: this.metadata.channel_title,
-          elapsed_seconds: elapsed,
-        },
-      );
-      if ('limit_exceeded' in res && res.limit_exceeded) {
-        this.handleUsageLimit({ reason: 'limit_exceeded', remaining_seconds: 0 });
+      const res = await api.post<HeartbeatResponse>('/api/usage/heartbeat', {
+        video_id: this.videoId,
+        position_seconds: Math.floor(this.videoEl.currentTime),
+        duration_seconds: Math.floor(this.videoEl.duration || 0) || null,
+        video_title: this.metadata.title,
+        video_thumbnail_url: this.metadata.thumbnail_url,
+        channel_title: this.metadata.channel_title,
+        elapsed_seconds: elapsed,
+      });
+      this.remainingSeconds = res.remaining_seconds;
+      if (res.limit_exceeded) {
+        this.handleUsageLimit({
+          reason: res.reason ?? 'limit_exceeded',
+          remaining_seconds: res.remaining_seconds ?? 0,
+          allowed_window: res.allowed_window ?? null,
+        });
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
@@ -469,6 +488,7 @@ export class VideoPlayer extends LitElement {
           : nothing}
       </div>
       ${this.renderBookmarkMarkers()}
+      ${this.renderCountdown()}
       ${this.metadata
         ? html`<div class="meta">
             <h1>${this.metadata.title ?? 'Untitled'}</h1>
@@ -492,6 +512,25 @@ export class VideoPlayer extends LitElement {
           </div>`
         : null}
     `;
+  }
+
+  /** Render the countdown indicator. Hidden until under 30 minutes. */
+  private renderCountdown() {
+    const remaining = this.remainingSeconds;
+    if (remaining == null || remaining > 30 * 60) return nothing;
+    const minutes = Math.max(0, Math.ceil(remaining / 60));
+    let cls = 'countdown';
+    let text = `${minutes} minute${minutes === 1 ? '' : 's'} left for today.`;
+    if (remaining <= 60) {
+      cls = 'countdown urgent';
+      text = "Less than a minute left — wrapping up soon!";
+    } else if (remaining <= 5 * 60) {
+      cls = 'countdown urgent';
+      text = `${minutes} minute${minutes === 1 ? '' : 's'} left — almost done!`;
+    }
+    return html`<div class="${cls}" role="status" aria-live="polite">
+      ${text}
+    </div>`;
   }
 
   /** Enforce the playback-speed lock from child settings. */

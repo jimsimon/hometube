@@ -106,6 +106,8 @@ pub async fn enforce_usage_limit(
         let remaining = max_seconds - used_today;
 
         if remaining <= 0 {
+            // Best-effort daily-limit notification.
+            let _ = notify_parents_limit_reached(&state.db, current.id).await;
             return (
                 StatusCode::FORBIDDEN,
                 Json(LimitResponse {
@@ -135,6 +137,50 @@ fn parse_hhmm(s: &str) -> Option<i64> {
     Some(hh * 60 + mm)
 }
 
+/// Insert a `time_limit_reached` notification for every parent unless
+/// one already exists today. Mirrors the helper in `routes::usage` but
+/// implemented here to keep the middleware self-contained.
+async fn notify_parents_limit_reached(
+    pool: &SqlitePool,
+    child_id: i64,
+) -> Result<(), sqlx::Error> {
+    let parents: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
+            .fetch_all(pool)
+            .await?;
+    let metadata = serde_json::json!({ "child_account_id": child_id }).to_string();
+    let child_match = format!("%\"child_account_id\":{child_id}%");
+    for (parent_id,) in parents {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM parent_notifications \
+             WHERE parent_account_id = ? \
+               AND notification_type = 'time_limit_reached' \
+               AND created_at >= unixepoch() - 86400 \
+               AND COALESCE(metadata, '') LIKE ?",
+        )
+        .bind(parent_id)
+        .bind(&child_match)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        if exists > 0 {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO parent_notifications \
+                (parent_account_id, notification_type, title, message, metadata) \
+             VALUES (?, 'time_limit_reached', ?, ?, ?)",
+        )
+        .bind(parent_id)
+        .bind("Daily limit reached")
+        .bind("Watch time used up for today.")
+        .bind(&metadata)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn notify_parents(
     pool: &SqlitePool,
     child_id: i64,
@@ -149,15 +195,18 @@ async fn notify_parents(
         "remaining_seconds": remaining,
     });
     let metadata_str = metadata.to_string();
+    let child_match = format!("%\"child_account_id\":{child_id}%");
     for (parent_id,) in parents {
-        // Skip if a notification already exists for today.
+        // Skip if a notification for THIS child already exists today.
         let exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM parent_notifications \
              WHERE parent_account_id = ? \
                AND notification_type = 'time_limit_approaching' \
-               AND created_at >= unixepoch() - 86400",
+               AND created_at >= unixepoch() - 86400 \
+               AND COALESCE(metadata, '') LIKE ?",
         )
         .bind(parent_id)
+        .bind(&child_match)
         .fetch_one(pool)
         .await
         .unwrap_or(0);

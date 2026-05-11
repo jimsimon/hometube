@@ -1,6 +1,8 @@
 //! HomeTube — a self-hosted YouTube frontend for kids.
 //!
-//! Entry point: builds the Axum app, runs migrations, and starts the HTTP server.
+//! Entry point: builds the Axum app, runs migrations, seeds default
+//! cron jobs, starts the in-process scheduler, and starts the HTTP
+//! server.
 
 use std::net::SocketAddr;
 
@@ -9,7 +11,7 @@ use base64::Engine;
 use rand::RngCore;
 use sqlx::SqlitePool;
 use tower_cookies::Key;
-use tracing::info;
+use tracing::{info, warn};
 
 mod config;
 mod db;
@@ -20,6 +22,7 @@ mod routes;
 mod services;
 mod state;
 
+use crate::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
 use crate::services::dash;
 use crate::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
 use crate::services::video_cache::{KEY_METADATA_CACHE_TTL_HOURS, DEFAULT_TTL_HOURS};
@@ -44,7 +47,37 @@ async fn main() -> anyhow::Result<()> {
     dash::ensure_proxy_secret(&pool).await?;
     ensure_default_metadata_ttl(&pool).await?;
 
-    let app_state = state::AppState::new(cfg.clone(), pool, cookie_key);
+    // Phase 12: seed cron-job defaults + the singleton ytdlp_info row.
+    if let Err(err) = seed_default_jobs(&pool).await {
+        warn!(%err, "failed to seed default cron jobs");
+    }
+    if let Err(err) = seed_ytdlp_info(&pool, &cfg).await {
+        warn!(%err, "failed to seed ytdlp_info");
+    }
+
+    // Build the cron scheduler. Failures here are logged + skipped —
+    // the app must still boot (and serve the parent UI) even if the
+    // scheduler can't start.
+    let scheduler = match Scheduler::new(pool.clone(), cfg.clone()).await {
+        Ok(sched) => {
+            if let Err(err) = sched.register_all().await {
+                warn!(%err, "registering cron jobs");
+            }
+            if let Err(err) = sched.start().await {
+                warn!(%err, "starting cron scheduler");
+            }
+            Some(sched)
+        }
+        Err(err) => {
+            warn!(%err, "could not create cron scheduler; jobs will not run");
+            None
+        }
+    };
+
+    let mut app_state = state::AppState::new(cfg.clone(), pool, cookie_key);
+    if let Some(sched) = scheduler {
+        app_state = app_state.with_scheduler(sched);
+    }
     let app = routes::router(app_state);
 
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;

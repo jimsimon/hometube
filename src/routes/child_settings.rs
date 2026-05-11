@@ -297,14 +297,18 @@ fn is_valid_hhmm(s: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct UsageStats {
-    /// Today's used time, in seconds.
+    /// Today's used time, in seconds (legacy field, kept for back-compat).
     pub today_seconds: i64,
     /// Limit for today, in seconds (None means "no limit configured").
     pub today_limit_seconds: Option<i64>,
     /// Remaining seconds today (None means "no limit configured").
     pub today_remaining_seconds: Option<i64>,
-    /// Per-day-of-week aggregate over the trailing seven days.
+    /// Per-day aggregate over the trailing seven days (legacy field).
     pub weekly: Vec<DayUsage>,
+    /// Phase 11 extension: structured today / week / month rollups.
+    pub today: TodayStats,
+    pub week: Vec<WeekDayStats>,
+    pub month: MonthStats,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +316,28 @@ pub struct DayUsage {
     pub date: String, // ISO 8601, YYYY-MM-DD
     pub day_of_week: i64,
     pub used_seconds: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TodayStats {
+    pub used_minutes: i64,
+    pub limit_minutes: Option<i64>,
+    pub remaining_minutes: Option<i64>,
+    pub allowed_window: Option<crate::routes::usage::AllowedWindow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WeekDayStats {
+    pub day_of_week: i64,
+    pub date: String,
+    pub used_minutes: i64,
+    pub limit_minutes: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MonthStats {
+    pub used_minutes: i64,
+    pub sessions_count: i64,
 }
 
 /// `GET /api/children/:id/usage-stats`.
@@ -380,11 +406,77 @@ pub async fn usage_stats(
         });
     }
 
+    // Phase 11 extension: structured today / week / month payload.
+    let today_used_min = today_seconds / 60;
+    let today_limit_min = today_limit_seconds.map(|s| s / 60);
+    let today_remaining_min = today_remaining_seconds.map(|s| s / 60);
+    let allowed_window: Option<crate::routes::usage::AllowedWindow> = sqlx::query_as::<
+        _,
+        (String, String),
+    >(
+        "SELECT allowed_start_time, allowed_end_time FROM usage_limits \
+         WHERE child_account_id = ? AND day_of_week = ?",
+    )
+    .bind(child_id)
+    .bind(dow)
+    .fetch_optional(&state.db)
+    .await?
+    .map(|(start, end)| crate::routes::usage::AllowedWindow { start, end });
+
+    let mut week = Vec::with_capacity(7);
+    for (offset, daily) in (0i64..7).zip(weekly.iter()) {
+        let date = today - chrono::Duration::days(offset);
+        let dow_for_day = date.weekday().num_days_from_sunday() as i64;
+        let limit_min: Option<i64> = sqlx::query_scalar(
+            "SELECT max_hours FROM usage_limits \
+             WHERE child_account_id = ? AND day_of_week = ?",
+        )
+        .bind(child_id)
+        .bind(dow_for_day)
+        .fetch_optional(&state.db)
+        .await?
+        .map(|h: f64| (h * 60.0) as i64);
+        week.push(WeekDayStats {
+            day_of_week: daily.day_of_week,
+            date: daily.date.clone(),
+            used_minutes: daily.used_seconds / 60,
+            limit_minutes: limit_min,
+        });
+    }
+
+    let month_seconds: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(duration_seconds), 0) FROM usage_log \
+         WHERE child_account_id = ? AND started_at >= unixepoch() - 30 * 86400",
+    )
+    .bind(child_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+    let sessions_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM usage_log \
+         WHERE child_account_id = ? AND started_at >= unixepoch() - 30 * 86400",
+    )
+    .bind(child_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
     Ok(Json(UsageStats {
         today_seconds,
         today_limit_seconds,
         today_remaining_seconds,
         weekly,
+        today: TodayStats {
+            used_minutes: today_used_min,
+            limit_minutes: today_limit_min,
+            remaining_minutes: today_remaining_min,
+            allowed_window,
+        },
+        week,
+        month: MonthStats {
+            used_minutes: month_seconds / 60,
+            sessions_count,
+        },
     }))
 }
 

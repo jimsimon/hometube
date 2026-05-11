@@ -110,6 +110,28 @@ pub async fn parent_home(
 }
 
 #[derive(Template)]
+#[template(path = "pages/parent/system.html")]
+struct ParentSystemTemplate {
+    display_name: String,
+}
+
+/// `GET /parent/system` — cron jobs + yt-dlp + cache management.
+pub async fn parent_system(current: Option<CurrentAccount>) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            let tpl = ParentSystemTemplate {
+                display_name: c.display_name,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
 #[template(path = "pages/child/home.html")]
 struct ChildHomeTemplate {
     display_name: String,
@@ -206,6 +228,40 @@ pub async fn child_playlist(
         let tpl = ChildPlaylistTemplate {
             display_name: c.display_name,
             playlist_id,
+        };
+        Ok(Html(tpl.render()?).into_response())
+    })
+    .await
+}
+
+#[derive(Template)]
+#[template(path = "pages/child/search.html")]
+struct ChildSearchTemplate {
+    display_name: String,
+    q: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchPageQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+/// `GET /child/search` — server-rendered shell for child search. The
+/// real result rendering happens in `<hometube-search-results>` once
+/// the query is sent to `/api/search`.
+pub async fn child_search(
+    current: Option<CurrentAccount>,
+    Query(q): Query<SearchPageQuery>,
+) -> AppResult<Response> {
+    require_child(current, |c| {
+        let tpl = ChildSearchTemplate {
+            display_name: c.display_name,
+            q: q.q.clone().unwrap_or_default(),
+            kind: q.kind.clone().unwrap_or_else(|| "all".to_string()),
         };
         Ok(Html(tpl.render()?).into_response())
     })

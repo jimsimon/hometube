@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}HomeTube — System{% endblock %}
+
+{% block content %}
+{% include "partials/nav-parent.html" %}
+
+<section class="parent-system" aria-label="System management">
+  <header class="page-header">
+    <h1>System</h1>
+    <p class="subtitle">
+      Manage scheduled jobs, the yt-dlp binary, and the on-disk
+      segment cache.
+    </p>
+  </header>
+
+  <section aria-labelledby="ytdlp-heading">
+    <h2 id="ytdlp-heading">yt-dlp</h2>
+    <hometube-ytdlp-status-card></hometube-ytdlp-status-card>
+  </section>
+
+  <section aria-labelledby="cron-heading">
+    <h2 id="cron-heading">Scheduled jobs</h2>
+    <div role="status" aria-live="polite" id="cron-live"></div>
+    <div id="cron-jobs">Loading…</div>
+  </section>
+
+  <section aria-labelledby="cache-heading">
+    <h2 id="cache-heading">Segment cache</h2>
+    <hometube-cache-manager></hometube-cache-manager>
+  </section>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-parent.js"></script>
+<script type="module" src="/assets/components/cron-job-card.js"></script>
+<script type="module" src="/assets/components/ytdlp-status-card.js"></script>
+<script type="module" src="/assets/components/cache-manager.js"></script>
+<script type="module">
+  import { api } from '/assets/services/api.js';
+
+  // Render the cron jobs list. The "Run now" button + frequency
+  // dropdown live inside <hometube-cron-job-card>.
+  async function loadJobs() {
+    const container = document.getElementById('cron-jobs');
+    try {
+      const jobs = await api.get('/api/cron/jobs');
+      container.innerHTML = '';
+      for (const job of jobs) {
+        const card = document.createElement('hometube-cron-job-card');
+        card.setAttribute('job-id', String(job.id));
+        card.job = job;
+        container.appendChild(card);
+      }
+      document.getElementById('cron-live').textContent =
+        `Loaded ${jobs.length} scheduled job${jobs.length === 1 ? '' : 's'}.`;
+    } catch (err) {
+      container.innerHTML = `<p role="alert">Failed to load jobs: ${err.message}</p>`;
+    }
+  }
+  document.addEventListener('hometube:cron-changed', loadJobs);
+  loadJobs();
+</script>
+{% endblock %}

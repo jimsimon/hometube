@@ -6,21 +6,32 @@
  * full-screen friendly message — "all done for today" or "outside
  * allowed hours" — and traps focus while open.
  *
+ * For `outside_window` we show the next allowed start time pulled from
+ * the heartbeat response (`allowed_window`), so the message reads
+ * "You can watch again at 8:00 AM".
+ *
  * Closing the overlay simply hides it; the player has already paused.
  */
 
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
+interface AllowedWindow {
+  start: string; // "HH:MM"
+  end: string;
+}
+
 interface UsageLimitDetail {
   reason: 'limit_exceeded' | 'outside_window';
   remaining_seconds?: number;
+  allowed_window?: AllowedWindow | null;
 }
 
 @customElement('hometube-usage-limit-overlay')
 export class UsageLimitOverlay extends LitElement {
   @state() private open = false;
   @state() private reason: UsageLimitDetail['reason'] | null = null;
+  @state() private allowedWindow: AllowedWindow | null = null;
 
   static styles = css`
     :host {
@@ -83,6 +94,7 @@ export class UsageLimitOverlay extends LitElement {
   private onUsageLimit = (event: Event): void => {
     const detail = (event as CustomEvent<UsageLimitDetail>).detail;
     this.reason = detail?.reason ?? 'limit_exceeded';
+    this.allowedWindow = detail?.allowed_window ?? null;
     this.open = true;
     // Move focus into the dialog after the next render.
     queueMicrotask(() => {
@@ -95,16 +107,32 @@ export class UsageLimitOverlay extends LitElement {
     this.open = false;
   };
 
+  private formatTime(hhmm: string): string {
+    const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+    if (!m) return hhmm;
+    const h = Number(m[1]);
+    const min = m[2];
+    const ampm = h < 12 ? 'AM' : 'PM';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${h12}:${min} ${ampm}`;
+  }
+
   override render() {
     if (!this.open) return null;
     const heading =
       this.reason === 'outside_window'
         ? "It's outside your viewing hours"
         : 'All done for today!';
-    const body =
-      this.reason === 'outside_window'
-        ? 'Come back during your allowed hours to keep watching.'
-        : "You've used up your time for today. See you tomorrow!";
+    let body: string;
+    if (this.reason === 'outside_window') {
+      if (this.allowedWindow?.start) {
+        body = `You can watch again at ${this.formatTime(this.allowedWindow.start)}.`;
+      } else {
+        body = 'Come back during your allowed hours to keep watching.';
+      }
+    } else {
+      body = "You've used up your time for today. See you tomorrow!";
+    }
     return html`
       <div
         class="backdrop"

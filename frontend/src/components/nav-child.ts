@@ -17,6 +17,8 @@ import { customElement, property, query } from 'lit/decorators.js';
 
 import { api } from '../services/api.js';
 
+import './search-bar.js';
+
 @customElement('hometube-nav-child')
 export class NavChild extends LitElement {
   @property({ type: String, attribute: 'display-name' })
@@ -99,13 +101,6 @@ export class NavChild extends LitElement {
     }
   };
 
-  private onSearchKeydown = (e: KeyboardEvent): void => {
-    if (e.key !== 'Enter') return;
-    const value = (e.target as HTMLInputElement).value.trim();
-    if (!value) return;
-    window.location.href = `/child/search?q=${encodeURIComponent(value)}`;
-  };
-
   private onLogout = async (): Promise<void> => {
     try {
       await api.post('/api/auth/logout');
@@ -126,13 +121,7 @@ export class NavChild extends LitElement {
         </button>
         <a href="/child/home" class="brand">HomeTube</a>
         <div class="search">
-          <label for="child-search" class="sr-only">Search</label>
-          <input
-            id="child-search"
-            type="search"
-            placeholder="Search videos…"
-            @keydown=${this.onSearchKeydown}
-          />
+          <hometube-search-bar></hometube-search-bar>
         </div>
         <hometube-theme-toggle></hometube-theme-toggle>
         ${this.displayName

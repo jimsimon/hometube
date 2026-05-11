@@ -5,11 +5,17 @@
 //! signed session cookies. The cookie key is loaded (or generated) from the
 //! `app_config` table on startup so that signed cookies remain valid across
 //! restarts.
+//!
+//! Phase 12 adds an optional [`crate::services::cron::Scheduler`] handle so
+//! the parent-only cron API can trigger jobs immediately. The handle is
+//! held inside an `Option` so unit tests can construct an `AppState`
+//! without spinning up the full scheduler.
 
 use sqlx::SqlitePool;
 use tower_cookies::Key;
 
 use crate::config::Config;
+use crate::services::cron::Scheduler;
 
 /// Cheap-to-clone bundle of dependencies shared across handlers.
 ///
@@ -22,6 +28,8 @@ pub struct AppState {
     pub db: SqlitePool,
     /// Master key used to sign session cookies.
     pub cookie_key: Key,
+    /// Optional cron-scheduler handle (Phase 12). `None` in tests.
+    pub scheduler: Option<Scheduler>,
 }
 
 impl AppState {
@@ -30,6 +38,14 @@ impl AppState {
             config,
             db,
             cookie_key,
+            scheduler: None,
         }
+    }
+
+    /// Builder helper — install a [`Scheduler`] handle on this state
+    /// before passing it to [`crate::routes::router`].
+    pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
+        self.scheduler = Some(scheduler);
+        self
     }
 }

@@ -135,9 +135,22 @@ export interface StreamResponse {
   }>;
 }
 
+export interface AllowedWindow {
+  start: string; // "HH:MM"
+  end: string;
+}
+
 export interface UsageLimitResponse {
   reason: 'limit_exceeded' | 'outside_window';
   remaining_seconds: number;
+  allowed_window?: AllowedWindow | null;
+}
+
+export interface HeartbeatResponse {
+  remaining_seconds: number | null;
+  allowed_window: AllowedWindow | null;
+  limit_exceeded: boolean;
+  reason?: 'limit_exceeded' | 'outside_window';
 }
 
 // ---------------------------------------------------------------------------

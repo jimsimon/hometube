@@ -145,7 +145,6 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 
 /// Return the version string emitted by `yt-dlp --version`. Used by the
 /// Phase 12 update job and the system status card.
-#[allow(dead_code)]
 pub async fn version(cfg: &Config) -> AppResult<String> {
     let output = timeout(
         Duration::from_secs(5),
@@ -161,4 +160,182 @@ pub async fn version(cfg: &Config) -> AppResult<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Update flow
+// ---------------------------------------------------------------------------
+
+/// GitHub releases API endpoint for the yt-dlp project.
+const GITHUB_LATEST_URL: &str =
+    "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
+
+/// Direct download URL for the Linux static binary.
+const LINUX_BINARY_URL: &str =
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+
+/// Lookup the latest published version on GitHub. Returns the
+/// `tag_name` field of the latest-release JSON.
+pub async fn latest_published_version() -> AppResult<String> {
+    let client = reqwest::Client::builder()
+        .user_agent("hometube/0.1")
+        .build()
+        .map_err(AppError::Http)?;
+    let res = client.get(GITHUB_LATEST_URL).send().await.map_err(AppError::Http)?;
+    if !res.status().is_success() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "GitHub API returned {}",
+            res.status()
+        )));
+    }
+    let body: serde_json::Value = res.json().await.map_err(AppError::Http)?;
+    body.get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Other(anyhow::anyhow!("missing tag_name in GitHub response")))
+}
+
+/// Check whether a newer version is available compared to the value
+/// stored in `ytdlp_info.current_version`. Returns `None` if already
+/// up to date or no current_version is recorded.
+pub async fn check_for_update(
+    pool: &sqlx::SqlitePool,
+) -> AppResult<Option<String>> {
+    let latest = latest_published_version().await?;
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT current_version FROM ytdlp_info WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    sqlx::query("UPDATE ytdlp_info SET last_checked_at = unixepoch() WHERE id = 1")
+        .execute(pool)
+        .await
+        .ok();
+    if let Some(cur) = current {
+        if cur.trim_start_matches('v') == latest.trim_start_matches('v') {
+            return Ok(None);
+        }
+    }
+    Ok(Some(latest))
+}
+
+/// Download and install the latest yt-dlp binary. Returns the new
+/// version string on success. On any failure the existing binary is
+/// left untouched.
+///
+/// Implementation:
+///   1. Download to `<binary_path>.new`.
+///   2. `chmod +x`.
+///   3. Run `<binary_path>.new --version` to verify it actually works.
+///   4. Atomically rename to `<binary_path>` (replacing the old one).
+///
+/// Best-effort: if step 3 fails the temp file is removed so we don't
+/// leave half-downloaded binaries lying around.
+pub async fn update_binary(
+    pool: &sqlx::SqlitePool,
+    cfg: &Config,
+) -> AppResult<String> {
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
+
+    // Resolve target path. The configured path may be a bare command
+    // name (e.g. `yt-dlp`) on first boot — in that case we install into
+    // the data dir alongside `app.db`.
+    let mut target = std::path::PathBuf::from(&cfg.ytdlp_path);
+    if !target.is_absolute() && !target.exists() {
+        target = std::path::PathBuf::from("./data/yt-dlp");
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).await.ok();
+        }
+    }
+    let temp = target.with_extension("new");
+
+    // Download.
+    let client = reqwest::Client::builder()
+        .user_agent("hometube/0.1")
+        .build()
+        .map_err(AppError::Http)?;
+    let res = client.get(LINUX_BINARY_URL).send().await.map_err(AppError::Http)?;
+    if !res.status().is_success() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "yt-dlp download returned HTTP {}",
+            res.status()
+        )));
+    }
+    let bytes = res.bytes().await.map_err(AppError::Http)?;
+    let mut f = fs::File::create(&temp)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("creating temp file: {e}")))?;
+    f.write_all(&bytes)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("writing temp file: {e}")))?;
+    f.flush().await.ok();
+    drop(f);
+
+    // chmod +x (Unix only — on Windows we no-op since the OS doesn't
+    // care about the executable bit).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&temp)
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("statting temp: {e}")))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&temp, perms)
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("chmod temp: {e}")))?;
+    }
+
+    // Verify.
+    let verify = timeout(
+        Duration::from_secs(10),
+        Command::new(&temp).arg("--version").output(),
+    )
+    .await
+    .map_err(|_| AppError::Other(anyhow::anyhow!("yt-dlp --version timed out")))
+    .and_then(|res| res.map_err(|e| AppError::Other(anyhow::anyhow!("spawn: {e}"))));
+
+    let verify = match verify {
+        Ok(v) => v,
+        Err(err) => {
+            fs::remove_file(&temp).await.ok();
+            return Err(err);
+        }
+    };
+    if !verify.status.success() {
+        fs::remove_file(&temp).await.ok();
+        return Err(AppError::Other(anyhow::anyhow!(
+            "verification failed: status {}",
+            verify.status
+        )));
+    }
+    let new_version = String::from_utf8_lossy(&verify.stdout).trim().to_string();
+
+    // Atomically replace.
+    if let Err(err) = fs::rename(&temp, &target).await {
+        fs::remove_file(&temp).await.ok();
+        return Err(AppError::Other(anyhow::anyhow!(
+            "renaming new binary into place: {err}"
+        )));
+    }
+
+    // Persist version metadata.
+    let target_str = target.to_string_lossy().to_string();
+    sqlx::query(
+        "INSERT INTO ytdlp_info (id, current_version, last_checked_at, last_updated_at, binary_path) \
+         VALUES (1, ?, unixepoch(), unixepoch(), ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+            current_version = excluded.current_version, \
+            last_checked_at = excluded.last_checked_at, \
+            last_updated_at = excluded.last_updated_at, \
+            binary_path = excluded.binary_path",
+    )
+    .bind(&new_version)
+    .bind(&target_str)
+    .execute(pool)
+    .await?;
+
+    Ok(new_version)
 }

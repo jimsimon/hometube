@@ -12,11 +12,12 @@
 //!   segment proxy
 //! - [`access`]: child content-access decisions (allowlist + blocklist)
 //! - [`sync`]: outbound (HomeTube → YouTube) sync helpers — subscriptions,
-//!   playlists, playlist items, likes
-//!
-//! Future phases add `cron`, etc.
+//!   playlists, playlist items, likes; plus inbound full-tree sync
+//! - [`cron`]: in-process cron scheduler + default-job seeding +
+//!   yt-dlp / sync / cache-cleanup handlers
 
 pub mod access;
+pub mod cron;
 pub mod dash;
 pub mod oauth;
 pub mod setup;
