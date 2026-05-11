@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Watch — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+{% if unavailable %}
+<section class="video-unavailable" aria-label="Video unavailable">
+  <div class="card">
+    <h1>This video isn't available</h1>
+    <p>
+      Ask a parent if you'd like to watch it. They can add it to your
+      allowlist on their dashboard.
+    </p>
+    <p>
+      <a href="/child/home" class="back-link">← Back to home</a>
+    </p>
+  </div>
+</section>
+{% else %}
+<section
+  class="child-video"
+  aria-label="Video"
+  data-video-id="{{ video_id }}"
+  data-from="{{ from }}"
+>
+  <div class="player-column">
+    <hometube-video-player
+      video-id="{{ video_id }}"
+    ></hometube-video-player>
+  </div>
+
+  <aside class="up-next-column" aria-label="Up next">
+    <hometube-up-next
+      video-id="{{ video_id }}"
+      from="{{ from }}"
+    ></hometube-up-next>
+  </aside>
+</section>
+
+<hometube-wind-down-overlay></hometube-wind-down-overlay>
+{% endif %}
+
+<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
+{% endblock %}
+
+{% block head %}
+<style>
+  .child-video {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(20rem, 1fr);
+    gap: 1.5rem;
+    padding: 1rem;
+    align-items: start;
+  }
+  @media (max-width: 60rem) {
+    .child-video {
+      grid-template-columns: 1fr;
+    }
+  }
+  .player-column {
+    min-width: 0;
+  }
+  .up-next-column {
+    position: sticky;
+    top: 1rem;
+  }
+  .video-unavailable {
+    max-width: 32rem;
+    margin: 4rem auto;
+    padding: 1.5rem;
+    border: 1px solid var(--wa-color-surface-border);
+    border-radius: 0.75rem;
+    background: var(--wa-color-surface-default);
+    text-align: center;
+  }
+  .video-unavailable h1 {
+    margin-top: 0;
+  }
+  .back-link {
+    color: var(--wa-color-brand-on-quiet);
+    text-decoration: none;
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+<script type="module" src="/assets/components/video-player.js"></script>
+<script type="module" src="/assets/components/up-next.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+<script type="module" src="/assets/components/like-button.js"></script>
+<script type="module" src="/assets/components/subscribe-button.js"></script>
+<script type="module" src="/assets/components/bookmark-button.js"></script>
+<script type="module" src="/assets/components/sleep-timer.js"></script>
+<script type="module" src="/assets/components/wind-down-overlay.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+{% endblock %}

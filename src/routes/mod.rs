@@ -14,14 +14,16 @@
 
 use axum::middleware::from_fn_with_state;
 use axum::{
-    routing::{get, post, put},
+    routing::{delete as delete_route, get, post, put},
     Router,
 };
 use tower_cookies::CookieManagerLayer;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
 
 use crate::middleware::{
-    account_type::require_parent, auth::session_layer, setup_redirect::setup_redirect,
+    account_type::{require_child, require_parent},
+    auth::session_layer,
+    setup_redirect::setup_redirect,
     usage_limit::enforce_usage_limit,
 };
 use crate::state::AppState;
@@ -30,11 +32,17 @@ pub mod accounts;
 pub mod allowlist;
 pub mod auth;
 pub mod blocked;
+pub mod bookmarks;
+pub mod channels;
 pub mod child_settings;
 pub mod feed;
+pub mod likes;
 pub mod pages;
+pub mod playlists;
 pub mod search;
 pub mod setup;
+pub mod subscriptions;
+pub mod timer;
 pub mod usage;
 pub mod videos;
 
@@ -144,7 +152,85 @@ pub fn router(state: AppState) -> Router {
             get(feed::continue_watching),
         )
         .route("/api/feed/new-videos", get(feed::new_videos))
+        .route("/api/feed/up-next", get(feed::up_next))
         .route("/api/usage/heartbeat", post(usage::heartbeat));
+
+    // -----------------------------------------------------------------
+    // Child-only APIs: channels, subscriptions, playlists, likes,
+    // bookmarks, sleep timer, and "my settings" read-only view.
+    // -----------------------------------------------------------------
+    let child_only = Router::new()
+        // Channels
+        .route("/api/channels/{channel_id}", get(channels::get_channel))
+        .route(
+            "/api/channels/{channel_id}/videos",
+            get(channels::list_videos),
+        )
+        // Subscriptions
+        .route(
+            "/api/subscriptions",
+            get(subscriptions::list).post(subscriptions::subscribe),
+        )
+        .route(
+            "/api/subscriptions/{channel_id}",
+            delete_route(subscriptions::unsubscribe),
+        )
+        // Playlists
+        .route(
+            "/api/playlists",
+            get(playlists::list).post(playlists::create),
+        )
+        .route("/api/playlists/library", post(playlists::add_library))
+        .route(
+            "/api/playlists/{id}",
+            get(playlists::detail)
+                .put(playlists::update)
+                .delete(playlists::delete),
+        )
+        .route(
+            "/api/playlists/{id}/videos",
+            post(playlists::add_video),
+        )
+        .route(
+            "/api/playlists/{id}/videos/reorder",
+            put(playlists::reorder_videos),
+        )
+        .route(
+            "/api/playlists/{id}/videos/{video_id}",
+            delete_route(playlists::remove_video),
+        )
+        // Likes
+        .route("/api/likes", get(likes::list))
+        .route(
+            "/api/likes/{video_id}",
+            post(likes::like).delete(likes::unlike),
+        )
+        // Bookmarks. Note that `/api/bookmarks/:videoId` (GET) and
+        // `/api/bookmarks/:id` (PUT/DELETE) share the same path
+        // pattern as far as axum's router is concerned — they're
+        // distinguished by HTTP method, so we register them on a
+        // single MethodRouter.
+        .route(
+            "/api/bookmarks",
+            get(bookmarks::list).post(bookmarks::create),
+        )
+        .route(
+            "/api/bookmarks/{id}",
+            get(bookmarks::list_for_video)
+                .put(bookmarks::update)
+                .delete(bookmarks::delete),
+        )
+        // Sleep timer
+        .route(
+            "/api/timer",
+            get(timer::get).post(timer::create).delete(timer::cancel),
+        )
+        // Current child's read-only settings view
+        .route(
+            "/api/children/me/settings",
+            get(child_settings::get_my_settings),
+        )
+        .route_layer(axum::middleware::from_fn(require_child));
 
     // -----------------------------------------------------------------
     // Sub-router: auth + setup
@@ -165,19 +251,34 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/complete", post(setup::complete));
 
     // -----------------------------------------------------------------
-    // HTML pages
+    // HTML pages. The /child/video/:id page is layered with the
+    // usage-limit middleware (matching the plan's coordination notes)
+    // so a child can't bypass the cap by deep-linking. On a 403 the
+    // middleware returns JSON, which the browser displays as plain
+    // text — by the time the player can issue an API call the
+    // <hometube-usage-limit-overlay> takes over and shows a friendly
+    // dialog.
     // -----------------------------------------------------------------
+    let video_page = Router::new()
+        .route("/child/video/{video_id}", get(pages::child_video))
+        .route_layer(from_fn_with_state(state.clone(), enforce_usage_limit));
+
     let page_routes = Router::new()
         .route("/", get(pages::root_or_setup))
         .route("/setup", get(pages::setup_wizard))
         .route("/parent/home", get(pages::parent_home))
-        .route("/child/home", get(pages::child_home));
+        .route("/child/home", get(pages::child_home))
+        .route("/child/channels", get(pages::child_channels))
+        .route("/child/channel/{channel_id}", get(pages::child_channel))
+        .route("/child/playlists", get(pages::child_playlists))
+        .route("/child/playlist/{id}", get(pages::child_playlist));
 
     // -----------------------------------------------------------------
     // Top-level router
     // -----------------------------------------------------------------
     Router::new()
         .merge(page_routes)
+        .merge(video_page)
         .route("/api/health", get(health))
         .nest_service("/assets", ServeDir::new(static_dir))
         .merge(auth_routes)
@@ -185,6 +286,7 @@ pub fn router(state: AppState) -> Router {
         .merge(parent_only)
         .merge(video_routes)
         .merge(child_routes)
+        .merge(child_only)
         .with_state(state.clone())
         .layer(from_fn_with_state(state.clone(), setup_redirect))
         .layer(from_fn_with_state(state, session_layer))

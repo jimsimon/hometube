@@ -11,13 +11,16 @@
 //! - [`dash`]: DASH manifest rewriter + HMAC signing helpers for the
 //!   segment proxy
 //! - [`access`]: child content-access decisions (allowlist + blocklist)
+//! - [`sync`]: outbound (HomeTube → YouTube) sync helpers — subscriptions,
+//!   playlists, playlist items, likes
 //!
-//! Future phases add `cron`, `sync`, etc.
+//! Future phases add `cron`, etc.
 
 pub mod access;
 pub mod dash;
 pub mod oauth;
 pub mod setup;
+pub mod sync;
 pub mod video_cache;
 pub mod youtube;
 pub mod ytdlp;

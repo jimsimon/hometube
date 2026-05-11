@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Channel — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+<section class="child-channel" aria-label="Channel videos">
+  <hometube-channel-detail
+    channel-id="{{ channel_id }}"
+  ></hometube-channel-detail>
+</section>
+
+<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+<script type="module" src="/assets/components/channel-detail.js"></script>
+<script type="module" src="/assets/components/channel-card.js"></script>
+<script type="module" src="/assets/components/subscribe-button.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+{% endblock %}

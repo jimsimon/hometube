@@ -86,6 +86,32 @@ pub async fn get_settings(
     Ok(Json(row))
 }
 
+/// `GET /api/children/me/settings` — read-only settings view for the
+/// **currently signed-in child**. Mirrors [`get_settings`] but uses the
+/// session account rather than a path parameter, and never accepts
+/// mutations (parents must use `PUT /api/children/:id/settings`).
+pub async fn get_my_settings(
+    State(state): State<AppState>,
+    current: crate::middleware::auth::CurrentAccount,
+) -> AppResult<Json<ChildSettings>> {
+    if !matches!(
+        current.account_type,
+        crate::models::account::AccountType::Child
+    ) {
+        return Err(AppError::Forbidden);
+    }
+    ensure_settings_row(&state, current.id).await?;
+    let row: ChildSettings = sqlx::query_as(
+        "SELECT child_account_id, downloads_enabled, max_quality, playback_speed_locked, \
+                autoplay_enabled, autoplay_max_consecutive \
+         FROM child_settings WHERE child_account_id = ?",
+    )
+    .bind(current.id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(row))
+}
+
 /// `PUT /api/children/:id/settings`.
 pub async fn update_settings(
     State(state): State<AppState>,

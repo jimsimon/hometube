@@ -140,6 +140,117 @@ export interface UsageLimitResponse {
   remaining_seconds: number;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7-9 types
+// ---------------------------------------------------------------------------
+
+export type SyncStatus =
+  | 'synced'
+  | 'pending_push'
+  | 'pending_delete'
+  | 'pending_create'
+  | 'pending_update'
+  | 'error';
+
+export interface ChannelInfo {
+  id: string;
+  title: string;
+  description: string;
+  thumbnails: Record<string, { url: string; width?: number; height?: number }>;
+  subscriber_count: number | null;
+  video_count: number | null;
+  uploads_playlist_id: string | null;
+}
+
+export interface PlaylistItem {
+  video_id: string;
+  title: string;
+  channel_id: string | null;
+  channel_title: string | null;
+  thumbnails: Record<string, { url: string; width?: number; height?: number }>;
+  published_at: string | null;
+  position: number | null;
+}
+
+export interface ChannelVideosPage {
+  items: PlaylistItem[];
+  next_page_token: string | null;
+}
+
+export interface SubscriptionRow {
+  id: number;
+  channel_id: string;
+  channel_title: string;
+  channel_thumbnail_url: string | null;
+  source: 'app' | 'youtube';
+  sync_status: SyncStatus;
+  subscribed_at: number;
+  visible: boolean;
+}
+
+export interface PlaylistSummary {
+  id: number;
+  youtube_playlist_id: string | null;
+  title: string;
+  description: string | null;
+  is_own: boolean;
+  source: 'app' | 'youtube';
+  sync_status: SyncStatus;
+  video_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface PlaylistVideo {
+  id: number;
+  video_id: string;
+  video_title: string;
+  video_thumbnail_url: string | null;
+  channel_title: string | null;
+  position: number;
+  added_at: number;
+}
+
+export interface PlaylistDetail extends PlaylistSummary {
+  videos: PlaylistVideo[];
+}
+
+export interface LikeRow {
+  id: number;
+  video_id: string;
+  video_title: string | null;
+  video_thumbnail_url: string | null;
+  source: 'app' | 'youtube';
+  sync_status: SyncStatus;
+  liked_at: number;
+}
+
+export interface UpNextItem {
+  video_id: string;
+  title: string;
+  channel_id: string | null;
+  channel_title: string | null;
+  thumbnail_url: string | null;
+}
+
+export interface Bookmark {
+  id: number;
+  video_id: string;
+  video_title: string | null;
+  timestamp_seconds: number;
+  label: string | null;
+  created_at: number;
+}
+
+export interface SleepTimerRow {
+  id: number;
+  timer_type: 'after_video' | 'minutes';
+  minutes_remaining: number | null;
+  videos_remaining: number | null;
+  started_at: number;
+  expires_at: number | null;
+}
+
 /** Best-effort thumbnail-pick helper used across components. */
 export function pickThumbnail(
   thumbs: Record<string, { url: string }>,
