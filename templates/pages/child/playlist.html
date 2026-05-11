@@ -6,9 +6,15 @@
 {% include "partials/nav-child.html" %}
 
 <section class="child-playlist" aria-label="Playlist videos">
+  {% if playlist_kind == "family" %}
+  <hometube-family-playlist-view
+    playlist-id="{{ playlist_id }}"
+  ></hometube-family-playlist-view>
+  {% else %}
   <hometube-playlist-detail
     playlist-id="{{ playlist_id }}"
   ></hometube-playlist-detail>
+  {% endif %}
 </section>
 
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>
@@ -17,6 +23,7 @@
 {% block scripts %}
 <script type="module" src="/assets/components/nav-child.js"></script>
 <script type="module" src="/assets/components/playlist-detail.js"></script>
+<script type="module" src="/assets/components/family-playlist-view.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
 <script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

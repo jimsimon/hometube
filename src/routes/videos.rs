@@ -13,7 +13,10 @@
 //! - `GET /api/proxy/audio` — audio-only stream proxy
 //! - `GET /api/proxy/thumbnail/:videoId` — thumbnail proxy
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -26,6 +29,7 @@ use chrono::Utc;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::error::{AppError, AppResult};
@@ -204,10 +208,18 @@ pub async fn list_captions(
     Ok(Json(tracks))
 }
 
-/// `GET /api/videos/:videoId/captions/:lang` — fetch the source caption
-/// file from YouTube and convert to WebVTT. yt-dlp returns a URL per
-/// language; we pick the WebVTT/ttml/vtt variant where possible and
-/// stream it through.
+/// `GET /api/videos/:videoId/captions/:lang` — return a WebVTT track for
+/// the requested language.
+///
+/// Lookup order:
+///
+/// 1. In-memory `(video_id, lang)` cache (1 hour TTL).
+/// 2. yt-dlp metadata: if we already have a `.vtt` URL, fetch it.
+/// 3. Re-invoke yt-dlp with `--convert-subs vtt` so any non-VTT source
+///    (SRV1/SRV3/TTML) gets converted on the server.
+///
+/// On success the converted body is cached in memory so repeated player
+/// "select track" actions don't re-hit yt-dlp.
 pub async fn get_caption(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -218,6 +230,11 @@ pub async fn get_caption(
         .get_or_extract(&state.db, &state.config, &video_id)
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
+
+    let cache_key = (video_id.clone(), lang.clone());
+    if let Some(body) = caption_cache_get(&cache_key).await {
+        return Ok(vtt_response(body));
+    }
 
     // Prefer user-provided subtitles, fall back to auto-captions.
     let track = result
@@ -240,24 +257,83 @@ pub async fn get_caption(
                         .or_else(|| tracks.first())
                 })
         })
-        .ok_or(AppError::NotFound)?;
+        .cloned();
 
-    let res = reqwest::get(&track.url).await.map_err(AppError::Http)?;
-    if !res.status().is_success() {
-        return Err(AppError::Other(anyhow::anyhow!(
-            "caption fetch returned {}",
-            res.status()
-        )));
+    // Fast path: yt-dlp metadata exposed a vtt URL.
+    if let Some(track) = &track {
+        if track.ext == "vtt" {
+            match reqwest::get(&track.url).await {
+                Ok(res) if res.status().is_success() => {
+                    if let Ok(body) = res.text().await {
+                        caption_cache_set(cache_key.clone(), body.clone()).await;
+                        return Ok(vtt_response(body));
+                    }
+                }
+                Ok(res) => warn!(status = %res.status(), "caption fetch returned non-2xx"),
+                Err(err) => warn!(%err, "caption fetch failed"),
+            }
+        }
     }
-    let body = res.text().await.map_err(AppError::Http)?;
-    // If yt-dlp gave us a non-VTT format we'd convert here. For Phase 5
-    // we ship the bytes through as-is and rely on yt-dlp's vtt
-    // preference; non-vtt formats are rare for YouTube.
+
+    // Slow path: ask yt-dlp to download + convert to vtt.
+    let body = crate::services::ytdlp::extract_subtitles(&state.config, &video_id, &lang).await?;
+    caption_cache_set(cache_key, body.clone()).await;
+    Ok(vtt_response(body))
+}
+
+/// Build the `text/vtt` HTTP response.
+fn vtt_response(body: String) -> Response {
     let mut response = (StatusCode::OK, body).into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, "text/vtt; charset=utf-8".parse().unwrap());
-    Ok(response)
+    // Help vidstack cache cross-track switches by allowing a short
+    // browser cache lifetime.
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Caption in-memory cache
+// ---------------------------------------------------------------------------
+
+/// TTL for the converted-VTT in-memory cache.
+const CAPTION_TTL: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone)]
+struct CaptionEntry {
+    inserted_at: Instant,
+    body: String,
+}
+
+fn caption_cache() -> &'static Mutex<HashMap<(String, String), CaptionEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), CaptionEntry>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn caption_cache_get(key: &(String, String)) -> Option<String> {
+    let mut guard = caption_cache().lock().await;
+    if let Some(entry) = guard.get(key) {
+        if entry.inserted_at.elapsed() < CAPTION_TTL {
+            return Some(entry.body.clone());
+        }
+        guard.remove(key);
+    }
+    None
+}
+
+async fn caption_cache_set(key: (String, String), body: String) {
+    let mut guard = caption_cache().lock().await;
+    guard.insert(
+        key,
+        CaptionEntry {
+            inserted_at: Instant::now(),
+            body,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -381,41 +457,89 @@ pub async fn get_segment(
 pub struct AudioQuery {
     pub video_id: String,
     pub format: String,
+    /// Optional DASH segment sequence number. When present the audio
+    /// stream is served segment-by-segment (mirroring the `/api/proxy/segment`
+    /// flow) so each segment is independently cacheable. When absent
+    /// the full audio file is streamed without disk caching.
+    #[serde(default)]
+    pub sq: Option<String>,
     pub sig: String,
 }
 
-/// `GET /api/proxy/audio` — proxy a single audio-only stream URL.
-/// Audio formats expose a stable `url` (no segment numbers); the
-/// signature is over `(video_id, format)`.
+/// `GET /api/proxy/audio` — proxy an audio-only stream.
+///
+/// When `sq=` is present the request is treated as a DASH audio segment
+/// (cached on disk by `(video_id, format_id, sq)`, signed over the same
+/// triple). Otherwise the request is for the full audio URL of the
+/// chosen format and is streamed through without caching — the
+/// signature in that case is over `(video_id, format)` only.
 pub async fn get_audio(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<AudioQuery>,
 ) -> AppResult<Response> {
     let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let params: Vec<(&str, String)> = vec![
+    let mut params: Vec<(&str, String)> = vec![
         ("video_id", q.video_id.clone()),
         ("format", q.format.clone()),
     ];
+    if let Some(sq) = &q.sq {
+        params.push(("sq", sq.clone()));
+    }
     if !dash::verify_query(&secret, &params, &q.sig) {
         return Err(AppError::Forbidden);
+    }
+
+    // Segmented path: identical caching strategy to /api/proxy/segment.
+    if let Some(sq) = &q.sq {
+        if let Some((path, size)) =
+            lookup_cached_segment(&state.db, &q.video_id, &q.format, sq).await?
+        {
+            debug!(video = %q.video_id, fmt = %q.format, sq = %sq, "audio segment cache hit");
+            crate::services::cron::CACHE_HIT_COUNTER
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return serve_file(&path, size, &headers).await;
+        }
+        crate::services::cron::CACHE_MISS_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     let cache = video_cache(&state);
     let result = cache
         .get_or_extract(&state.db, &state.config, &q.video_id)
         .await?;
+
+    // If no explicit format requested, default to the highest-bitrate
+    // audio-only format available so the player can transition in a
+    // single hop.
+    let chosen_format = if q.format.is_empty() {
+        best_audio_format_id(&result).ok_or_else(|| AppError::BadRequest("no audio formats".into()))?
+    } else {
+        q.format.clone()
+    };
+
     let format = result
         .formats
         .iter()
-        .find(|f| f.format_id == q.format)
+        .find(|f| f.format_id == chosen_format)
         .ok_or_else(|| AppError::BadRequest("unknown format".into()))?;
-    let url = format
-        .url
-        .as_ref()
-        .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?;
 
-    let mut req = reqwest::Client::new().get(url);
+    let url = if let Some(sq) = &q.sq {
+        build_upstream_segment_url(&result, &chosen_format, sq).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "no upstream URL for video {} format {}",
+                q.video_id, chosen_format
+            ))
+        })?
+    } else {
+        format
+            .url
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?
+    };
+
+    let is_range = headers.get(header::RANGE).is_some();
+    let mut req = reqwest::Client::new().get(&url);
     if let Some(range) = headers.get(header::RANGE) {
         if let Ok(s) = range.to_str() {
             req = req.header(header::RANGE, s);
@@ -429,14 +553,64 @@ pub async fn get_audio(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("audio/mp4")
         .to_string();
-    let stream = res.bytes_stream().map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
+
+    // For non-segment requests or range requests we just stream through.
+    if q.sq.is_none() || is_range || !status.is_success() {
+        let stream = res.bytes_stream().map_err(std::io::Error::other);
+        let body = Body::from_stream(stream);
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        return Ok(response);
+    }
+
+    // Segment cache write path.
+    let bytes = res.bytes().await.map_err(AppError::Http)?;
+    let sq = q.sq.as_deref().unwrap_or("");
+    let cache_path = segment_cache_path(&state.config, &q.video_id, &chosen_format, sq);
+    if let Err(err) = write_segment(&cache_path, &bytes).await {
+        warn!(error = %err, "audio segment cache write failed");
+    } else {
+        let _ = register_cached_segment(
+            &state.db,
+            &q.video_id,
+            &chosen_format,
+            sq,
+            &cache_path,
+            bytes.len() as i64,
+        )
+        .await;
+    }
+
+    let body = Body::from(bytes);
     let mut response = Response::new(body);
     *response.status_mut() = status;
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     Ok(response)
+}
+
+/// Pick the best audio-only format ID from a yt-dlp extraction result.
+/// "Best" = highest available `abr` among formats whose vcodec is
+/// `none` (audio-only).
+fn best_audio_format_id(result: &ExtractResult) -> Option<String> {
+    result
+        .formats
+        .iter()
+        .filter(|f| {
+            f.vcodec.as_deref().map(|c| c == "none").unwrap_or(false)
+                && (f.url.is_some() || f.manifest_url.is_some())
+        })
+        .max_by(|a, b| {
+            a.abr
+                .unwrap_or(0.0)
+                .partial_cmp(&b.abr.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|f| f.format_id.clone())
 }
 
 /// `GET /api/proxy/thumbnail/:videoId` — stream the highest-resolution

@@ -28,6 +28,7 @@
   <div class="player-column">
     <hometube-video-player
       video-id="{{ video_id }}"
+      {% if start_at > 0 %}start-at="{{ start_at }}"{% endif %}
     ></hometube-video-player>
   </div>
 

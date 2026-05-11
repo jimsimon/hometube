@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Video unavailable — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-child.html" %}
+
+<section class="video-unavailable" aria-label="Video unavailable">
+  <div class="card">
+    <h1>This video isn't available</h1>
+    <p>
+      {% if let Some(msg) = message %}
+        {{ msg }}
+      {% else %}
+        Ask a parent if you'd like to watch it. They can add it to your
+        allowlist on their dashboard.
+      {% endif %}
+    </p>
+    <p>
+      <a href="/child/home" class="back-link">← Back to home</a>
+    </p>
+  </div>
+</section>
+{% endblock %}
+
+{% block head %}
+<style>
+  .video-unavailable {
+    max-width: 32rem;
+    margin: 4rem auto;
+    padding: 1.5rem;
+    border: 1px solid var(--wa-color-surface-border);
+    border-radius: 0.75rem;
+    background: var(--wa-color-surface-default);
+    text-align: center;
+  }
+  .back-link {
+    color: var(--wa-color-brand-on-quiet);
+    text-decoration: none;
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-child.js"></script>
+{% endblock %}

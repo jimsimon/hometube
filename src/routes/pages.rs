@@ -192,6 +192,155 @@ pub async fn parent_system(current: Option<CurrentAccount>) -> AppResult<Respons
 }
 
 #[derive(Template)]
+#[template(path = "pages/parent/preview.html")]
+struct ParentPreviewTemplate {
+    display_name: String,
+    /// `"video"`, `"channel"`, or `"playlist"`.
+    kind: String,
+    resource_id: String,
+}
+
+/// `GET /parent/preview/:kind/:id` — parent-side preview shell that
+/// hosts the appropriate player/grid component pointed at
+/// `/api/preview/...` (which bypasses the allowlist).
+pub async fn parent_preview(
+    current: Option<CurrentAccount>,
+    Path((kind, resource_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            if !matches!(kind.as_str(), "video" | "channel" | "playlist") {
+                return Ok(Redirect::to("/parent/home").into_response());
+            }
+            let tpl = ParentPreviewTemplate {
+                display_name: c.display_name,
+                kind,
+                resource_id,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "pages/parent/activity.html")]
+struct ParentActivityTemplate {
+    display_name: String,
+}
+
+/// `GET /parent/activity` — watch-activity dashboard (Phase 17).
+pub async fn parent_activity(current: Option<CurrentAccount>) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            let tpl = ParentActivityTemplate {
+                display_name: c.display_name,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "pages/parent/playlists.html")]
+struct ParentPlaylistsTemplate {
+    display_name: String,
+}
+
+/// `GET /parent/playlists` — family playlist manager (Phase 18).
+pub async fn parent_playlists(current: Option<CurrentAccount>) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            let tpl = ParentPlaylistsTemplate {
+                display_name: c.display_name,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "pages/parent/playlist.html")]
+struct ParentPlaylistTemplate {
+    display_name: String,
+    playlist_id: i64,
+}
+
+/// `GET /parent/playlist/:id` — single family playlist editor.
+pub async fn parent_playlist(
+    current: Option<CurrentAccount>,
+    Path(playlist_id): Path<i64>,
+) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            let tpl = ParentPlaylistTemplate {
+                display_name: c.display_name,
+                playlist_id,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            Ok(Redirect::to("/child/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "pages/child/bookmarks.html")]
+struct ChildBookmarksTemplate {
+    display_name: String,
+}
+
+/// `GET /child/bookmarks` — list of saved bookmarks across videos.
+pub async fn child_bookmarks(current: Option<CurrentAccount>) -> AppResult<Response> {
+    require_child(current, |c| {
+        let tpl = ChildBookmarksTemplate {
+            display_name: c.display_name,
+        };
+        Ok(Html(tpl.render()?).into_response())
+    })
+    .await
+}
+
+#[derive(Template)]
+#[template(path = "pages/child/video-unavailable.html")]
+struct ChildVideoUnavailableTemplate {
+    display_name: String,
+    video_id: String,
+    /// Optional friendly message — set when extraction errored vs the
+    /// generic "not allowlisted" path.
+    message: Option<String>,
+}
+
+/// Render the friendly "this video is unavailable" page. Exposed so
+/// other handlers (e.g. on yt-dlp extraction failure) can route to it
+/// directly.
+pub fn render_video_unavailable(
+    display_name: String,
+    video_id: String,
+    message: Option<String>,
+) -> AppResult<Response> {
+    let tpl = ChildVideoUnavailableTemplate {
+        display_name,
+        video_id,
+        message,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Template)]
 #[template(path = "pages/child/home.html")]
 struct ChildHomeTemplate {
     display_name: String,
@@ -276,18 +425,32 @@ pub async fn child_playlists(current: Option<CurrentAccount>) -> AppResult<Respo
 #[template(path = "pages/child/playlist.html")]
 struct ChildPlaylistTemplate {
     display_name: String,
-    playlist_id: i64,
+    /// Local primary-key id (string-encoded).
+    playlist_id: String,
+    /// `"child"` for child-owned playlists, `"family"` for family
+    /// playlists. Lit-side decides which API to call.
+    playlist_kind: String,
 }
 
 /// `GET /child/playlist/:id`.
+///
+/// `:id` may be a bare integer (child-owned playlist) or `family:<id>`
+/// (family playlist). The shape is forwarded verbatim to the Lit
+/// component.
 pub async fn child_playlist(
     current: Option<CurrentAccount>,
-    Path(playlist_id): Path<i64>,
+    Path(playlist_id): Path<String>,
 ) -> AppResult<Response> {
     require_child(current, |c| {
+        let (playlist_kind, raw_id) = if let Some(rest) = playlist_id.strip_prefix("family:") {
+            ("family".to_string(), rest.to_string())
+        } else {
+            ("child".to_string(), playlist_id.clone())
+        };
         let tpl = ChildPlaylistTemplate {
             display_name: c.display_name,
-            playlist_id,
+            playlist_id: raw_id,
+            playlist_kind,
         };
         Ok(Html(tpl.render()?).into_response())
     })
@@ -339,15 +502,29 @@ struct ChildVideoTemplate {
     /// `true` when access control denies playback. The template renders
     /// a friendly "unavailable" page rather than the player.
     unavailable: bool,
+    /// Initial seek position in seconds. `0` means "start from the
+    /// beginning"; the template only emits a `start-at` attribute when
+    /// this is non-zero.
+    start_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct VideoPageQuery {
     #[serde(default)]
     pub from: Option<String>,
+    /// Optional initial seek position in seconds (driven by the
+    /// bookmarks list — clicking a bookmark navigates to
+    /// `?t=<seconds>`).
+    #[serde(default, rename = "t")]
+    pub t: Option<i64>,
 }
 
 /// `GET /child/video/:videoId`.
+///
+/// Resolves allowlist + extraction status up front. On extraction
+/// failure we render a friendly `video-unavailable.html` rather than
+/// a 500, and we record a `ytdlp_failure` notification (deduplicated
+/// in-process) so parents see something happened.
 pub async fn child_video(
     State(state): State<AppState>,
     current: Option<CurrentAccount>,
@@ -361,33 +538,51 @@ pub async fn child_video(
         return Ok(Redirect::to("/parent/home").into_response());
     }
 
-    // Resolve allowlist in advance so we can render a friendly page on
-    // denial instead of returning 403 from the page route. We use a
-    // static cache handle here — the videos route does the same.
     let cache = VideoCache::new();
-    let unavailable = match cache
+    let extract = cache
         .get_or_extract(&state.db, &state.config, &video_id)
-        .await
-    {
-        Ok(result) => !can_child_view(
-            &state.db,
-            c.id,
-            &video_id,
-            result.channel_id.as_deref(),
-            &[],
-        )
-        .await
-        .unwrap_or(false),
-        Err(_) => true,
-    };
+        .await;
 
-    let tpl = ChildVideoTemplate {
-        display_name: c.display_name,
-        video_id,
-        from: q.from.unwrap_or_default(),
-        unavailable,
-    };
-    Ok(Html(tpl.render()?).into_response())
+    match extract {
+        Ok(result) => {
+            let allowed = can_child_view(
+                &state.db,
+                c.id,
+                &video_id,
+                result.channel_id.as_deref(),
+                &[],
+            )
+            .await
+            .unwrap_or(false);
+            let tpl = ChildVideoTemplate {
+                display_name: c.display_name,
+                video_id,
+                from: q.from.unwrap_or_default(),
+                unavailable: !allowed,
+                start_at: q.t.unwrap_or(0).max(0),
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Err(err) => {
+            // yt-dlp failure or other extraction issue. Notify parents
+            // (deduped) and show the friendly page.
+            tracing::warn!(%video_id, error = %err, "video extraction failed; rendering unavailable page");
+            let _ = crate::services::notifications::dispatch_ytdlp_failure_deduped(
+                &state.db,
+                &video_id,
+                &err.to_string(),
+            )
+            .await;
+            render_video_unavailable(
+                c.display_name,
+                video_id,
+                Some(
+                    "We couldn't load this video right now. Please try again later."
+                        .to_string(),
+                ),
+            )
+        }
+    }
 }
 
 async fn require_child<F>(current: Option<CurrentAccount>, render: F) -> AppResult<Response>

@@ -20,6 +20,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { api } from '../services/api.js';
 import type { AccountSummary } from '../types/index.js';
 
+import './notification-bell.js';
+
 const SELECTED_CHILD_KEY = 'hometube-selected-child';
 
 @customElement('hometube-nav-parent')
@@ -154,6 +156,8 @@ export class NavParent extends LitElement {
 
         <div class="links">
           <a href="/parent/home">Content</a>
+          <a href="/parent/playlists">Playlists</a>
+          <a href="/parent/activity">Activity</a>
           <a href="/parent/family">Family</a>
           <a href="/parent/system">System</a>
         </div>
@@ -186,6 +190,7 @@ export class NavParent extends LitElement {
                 </label>
               `}
 
+        <hometube-notification-bell></hometube-notification-bell>
         <hometube-theme-toggle></hometube-theme-toggle>
 
         <span class="who" aria-hidden="true">

@@ -143,6 +143,98 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     Ok(result)
 }
 
+/// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
+/// single language and return the resulting WebVTT body.
+///
+/// Used by the Phase 16 caption-serve route when the upstream caption
+/// track is something other than WebVTT (typically SRV1/SRV3/TTML for
+/// auto-captions). yt-dlp performs the conversion via ffmpeg's subtitle
+/// muxer; the resulting `.vtt` file is read back into memory and the
+/// temp directory is removed.
+pub async fn extract_subtitles(
+    cfg: &Config,
+    video_id: &str,
+    lang: &str,
+) -> AppResult<String> {
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let tmp = tempdir_for_video(video_id);
+    tokio::fs::create_dir_all(&tmp)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("creating subtitle tmp: {e}")))?;
+    let template = tmp.join("%(id)s").to_string_lossy().to_string();
+
+    let mut cmd = Command::new(&cfg.ytdlp_path);
+    cmd.arg("--write-sub")
+        .arg("--write-auto-sub")
+        .arg("--sub-lang")
+        .arg(lang)
+        .arg("--skip-download")
+        .arg("--convert-subs")
+        .arg("vtt")
+        .arg("--no-warnings")
+        .arg("-o")
+        .arg(&template)
+        .arg(&url);
+    debug!(?cmd, %video_id, %lang, "running yt-dlp for subtitles");
+
+    let output = timeout(DEFAULT_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| AppError::Other(anyhow::anyhow!("yt-dlp timed out after 30s")))?
+        .map_err(|e| AppError::Other(anyhow::anyhow!("spawning yt-dlp: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(%video_id, %lang, %stderr, "yt-dlp subtitle extraction failed");
+        // Cleanup temp directory before returning.
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        return Err(AppError::Other(anyhow::anyhow!(
+            "yt-dlp exited with status {}: {}",
+            output.status,
+            stderr
+        )));
+    }
+
+    // The output filename should be `<video_id>.<lang>.vtt`.
+    let expected = tmp.join(format!("{video_id}.{lang}.vtt"));
+    let body = match tokio::fs::read_to_string(&expected).await {
+        Ok(s) => s,
+        Err(_) => {
+            // Fall back: scan the directory for any .vtt file.
+            let mut found: Option<String> = None;
+            if let Ok(mut rd) = tokio::fs::read_dir(&tmp).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("vtt") {
+                        if let Ok(s) = tokio::fs::read_to_string(&path).await {
+                            found = Some(s);
+                            break;
+                        }
+                    }
+                }
+            }
+            match found {
+                Some(s) => s,
+                None => {
+                    let _ = tokio::fs::remove_dir_all(&tmp).await;
+                    return Err(AppError::Other(anyhow::anyhow!(
+                        "yt-dlp produced no .vtt for {video_id}/{lang}"
+                    )));
+                }
+            }
+        }
+    };
+
+    let _ = tokio::fs::remove_dir_all(&tmp).await;
+    Ok(body)
+}
+
+fn tempdir_for_video(video_id: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    let nonce: u64 = rand::random();
+    p.push(format!("hometube-subs-{video_id}-{nonce:x}"));
+    p
+}
+
 /// Return the version string emitted by `yt-dlp --version`. Used by the
 /// Phase 12 update job and the system status card.
 pub async fn version(cfg: &Config) -> AppResult<String> {

@@ -19,6 +19,7 @@
 pub mod access;
 pub mod cron;
 pub mod dash;
+pub mod notifications;
 pub mod oauth;
 pub mod setup;
 pub mod sync;

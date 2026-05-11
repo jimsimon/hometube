@@ -10,7 +10,10 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 
 import { api } from '../services/api.js';
-import type { PlaylistSummary } from '../types/index.js';
+import type {
+  FamilyPlaylistSummary,
+  PlaylistSummary,
+} from '../types/index.js';
 
 import './playlist-card.js';
 import './create-playlist-dialog.js';
@@ -19,6 +22,7 @@ import type { CreatePlaylistDialog } from './create-playlist-dialog.js';
 @customElement('hometube-playlist-list')
 export class PlaylistList extends LitElement {
   @state() private playlists: PlaylistSummary[] = [];
+  @state() private familyPlaylists: FamilyPlaylistSummary[] = [];
   @state() private loading = false;
   @state() private error = '';
 
@@ -87,7 +91,14 @@ export class PlaylistList extends LitElement {
     this.loading = true;
     this.error = '';
     try {
-      this.playlists = await api.get<PlaylistSummary[]>('/api/playlists');
+      const [own, family] = await Promise.all([
+        api.get<PlaylistSummary[]>('/api/playlists'),
+        api
+          .get<FamilyPlaylistSummary[]>('/api/family-playlists')
+          .catch(() => [] as FamilyPlaylistSummary[]),
+      ]);
+      this.playlists = own;
+      this.familyPlaylists = family;
     } catch (err) {
       this.error = (err as Error).message;
     } finally {
@@ -148,7 +159,33 @@ export class PlaylistList extends LitElement {
             </div>
           `
         : nothing}
-      ${own.length === 0 && library.length === 0
+      ${this.familyPlaylists.length > 0
+        ? html`
+            <h2>Shared with you</h2>
+            <div class="grid" role="list">
+              ${this.familyPlaylists.map(
+                (p) => html`
+                  <a
+                    role="listitem"
+                    class="empty"
+                    style="display: grid; gap: 0.25rem; padding: 0.75rem; border: 1px solid var(--wa-color-surface-border); border-radius: 0.5rem; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); text-decoration: none;"
+                    href=${`/child/playlist/family:${p.id}`}
+                  >
+                    <strong style="font-size: 1.05rem; font-style: normal;"
+                      >${p.title}</strong
+                    >
+                    <span style="font-size: 0.85rem;"
+                      >${p.video_count} videos · shared by family</span
+                    >
+                  </a>
+                `,
+              )}
+            </div>
+          `
+        : nothing}
+      ${own.length === 0 &&
+      library.length === 0 &&
+      this.familyPlaylists.length === 0
         ? html`<p class="empty">
             You don't have any playlists yet. Tap "New playlist" to start.
           </p>`

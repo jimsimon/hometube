@@ -274,3 +274,124 @@ export function pickThumbnail(
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 17 — activity + notifications
+// ---------------------------------------------------------------------------
+
+export interface ActivitySummary {
+  period: string;
+  total_seconds: number;
+  videos_watched: number;
+  sessions: number;
+  daily_minutes: { date: string; minutes: number }[];
+}
+
+export interface ActivityHistoryEntry {
+  video_id: string;
+  video_title: string | null;
+  video_thumbnail_url: string | null;
+  channel_title: string | null;
+  started_at: number;
+  ended_at: number | null;
+  duration_seconds: number | null;
+}
+
+export interface TopChannel {
+  channel_title: string | null;
+  total_seconds: number;
+  videos_watched: number;
+}
+
+export interface SearchLogEntry {
+  id: number;
+  query: string;
+  result_count: number;
+  searched_at: number;
+}
+
+export type NotificationType =
+  | 'time_limit_approaching'
+  | 'time_limit_reached'
+  | 'ytdlp_failure'
+  | 'sync_error'
+  | 'token_expired'
+  | 'new_search_term'
+  | 'system_update';
+
+export interface NotificationRow {
+  id: number;
+  notification_type: NotificationType;
+  title: string;
+  message: string;
+  metadata: string | null;
+  is_read: number;
+  created_at: number;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 16 — preview
+// ---------------------------------------------------------------------------
+
+export interface ChannelPreview {
+  id: string;
+  title: string;
+  description: string;
+  thumbnails: Record<string, { url: string; width?: number; height?: number }>;
+  subscriber_count: number | null;
+  video_count: number | null;
+  uploads_playlist_id: string | null;
+  videos: PlaylistItem[];
+  next_page_token: string | null;
+}
+
+export interface PlaylistPreview {
+  id: string;
+  title: string;
+  description: string;
+  thumbnails: Record<string, { url: string; width?: number; height?: number }>;
+  channel_id: string | null;
+  channel_title: string | null;
+  item_count: number | null;
+  videos: PlaylistItem[];
+  next_page_token: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 18 — family playlists
+// ---------------------------------------------------------------------------
+
+export interface FamilyPlaylistSummary {
+  id: number;
+  created_by: number;
+  title: string;
+  description: string | null;
+  created_at: number;
+  updated_at: number;
+  video_count: number;
+}
+
+export interface FamilyPlaylistVideo {
+  id: number;
+  video_id: string;
+  video_title: string;
+  video_thumbnail_url: string | null;
+  channel_title: string | null;
+  position: number;
+  added_at: number;
+}
+
+export interface FamilyPlaylistDetail extends FamilyPlaylistSummary {
+  videos: FamilyPlaylistVideo[];
+  child_ids: number[];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 16 — caption track listing
+// ---------------------------------------------------------------------------
+
+export interface CaptionTrack {
+  lang: string;
+  name: string | null;
+  auto_generated: boolean;
+}

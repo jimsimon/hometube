@@ -32,6 +32,7 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 import { ApiError, api } from '../services/api.js';
 import type {
   Bookmark,
+  CaptionTrack,
   ChildSettings,
   HeartbeatResponse,
   StreamResponse,
@@ -54,12 +55,37 @@ export class VideoPlayer extends LitElement {
   @property({ type: String, attribute: 'video-id' })
   videoId = '';
 
+  /**
+   * When set, the player fetches metadata + stream from
+   * `/api/preview/video/:id` instead of `/api/videos/:id`. Used by the
+   * parental-preview page so a parent can watch content that is not
+   * yet on any child's allowlist.
+   *
+   * Heartbeat / continue-watching / bookmarks are disabled in preview
+   * mode — those are child-only features.
+   */
+  @property({ type: Boolean })
+  preview = false;
+
+  /**
+   * Optional initial seek position in seconds. Driven by the `?t=`
+   * query param on /child/video/:id so a bookmark link can jump
+   * straight to a moment in the video.
+   */
+  @property({ type: Number, attribute: 'start-at' })
+  startAt: number | null = null;
+
   @state() private metadata: VideoMetadata | null = null;
   @state() private stream: StreamResponse | null = null;
   @state() private settings: ChildSettings | null = null;
   @state() private bookmarks: Bookmark[] = [];
+  @state() private captionTracks: CaptionTrack[] = [];
+  @state() private activeCaptionLang: string | null = null;
   @state() private error = '';
   @state() private continuePromptOpen = false;
+  /** True when the audio-only toggle is engaged. */
+  @property({ type: Boolean, reflect: true, attribute: 'data-audio-only' })
+  audioOnly = false;
   /** Most-recent `remaining_seconds` from the heartbeat response. */
   @state() private remainingSeconds: number | null = null;
 
@@ -161,6 +187,32 @@ export class VideoPlayer extends LitElement {
       font-weight: 600;
       font-size: 1rem;
     }
+    .audio-toggle,
+    .caption-menu button {
+      padding: 0.4rem 0.75rem;
+      border-radius: 0.375rem;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      background: transparent;
+      color: var(--wa-color-text-normal);
+      font: inherit;
+      cursor: pointer;
+    }
+    .audio-toggle[aria-pressed='true'],
+    .caption-menu button[aria-pressed='true'] {
+      background: var(--wa-color-brand-fill, #2563eb);
+      color: white;
+      border-color: transparent;
+    }
+    .caption-menu {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
+    /* Audio-only mode: render the thumbnail as a static background. */
+    :host([data-audio-only]) video {
+      background-size: cover;
+      background-position: center;
+    }
   `;
 
   override connectedCallback(): void {
@@ -206,16 +258,41 @@ export class VideoPlayer extends LitElement {
   private async load(): Promise<void> {
     this.error = '';
     try {
-      const [meta, stream, settings] = await Promise.all([
-        api.get<VideoMetadata>(`/api/videos/${this.videoId}`),
-        api.get<StreamResponse>(`/api/videos/${this.videoId}/stream`),
-        api
-          .get<ChildSettings>(`/api/children/me/settings`)
-          .catch(() => null),
-      ]);
-      this.metadata = meta;
-      this.stream = stream;
-      this.settings = settings;
+      if (this.preview) {
+        // Parent-side preview: only metadata is exposed; the stream
+        // endpoint is not (yet) wired through the preview namespace,
+        // so we attempt the regular video endpoints which the parent
+        // session has the rights to call as well.
+        const meta = await api.get<VideoMetadata>(
+          `/api/preview/video/${this.videoId}`,
+        );
+        this.metadata = meta;
+        try {
+          this.stream = await api.get<StreamResponse>(
+            `/api/videos/${this.videoId}/stream`,
+          );
+        } catch {
+          // The stream endpoint requires allowlist for child accounts;
+          // for parents the access check passes. Swallow errors so the
+          // metadata-only path still renders.
+          this.stream = null;
+        }
+      } else {
+        const [meta, stream, settings, captions] = await Promise.all([
+          api.get<VideoMetadata>(`/api/videos/${this.videoId}`),
+          api.get<StreamResponse>(`/api/videos/${this.videoId}/stream`),
+          api
+            .get<ChildSettings>(`/api/children/me/settings`)
+            .catch(() => null),
+          api
+            .get<CaptionTrack[]>(`/api/videos/${this.videoId}/captions`)
+            .catch(() => [] as CaptionTrack[]),
+        ]);
+        this.metadata = meta;
+        this.stream = stream;
+        this.settings = settings;
+        this.captionTracks = captions;
+      }
       // After render, attach the manifest. We use a Blob URL so the
       // browser can request relative segment URLs against our origin.
       queueMicrotask(() => this.attachSource());
@@ -227,6 +304,11 @@ export class VideoPlayer extends LitElement {
 
   private attachSource(): void {
     if (!this.videoEl) return;
+    // Audio-only mode: keep the existing manifest source so DASH's
+    // adaptive selection picks the audio rendition; the visual chrome
+    // changes (thumbnail background) are driven by the
+    // `data-audio-only` host attribute. Future work: ask the backend
+    // to sign a single audio-format URL and switch to it directly.
     if (this.stream?.manifest) {
       const blob = new Blob([this.stream.manifest], {
         type: 'application/dash+xml',
@@ -249,7 +331,63 @@ export class VideoPlayer extends LitElement {
     if (this.settings?.playback_speed_locked) {
       this.videoEl.playbackRate = 1;
     }
+    if (this.startAt != null && Number.isFinite(this.startAt)) {
+      const target = this.startAt;
+      const seek = (): void => {
+        if (this.videoEl && Number.isFinite(this.videoEl.duration)) {
+          try {
+            this.videoEl.currentTime = target;
+          } catch {
+            // ignore — user gesture may be required to seek before metadata loads.
+          }
+        }
+      };
+      this.videoEl.addEventListener('loadedmetadata', seek, { once: true });
+    }
+    this.applyCaptionTracks();
   }
+
+  /** Apply the caption track list to the underlying <video> element. */
+  private applyCaptionTracks(): void {
+    if (!this.videoEl) return;
+    // Remove any previously-added <track> children before re-adding.
+    Array.from(this.videoEl.querySelectorAll('track')).forEach((t) =>
+      t.remove(),
+    );
+    for (const t of this.captionTracks) {
+      const el = document.createElement('track');
+      el.kind = 'subtitles';
+      el.label = t.auto_generated ? `${t.lang} (auto)` : t.lang;
+      el.srclang = t.lang;
+      el.src = `/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`;
+      this.videoEl.appendChild(el);
+    }
+    // Hide every track by default; the user opts in via the menu.
+    if (this.videoEl.textTracks) {
+      for (let i = 0; i < this.videoEl.textTracks.length; i++) {
+        const track = this.videoEl.textTracks[i];
+        if (!track) continue;
+        track.mode =
+          this.activeCaptionLang && track.language === this.activeCaptionLang
+            ? 'showing'
+            : 'disabled';
+      }
+    }
+  }
+
+  private toggleCaption = (lang: string): void => {
+    if (this.activeCaptionLang === lang) {
+      this.activeCaptionLang = null;
+    } else {
+      this.activeCaptionLang = lang;
+    }
+    this.applyCaptionTracks();
+  };
+
+  private toggleAudioOnly = (): void => {
+    this.audioOnly = !this.audioOnly;
+    queueMicrotask(() => this.attachSource());
+  };
 
   private onPlay = (): void => {
     this.startHeartbeat();
@@ -370,6 +508,7 @@ export class VideoPlayer extends LitElement {
   };
 
   private startHeartbeat(): void {
+    if (this.preview) return;
     if (this.heartbeatTimer != null) return;
     this.lastHeartbeatAt = Date.now();
     this.heartbeatTimer = window.setInterval(
@@ -496,18 +635,65 @@ export class VideoPlayer extends LitElement {
               ? html`<div class="channel">${this.metadata.channel_title}</div>`
               : null}
             <div class="chrome">
-              <hometube-like-button
-                video-id=${this.videoId}
-              ></hometube-like-button>
-              ${this.metadata.channel_id
-                ? html`<hometube-subscribe-button
-                    channel-id=${this.metadata.channel_id}
-                  ></hometube-subscribe-button>`
+              ${this.preview
+                ? nothing
+                : html`
+                    <hometube-like-button
+                      video-id=${this.videoId}
+                    ></hometube-like-button>
+                    ${this.metadata.channel_id
+                      ? html`<hometube-subscribe-button
+                          channel-id=${this.metadata.channel_id}
+                        ></hometube-subscribe-button>`
+                      : nothing}
+                    <hometube-bookmark-button
+                      video-id=${this.videoId}
+                    ></hometube-bookmark-button>
+                    <hometube-sleep-timer></hometube-sleep-timer>
+                  `}
+              <button
+                type="button"
+                class="audio-toggle"
+                aria-pressed=${this.audioOnly ? 'true' : 'false'}
+                @click=${this.toggleAudioOnly}
+              >
+                ${this.audioOnly ? 'Show video' : 'Audio only'}
+              </button>
+              ${this.captionTracks.length > 0
+                ? html`<div
+                    class="caption-menu"
+                    role="group"
+                    aria-label="Captions"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed=${this.activeCaptionLang == null
+                        ? 'true'
+                        : 'false'}
+                      @click=${() => {
+                        this.activeCaptionLang = null;
+                        this.applyCaptionTracks();
+                      }}
+                    >
+                      Off
+                    </button>
+                    ${this.captionTracks.map(
+                      (t) => html`
+                        <button
+                          type="button"
+                          aria-pressed=${this.activeCaptionLang === t.lang
+                            ? 'true'
+                            : 'false'}
+                          @click=${() => this.toggleCaption(t.lang)}
+                        >
+                          ${t.auto_generated
+                            ? `${t.lang} (auto)`
+                            : t.lang}
+                        </button>
+                      `,
+                    )}
+                  </div>`
                 : nothing}
-              <hometube-bookmark-button
-                video-id=${this.videoId}
-              ></hometube-bookmark-button>
-              <hometube-sleep-timer></hometube-sleep-timer>
             </div>
           </div>`
         : null}

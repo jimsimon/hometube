@@ -30,6 +30,7 @@ use crate::middleware::{
 use crate::state::AppState;
 
 pub mod accounts;
+pub mod activity;
 pub mod allowlist;
 pub mod auth;
 pub mod blocked;
@@ -39,10 +40,13 @@ pub mod channels;
 pub mod child_settings;
 pub mod cron;
 pub mod family;
+pub mod family_playlists;
 pub mod feed;
 pub mod likes;
+pub mod notifications;
 pub mod pages;
 pub mod playlists;
+pub mod preview;
 pub mod search;
 pub mod setup;
 pub mod subscriptions;
@@ -153,14 +157,104 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(cache::delete_video),
         )
         .route("/api/cache/clear", post(cache::clear_all))
+        // Parental preview (Phase 16)
+        .route("/api/preview/video/{video_id}", get(preview::preview_video))
+        .route(
+            "/api/preview/channel/{channel_id}",
+            get(preview::preview_channel),
+        )
+        .route(
+            "/api/preview/playlist/{playlist_id}",
+            get(preview::preview_playlist),
+        )
+        // Watch-activity dashboard (Phase 17)
+        .route(
+            "/api/children/{id}/activity/summary",
+            get(activity::summary),
+        )
+        .route(
+            "/api/children/{id}/activity/history",
+            get(activity::history),
+        )
+        .route(
+            "/api/children/{id}/activity/top-channels",
+            get(activity::top_channels),
+        )
+        .route(
+            "/api/children/{id}/activity/search-log",
+            get(activity::search_log),
+        )
+        // Parent notifications (Phase 17)
+        .route("/api/notifications", get(notifications::list))
+        .route(
+            "/api/notifications/unread-count",
+            get(notifications::unread_count),
+        )
+        .route(
+            "/api/notifications/read-all",
+            put(notifications::mark_all_read),
+        )
+        .route(
+            "/api/notifications/{id}/read",
+            put(notifications::mark_read),
+        )
+        .route(
+            "/api/notifications/{id}",
+            axum::routing::delete(notifications::delete),
+        )
         .route_layer(axum::middleware::from_fn(require_parent));
+
+    // -----------------------------------------------------------------
+    // Family playlists (Phase 18). Both parents and children hit these
+    // endpoints — the handlers themselves enforce the role-specific
+    // rules (children only see assigned playlists; mutations are
+    // parent-only).
+    // -----------------------------------------------------------------
+    let family_playlist_routes = Router::new()
+        .route(
+            "/api/family-playlists",
+            get(family_playlists::list).post(family_playlists::create),
+        )
+        .route(
+            "/api/family-playlists/{id}",
+            get(family_playlists::detail)
+                .put(family_playlists::update)
+                .delete(family_playlists::delete),
+        )
+        .route(
+            "/api/family-playlists/{id}/videos",
+            post(family_playlists::add_video),
+        )
+        .route(
+            "/api/family-playlists/{id}/videos/reorder",
+            put(family_playlists::reorder),
+        )
+        .route(
+            "/api/family-playlists/{id}/videos/{video_id}",
+            delete_route(family_playlists::remove_video),
+        );
 
     // -----------------------------------------------------------------
     // Video proxy + playback. Open to both parents and children, but
     // gated through the usage-limit middleware for children. Access
     // control (allowlist) is enforced inside each handler via
     // [`crate::services::access::can_child_view`].
+    //
+    // The proxy endpoints (segment / audio / thumbnail) additionally
+    // pass through the per-account rate limiter to bound how aggressively
+    // any one client can pull bytes through us.
     // -----------------------------------------------------------------
+    let proxy_routes = Router::new()
+        .route("/api/proxy/segment", get(videos::get_segment))
+        .route("/api/proxy/audio", get(videos::get_audio))
+        .route(
+            "/api/proxy/thumbnail/{video_id}",
+            get(videos::get_thumbnail),
+        )
+        .route_layer(axum::middleware::from_fn(
+            crate::middleware::rate_limit::rate_limit_proxies,
+        ));
+
     let video_routes = Router::new()
         .route("/api/videos/{video_id}", get(videos::get_metadata))
         .route(
@@ -175,12 +269,7 @@ pub fn router(state: AppState) -> Router {
             "/api/videos/{video_id}/captions/{lang}",
             get(videos::get_caption),
         )
-        .route("/api/proxy/segment", get(videos::get_segment))
-        .route("/api/proxy/audio", get(videos::get_audio))
-        .route(
-            "/api/proxy/thumbnail/{video_id}",
-            get(videos::get_thumbnail),
-        )
+        .merge(proxy_routes)
         .route_layer(from_fn_with_state(state.clone(), enforce_usage_limit));
 
     // -----------------------------------------------------------------
@@ -313,11 +402,19 @@ pub fn router(state: AppState) -> Router {
         .route("/parent/home", get(pages::parent_home))
         .route("/parent/family", get(pages::parent_family))
         .route("/parent/system", get(pages::parent_system))
+        .route("/parent/activity", get(pages::parent_activity))
+        .route("/parent/playlists", get(pages::parent_playlists))
+        .route("/parent/playlist/{id}", get(pages::parent_playlist))
+        .route(
+            "/parent/preview/{kind}/{id}",
+            get(pages::parent_preview),
+        )
         .route("/child/home", get(pages::child_home))
         .route("/child/channels", get(pages::child_channels))
         .route("/child/channel/{channel_id}", get(pages::child_channel))
         .route("/child/playlists", get(pages::child_playlists))
         .route("/child/playlist/{id}", get(pages::child_playlist))
+        .route("/child/bookmarks", get(pages::child_bookmarks))
         .route("/child/search", get(pages::child_search));
 
     // -----------------------------------------------------------------
@@ -331,6 +428,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes)
         .merge(setup_routes)
         .merge(parent_only)
+        .merge(family_playlist_routes)
         .merge(video_routes)
         .merge(child_routes)
         .merge(child_only)

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Activity — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-parent.html" %}
+
+<section class="parent-activity" aria-label="Watch activity">
+  <header class="page-header">
+    <h1>Watch activity</h1>
+    <p class="subtitle">
+      See how much time has been spent watching, what's been searched
+      for, and which channels are most popular.
+    </p>
+  </header>
+
+  <hometube-activity-dashboard></hometube-activity-dashboard>
+</section>
+{% endblock %}
+
+{% block head %}
+<style>
+  .parent-activity {
+    padding: 1rem;
+    max-width: 72rem;
+    margin: 0 auto;
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-parent.js"></script>
+<script type="module" src="/assets/components/activity-chart.js"></script>
+<script type="module" src="/assets/components/activity-dashboard.js"></script>
+<script type="module">
+  // Mirror the child-changed event wiring from /parent/home so the
+  // dashboard switches its view when the parent picks a different
+  // child in the nav bar.
+  document.addEventListener('child-changed', (event) => {
+    const childId = event.detail?.childId;
+    if (childId == null) return;
+    for (const el of document.querySelectorAll('hometube-activity-dashboard')) {
+      el.setAttribute('child-id', String(childId));
+    }
+  });
+</script>
+{% endblock %}

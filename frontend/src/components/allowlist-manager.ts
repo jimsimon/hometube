@@ -250,13 +250,27 @@ export class AllowlistManager extends LitElement {
                     <div class="meta">
                       <strong>${item.title}</strong>
                       <span class="empty">${item.channel_title ?? ''}</span>
-                      <button
-                        type="button"
-                        class="secondary"
-                        @click=${() => void this.addItem(item)}
+                      <div
+                        style="display: flex; gap: 0.25rem; flex-wrap: wrap;"
                       >
-                        Add to allowlist
-                      </button>
+                        <a
+                          class="secondary"
+                          style="padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--wa-color-surface-border); text-decoration: none; color: inherit; font: inherit;"
+                          href=${`/parent/preview/${this.activeTab}/${encodeURIComponent(item.id)}`}
+                          target="_blank"
+                          rel="noopener"
+                          aria-label=${`Preview ${item.title}`}
+                        >
+                          Preview
+                        </a>
+                        <button
+                          type="button"
+                          class="secondary"
+                          @click=${() => void this.addItem(item)}
+                        >
+                          Add to allowlist
+                        </button>
+                      </div>
                     </div>
                   </div>
                 `,

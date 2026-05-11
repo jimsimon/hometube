@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Family playlist — HomeTube{% endblock %}
+
+{% block content %}
+{% include "partials/nav-parent.html" %}
+
+<section class="parent-playlist" aria-label="Family playlist">
+  <p>
+    <a href="/parent/playlists" class="back-link">← Back to playlists</a>
+  </p>
+  <hometube-family-playlist-detail
+    playlist-id="{{ playlist_id }}"
+  ></hometube-family-playlist-detail>
+</section>
+{% endblock %}
+
+{% block head %}
+<style>
+  .parent-playlist {
+    padding: 1rem;
+    max-width: 64rem;
+    margin: 0 auto;
+  }
+  .back-link {
+    color: var(--wa-color-brand-on-quiet);
+    text-decoration: none;
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/nav-parent.js"></script>
+<script type="module" src="/assets/components/family-playlist-detail.js"></script>
+<script type="module" src="/assets/components/family-playlist-form.js"></script>
+{% endblock %}

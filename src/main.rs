@@ -84,7 +84,13 @@ async fn main() -> anyhow::Result<()> {
     info!(%addr, "listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Use ConnectInfo so the rate-limit middleware can fall back to
+    // the peer IP when a request is unauthenticated.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

@@ -9,5 +9,6 @@
 
 pub mod account_type;
 pub mod auth;
+pub mod rate_limit;
 pub mod setup_redirect;
 pub mod usage_limit;
