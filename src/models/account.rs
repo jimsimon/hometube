@@ -39,7 +39,11 @@ impl AccountType {
 ///
 /// `access_token` and `refresh_token` are intentionally `pub` so internal
 /// services can use them, but the JSON-serialised view used by handlers
-/// excludes them via [`AccountSummary`].
+/// excludes them via [`AccountSummary`]. The `#[allow(dead_code)]`
+/// markers reflect that those fields are loaded by sqlx for token
+/// refresh paths even though the current code doesn't read them
+/// directly via the struct (the OAuth refresh service issues its own
+/// queries against the `accounts` table).
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
@@ -49,10 +53,13 @@ pub struct Account {
     pub avatar_url: Option<String>,
     pub account_type: String,
     pub pin_hash: Option<String>,
+    #[allow(dead_code)]
     pub access_token: String,
+    #[allow(dead_code)]
     pub refresh_token: String,
     pub token_expires_at: i64,
     pub created_at: i64,
+    #[allow(dead_code)]
     pub updated_at: i64,
 }
 
@@ -220,17 +227,25 @@ pub async fn insert(
     Ok(row.0)
 }
 
+/// Bag of fields that change on every successful OAuth callback. Kept
+/// as a struct (rather than a positional argument list) to satisfy
+/// clippy's `too_many_arguments` lint and to make call sites readable.
+#[derive(Debug, Clone)]
+pub struct ProfileUpdate<'a> {
+    pub email: &'a str,
+    pub display_name: &'a str,
+    pub avatar_url: Option<&'a str>,
+    pub access_token: &'a str,
+    pub refresh_token: &'a str,
+    pub token_expires_at: i64,
+}
+
 /// Refresh tokens / display name / avatar for an existing account on
 /// repeat OAuth login.
 pub async fn update_profile_and_tokens(
     pool: &SqlitePool,
     id: i64,
-    email: &str,
-    display_name: &str,
-    avatar_url: Option<&str>,
-    access_token: &str,
-    refresh_token: &str,
-    token_expires_at: i64,
+    update: ProfileUpdate<'_>,
 ) -> AppResult<()> {
     sqlx::query(
         "UPDATE accounts SET \
@@ -239,12 +254,12 @@ pub async fn update_profile_and_tokens(
             updated_at = unixepoch() \
          WHERE id = ?",
     )
-    .bind(email)
-    .bind(display_name)
-    .bind(avatar_url)
-    .bind(access_token)
-    .bind(refresh_token)
-    .bind(token_expires_at)
+    .bind(update.email)
+    .bind(update.display_name)
+    .bind(update.avatar_url)
+    .bind(update.access_token)
+    .bind(update.refresh_token)
+    .bind(update.token_expires_at)
     .bind(id)
     .execute(pool)
     .await?;
@@ -262,9 +277,12 @@ pub async fn list_all(pool: &SqlitePool) -> AppResult<Vec<Account>> {
     Ok(rows.into_iter().map(map_account).collect())
 }
 
+/// Tuple shape returned by [`list_profiles`].
+type ProfileRow = (i64, String, Option<String>, String, Option<String>);
+
 /// Slim listing for the profile picker.
 pub async fn list_profiles(pool: &SqlitePool) -> AppResult<Vec<ProfileSummary>> {
-    let rows: Vec<(i64, String, Option<String>, String, Option<String>)> = sqlx::query_as(
+    let rows: Vec<ProfileRow> = sqlx::query_as(
         "SELECT id, display_name, avatar_url, account_type, pin_hash FROM accounts \
          ORDER BY CASE account_type WHEN 'parent' THEN 0 ELSE 1 END, created_at ASC",
     )

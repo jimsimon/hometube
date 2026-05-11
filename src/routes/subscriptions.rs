@@ -44,21 +44,29 @@ pub struct SubscriptionRow {
     pub visible: bool,
 }
 
+/// Tuple shape produced by [`list`]'s SELECT. Defined as an alias to
+/// satisfy clippy's `type_complexity` lint.
+///
+/// Columns in order:
+/// `id, channel_id, channel_title, channel_thumbnail_url, source,
+///  sync_status, subscribed_at, visible`.
+type SubscriptionRowTuple = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    i64,
+);
+
 /// `GET /api/subscriptions`.
 pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<SubscriptionRow>>> {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        i64,
-        i64,
-    )> = sqlx::query_as(
+    let rows: Vec<SubscriptionRowTuple> = sqlx::query_as(
         "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
                     s.source, s.sync_status, s.subscribed_at, \
                     CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \

@@ -21,43 +21,24 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { api, ApiError } from '../services/api.js';
+import type {
+  ChildSearchChannelHit,
+  ChildSearchPlaylistHit,
+  ChildSearchPlaylistSource,
+  ChildSearchResponse,
+  ChildSearchVideoHit,
+} from '../types/index.js';
 
 import './search-bar.js';
 import './channel-card.js';
 import './playlist-card.js';
 import './video-card.js';
 
-interface ChannelHit {
-  channel_id: string;
-  channel_title: string;
-  channel_thumbnail_url: string | null;
-}
-
-interface PlaylistHit {
-  playlist_id: string;
-  playlist_title: string;
-  playlist_thumbnail_url: string | null;
-  source: 'allowlist' | 'own' | 'family';
-}
-
-interface VideoHit {
-  video_id: string;
-  title: string;
-  channel_id: string | null;
-  channel_title: string | null;
-  thumbnail_url: string | null;
-}
-
-interface SearchResponse {
-  q: string;
-  kind: string;
-  results: {
-    channels: ChannelHit[];
-    playlists: PlaylistHit[];
-    videos: VideoHit[];
-  };
-  next_page_token: string | null;
-}
+const PLAYLIST_BADGE_LABELS: Record<ChildSearchPlaylistSource, string> = {
+  allowlist: 'Allowed',
+  own: 'My playlist',
+  family: 'Family',
+};
 
 @customElement('hometube-search-results')
 export class SearchResults extends LitElement {
@@ -65,9 +46,9 @@ export class SearchResults extends LitElement {
   @property({ type: String }) type: 'all' | 'channel' | 'playlist' | 'video' =
     'all';
 
-  @state() private channels: ChannelHit[] = [];
-  @state() private playlists: PlaylistHit[] = [];
-  @state() private videos: VideoHit[] = [];
+  @state() private channels: ChildSearchChannelHit[] = [];
+  @state() private playlists: ChildSearchPlaylistHit[] = [];
+  @state() private videos: ChildSearchVideoHit[] = [];
   @state() private loading = false;
   @state() private error = '';
   @state() private nextPageToken: string | null = null;
@@ -114,6 +95,44 @@ export class SearchResults extends LitElement {
       font: inherit;
       cursor: pointer;
     }
+    .playlist-result {
+      position: relative;
+      display: block;
+    }
+    .badge {
+      position: absolute;
+      top: 0.5rem;
+      left: 0.5rem;
+      padding: 0.125rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border-radius: 999px;
+      background: var(--wa-color-surface-default, #fff);
+      color: var(--wa-color-text-normal);
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      pointer-events: none;
+      z-index: 1;
+    }
+    .badge.family {
+      background: var(--wa-color-brand-quiet, #eef);
+      border-color: var(--wa-color-brand-on-quiet, #88a);
+    }
+    .badge.own {
+      background: var(--wa-color-success-quiet, #efe);
+      border-color: var(--wa-color-success-on-quiet, #8a8);
+    }
+    .external-link {
+      display: block;
+      padding: 0.75rem;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      border-radius: 0.5rem;
+      color: var(--wa-color-text-normal);
+      text-decoration: none;
+    }
+    .external-link:hover,
+    .external-link:focus {
+      background: var(--wa-color-surface-quiet, #f5f5f5);
+    }
   `;
 
   override connectedCallback(): void {
@@ -147,7 +166,7 @@ export class SearchResults extends LitElement {
       if (append && this.nextPageToken) {
         params.set('page_token', this.nextPageToken);
       }
-      const res = await api.get<SearchResponse>(
+      const res = await api.get<ChildSearchResponse>(
         `/api/search?${params.toString()}`,
       );
       if (append) {
@@ -229,21 +248,34 @@ export class SearchResults extends LitElement {
             <h2>Playlists</h2>
             <div class="grid">
               ${this.playlists.map((p) => {
+                const badge = html`<span
+                  class="badge ${p.source}"
+                  aria-label="Playlist source: ${PLAYLIST_BADGE_LABELS[p.source]}"
+                  >${PLAYLIST_BADGE_LABELS[p.source]}</span
+                >`;
                 // Family playlists encode their id as `family:N`; the
                 // child playlist deep-link is on the local id only.
-                const isLocal = !/^[A-Z]/.test(p.playlist_id);
+                const isLocal =
+                  p.source !== 'family' && !/^[A-Z]/.test(p.playlist_id);
                 if (isLocal) {
-                  return html`<hometube-playlist-card
-                    playlist-id=${Number(p.playlist_id) || 0}
-                    title=${p.playlist_title}
-                    .thumbnailUrl=${p.playlist_thumbnail_url}
-                    ?is-own=${p.source !== 'allowlist'}
-                  ></hometube-playlist-card>`;
+                  return html`<div class="playlist-result">
+                    ${badge}
+                    <hometube-playlist-card
+                      playlist-id=${Number(p.playlist_id) || 0}
+                      title=${p.playlist_title}
+                      .thumbnailUrl=${p.playlist_thumbnail_url}
+                      ?is-own=${p.source === 'own'}
+                    ></hometube-playlist-card>
+                  </div>`;
                 }
-                return html`<a
-                  href="/child/playlist/${encodeURIComponent(p.playlist_id)}"
-                  >${p.playlist_title}</a
-                >`;
+                return html`<div class="playlist-result">
+                  ${badge}
+                  <a
+                    class="external-link"
+                    href="/child/playlist/${encodeURIComponent(p.playlist_id)}"
+                    >${p.playlist_title}</a
+                  >
+                </div>`;
               })}
             </div>
           `

@@ -273,14 +273,16 @@ pub fn router(state: AppState) -> Router {
 
     // -----------------------------------------------------------------
     // Child feed + heartbeat. Used by the child home page and the
-    // player.
+    // player. Gated by `require_child` so the handlers don't have to
+    // re-check the role inline.
     // -----------------------------------------------------------------
     let child_routes = Router::new()
         .route("/api/feed/continue-watching", get(feed::continue_watching))
         .route("/api/feed/new-videos", get(feed::new_videos))
         .route("/api/feed/up-next", get(feed::up_next))
         .route("/api/usage/heartbeat", post(usage::heartbeat))
-        .route("/api/search", get(search::child_search));
+        .route("/api/search", get(search::child_search))
+        .route_layer(axum::middleware::from_fn(require_child));
 
     // -----------------------------------------------------------------
     // Child-only APIs: channels, subscriptions, playlists, likes,

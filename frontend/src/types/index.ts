@@ -89,6 +89,59 @@ export interface SearchResponse {
   items: SearchItem[];
 }
 
+// ---------------------------------------------------------------------------
+// Phase 10 — child-side allowlist-bounded search
+// ---------------------------------------------------------------------------
+
+/**
+ * One channel result in `/api/search`. Returns from any channel the
+ * child can reach via the allowlist or their subscriptions.
+ */
+export interface ChildSearchChannelHit {
+  channel_id: string;
+  channel_title: string;
+  channel_thumbnail_url: string | null;
+}
+
+/**
+ * Origin of a playlist hit. Mirrors the `source` column on the backend
+ * struct and is used by `<hometube-search-results>` to render the
+ * appropriate badge:
+ *
+ * - `allowlist` — playlist the parent allowlisted directly
+ * - `own` — playlist the child created in HomeTube
+ * - `family` — family playlist the parent created and shared
+ */
+export type ChildSearchPlaylistSource = 'allowlist' | 'own' | 'family';
+
+export interface ChildSearchPlaylistHit {
+  playlist_id: string;
+  playlist_title: string;
+  playlist_thumbnail_url: string | null;
+  source: ChildSearchPlaylistSource;
+}
+
+export interface ChildSearchVideoHit {
+  video_id: string;
+  title: string;
+  channel_id: string | null;
+  channel_title: string | null;
+  thumbnail_url: string | null;
+}
+
+export interface ChildSearchResults {
+  channels: ChildSearchChannelHit[];
+  playlists: ChildSearchPlaylistHit[];
+  videos: ChildSearchVideoHit[];
+}
+
+export interface ChildSearchResponse {
+  q: string;
+  kind: 'all' | 'channel' | 'playlist' | 'video' | string;
+  results: ChildSearchResults;
+  next_page_token: string | null;
+}
+
 export interface ContinueWatchingItem {
   video_id: string;
   video_title: string;

@@ -23,9 +23,9 @@ use axum::{extract::State, Json};
 use chrono::{Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::middleware::auth::CurrentAccount;
-use crate::models::account::AccountType;
+use crate::services::notifications;
 use crate::state::AppState;
 
 /// If the player has been silent for this long, the next heartbeat
@@ -71,14 +71,14 @@ pub struct HeartbeatResponse {
 }
 
 /// `POST /api/usage/heartbeat`.
+///
+/// The route is gated by `require_child` middleware in
+/// [`crate::routes::router`], so we don't re-check the role here.
 pub async fn heartbeat(
     State(state): State<AppState>,
     current: CurrentAccount,
     Json(body): Json<HeartbeatBody>,
 ) -> AppResult<Json<HeartbeatResponse>> {
-    if !matches!(current.account_type, AccountType::Child) {
-        return Err(AppError::Forbidden);
-    }
     let elapsed = body.elapsed_seconds.unwrap_or(30).clamp(1, 90);
 
     upsert_usage_log(&state, current.id, &body.video_id, elapsed).await?;
@@ -158,6 +158,11 @@ fn parse_hhmm(s: &str) -> Option<i64> {
     Some(hh * 60 + mm)
 }
 
+/// Tuple shape of the most-recent `usage_log` row queried in
+/// [`upsert_usage_log`]. Columns in order: `id, video_id, started_at,
+/// ended_at, duration_seconds`.
+type LastUsageLogRow = (i64, String, i64, Option<i64>, Option<i64>);
+
 async fn upsert_usage_log(
     state: &AppState,
     child_id: i64,
@@ -167,7 +172,7 @@ async fn upsert_usage_log(
     let mut tx = state.db.begin().await?;
 
     // Most-recent row for this child.
-    let last: Option<(i64, String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let last: Option<LastUsageLogRow> = sqlx::query_as(
         "SELECT id, video_id, started_at, ended_at, duration_seconds \
          FROM usage_log \
          WHERE child_account_id = ? \
@@ -270,41 +275,18 @@ async fn upsert_watch_history(
 }
 
 /// Insert a `time_limit_reached` notification for every parent unless
-/// one already exists for today. Idempotent within a calendar day.
+/// one already exists for today. Idempotent within a calendar day —
+/// dedup is handled by [`crate::services::notifications`].
 async fn ensure_limit_reached_notification(state: &AppState, child_id: i64) -> AppResult<()> {
-    let parents: Vec<(i64,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
-            .fetch_all(&state.db)
-            .await?;
-    let metadata = serde_json::json!({ "child_account_id": child_id }).to_string();
-    let child_match = format!("%\"child_account_id\":{child_id}%");
-    for (parent_id,) in parents {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM parent_notifications \
-             WHERE parent_account_id = ? \
-               AND notification_type = 'time_limit_reached' \
-               AND created_at >= unixepoch() - 86400 \
-               AND COALESCE(metadata, '') LIKE ?",
-        )
-        .bind(parent_id)
-        .bind(&child_match)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
-        if exists > 0 {
-            continue;
-        }
-        sqlx::query(
-            "INSERT INTO parent_notifications \
-                (parent_account_id, notification_type, title, message, metadata) \
-             VALUES (?, 'time_limit_reached', ?, ?, ?)",
-        )
-        .bind(parent_id)
-        .bind("Daily limit reached")
-        .bind("Watch time used up for today.")
-        .bind(&metadata)
-        .execute(&state.db)
-        .await?;
-    }
-    Ok(())
+    let metadata = serde_json::json!({ "child_account_id": child_id });
+    let key = notifications::json_fragment_key("child_account_id", &child_id);
+    notifications::broadcast_once_per_day(
+        &state.db,
+        notifications::TYPE_TIME_LIMIT_REACHED,
+        &key,
+        "Daily limit reached",
+        "Watch time used up for today.",
+        &metadata,
+    )
+    .await
 }

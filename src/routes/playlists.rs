@@ -41,12 +41,32 @@ pub struct PlaylistSummary {
     pub updated_at: i64,
 }
 
+/// Tuple shape produced by the SELECTs that hydrate
+/// [`PlaylistSummary`]. Defined as an alias so clippy's
+/// `type_complexity` lint doesn't fire on every queried row binding.
+///
+/// Columns in order:
+/// `id, youtube_playlist_id, title, description, is_own, source,
+///  sync_status, video_count, created_at, updated_at`.
+type PlaylistSummaryRow = (
+    i64,
+    Option<String>,
+    String,
+    Option<String>,
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+);
+
 /// `GET /api/playlists`.
 pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<PlaylistSummary>>> {
-    let rows: Vec<(i64, Option<String>, String, Option<String>, i64, String, String, i64, i64, i64)> =
+    let rows: Vec<PlaylistSummaryRow> =
         sqlx::query_as(
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
                     p.source, p.sync_status, \
@@ -569,7 +589,7 @@ async fn is_own(state: &AppState, playlist_id: i64) -> AppResult<bool> {
 }
 
 async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<PlaylistSummary> {
-    let row: (i64, Option<String>, String, Option<String>, i64, String, String, i64, i64, i64) =
+    let row: PlaylistSummaryRow =
         sqlx::query_as(
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
                     p.source, p.sync_status, \

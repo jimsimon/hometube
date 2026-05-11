@@ -14,7 +14,7 @@
 //! - `GET /api/proxy/thumbnail/:videoId` — thumbnail proxy
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -748,7 +748,7 @@ fn segment_cache_path(
     path
 }
 
-async fn write_segment(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
+async fn write_segment(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -798,7 +798,7 @@ async fn register_cached_segment(
     video_id: &str,
     format: &str,
     sq: &str,
-    path: &PathBuf,
+    path: &FsPath,
     size: i64,
 ) -> AppResult<()> {
     sqlx::query(
@@ -824,19 +824,143 @@ fn parse_sq(sq: &str) -> i64 {
     sq.parse().unwrap_or(0)
 }
 
-async fn serve_file(path: &PathBuf, _size: i64, _headers: &HeaderMap) -> AppResult<Response> {
-    // TODO(phase-12): honour the `Range` header on cache hits so the
-    // player can seek inside an already-cached segment without a full
-    // re-download. Segments are typically only 2-5 MB so the
-    // performance impact of always serving the whole file is small.
-    let bytes = tokio::fs::read(path)
+/// Serve a cached segment from disk, honouring HTTP Range requests so
+/// the vidstack player can seek inside an already-cached segment without
+/// a full re-download.
+///
+/// Behaviour:
+/// - Always emits `Accept-Ranges: bytes` so the player knows seeking
+///   works.
+/// - For full-file requests: streams the whole file with a 200 response.
+/// - For a single `Range: bytes=N-M` request:
+///   - On valid range: 206 Partial Content with `Content-Range`,
+///     `Content-Length`, and the requested byte slice streamed via
+///     [`tokio_util::io::ReaderStream`].
+///   - On invalid / unsatisfiable range: 416 with
+///     `Content-Range: bytes */<total>`.
+/// - Multipart / multi-range requests are not supported (rare in
+///   practice for DASH segments) — they fall through to the full-file
+///   200 response.
+async fn serve_file(path: &FsPath, size: i64, headers: &HeaderMap) -> AppResult<Response> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use tokio_util::io::ReaderStream;
+
+    let total = if size > 0 {
+        size as u64
+    } else {
+        // Fall back to a stat() if the cache table didn't have a value.
+        tokio::fs::metadata(path)
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("statting cached segment: {e}")))?
+            .len()
+    };
+
+    if let Some(range_header) = headers.get(header::RANGE) {
+        if let Some((start, end)) = parse_single_byte_range(range_header.to_str().ok(), total) {
+            // Valid range: stream the requested slice.
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|e| AppError::Other(anyhow::anyhow!("opening cached segment: {e}")))?;
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| AppError::Other(anyhow::anyhow!("seeking cached segment: {e}")))?;
+            let length = end - start + 1;
+            let stream = ReaderStream::new(file.take(length));
+            let body = Body::from_stream(stream);
+            let mut response = Response::new(body);
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            let h = response.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                "application/octet-stream".parse().unwrap(),
+            );
+            h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+            h.insert(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total}").parse().unwrap(),
+            );
+            h.insert(header::CONTENT_LENGTH, length.to_string().parse().unwrap());
+            return Ok(response);
+        }
+        // Header was present but unparseable / unsatisfiable — return 416.
+        if range_header
+            .to_str()
+            .ok()
+            .filter(|s| s.starts_with("bytes="))
+            .is_some()
+        {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+            let h = response.headers_mut();
+            h.insert(
+                header::CONTENT_RANGE,
+                format!("bytes */{total}").parse().unwrap(),
+            );
+            h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+            return Ok(response);
+        }
+        // Anything else (e.g. an unknown range unit) — fall through to
+        // a full-file 200 response, matching common server behaviour.
+    }
+
+    // Full-file response. Stream from disk to avoid loading the whole
+    // segment into memory.
+    let file = tokio::fs::File::open(path)
         .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("reading cached segment: {e}")))?;
-    let body = Body::from(bytes);
+        .map_err(|e| AppError::Other(anyhow::anyhow!("opening cached segment: {e}")))?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
     let mut response = Response::new(body);
-    response.headers_mut().insert(
+    let h = response.headers_mut();
+    h.insert(
         header::CONTENT_TYPE,
         "application/octet-stream".parse().unwrap(),
     );
+    h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    h.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
     Ok(response)
+}
+
+/// Parse a single-range HTTP `Range` header value (`bytes=N-M`) against
+/// a known resource size.
+///
+/// Returns `Some((start, end))` (both inclusive) if the request is
+/// satisfiable. Open-ended ranges (`bytes=N-` or `bytes=-N` for
+/// suffix length) are accepted; multipart ranges and non-`bytes` units
+/// are rejected.
+fn parse_single_byte_range(value: Option<&str>, total: u64) -> Option<(u64, u64)> {
+    let value = value?;
+    let body = value.strip_prefix("bytes=")?;
+    if body.contains(',') {
+        return None; // multi-range not supported
+    }
+    let (start_s, end_s) = body.split_once('-')?;
+    let start_s = start_s.trim();
+    let end_s = end_s.trim();
+
+    if start_s.is_empty() {
+        // Suffix form: "bytes=-N" → last N bytes.
+        let suffix_len: u64 = end_s.parse().ok()?;
+        if suffix_len == 0 || total == 0 {
+            return None;
+        }
+        let len = suffix_len.min(total);
+        let start = total - len;
+        return Some((start, total - 1));
+    }
+
+    let start: u64 = start_s.parse().ok()?;
+    if start >= total {
+        return None;
+    }
+    let end: u64 = if end_s.is_empty() {
+        total - 1
+    } else {
+        let parsed: u64 = end_s.parse().ok()?;
+        parsed.min(total - 1)
+    };
+    if end < start {
+        return None;
+    }
+    Some((start, end))
 }

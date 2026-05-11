@@ -90,16 +90,13 @@ pub async fn get_settings(
 /// **currently signed-in child**. Mirrors [`get_settings`] but uses the
 /// session account rather than a path parameter, and never accepts
 /// mutations (parents must use `PUT /api/children/:id/settings`).
+///
+/// The route is gated by `require_child` middleware in
+/// [`crate::routes::router`], so we don't re-check the role here.
 pub async fn get_my_settings(
     State(state): State<AppState>,
     current: crate::middleware::auth::CurrentAccount,
 ) -> AppResult<Json<ChildSettings>> {
-    if !matches!(
-        current.account_type,
-        crate::models::account::AccountType::Child
-    ) {
-        return Err(AppError::Forbidden);
-    }
     ensure_settings_row(&state, current.id).await?;
     let row: ChildSettings = sqlx::query_as(
         "SELECT child_account_id, downloads_enabled, max_quality, playback_speed_locked, \

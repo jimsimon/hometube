@@ -19,6 +19,29 @@ use crate::error::{AppError, AppResult};
 use crate::services::cron::{expression_to_preset, preset_to_expression};
 use crate::state::AppState;
 
+/// Tuple shape of a row from `cron_jobs` (matched positionally by
+/// every `query_as` in this module). Defined as a type alias so the
+/// nested types don't trip clippy's `type_complexity` lint.
+///
+/// Columns in order:
+/// `id, name, description, job_type, schedule, schedule_preset,
+///  allowed_presets, enabled, last_run_at, last_run_status,
+///  last_run_message, next_run_at`.
+type CronJobRow = (
+    i64,
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+
 #[derive(Debug, Serialize)]
 pub struct CronJobView {
     pub id: i64,
@@ -62,20 +85,7 @@ pub struct RunsQuery {
 
 /// `GET /api/cron/jobs`.
 pub async fn list_jobs(State(state): State<AppState>) -> AppResult<Json<Vec<CronJobView>>> {
-    let rows: Vec<(
-        i64,
-        String,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        String,
-        i64,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    )> = sqlx::query_as(
+    let rows: Vec<CronJobRow> = sqlx::query_as(
         "SELECT id, name, description, job_type, schedule, schedule_preset, \
                 allowed_presets, enabled, last_run_at, last_run_status, \
                 last_run_message, next_run_at \
@@ -91,20 +101,7 @@ pub async fn get_job(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let row: Option<(
-        i64,
-        String,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        String,
-        i64,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    )> = sqlx::query_as(
+    let row: Option<CronJobRow> = sqlx::query_as(
         "SELECT id, name, description, job_type, schedule, schedule_preset, \
                 allowed_presets, enabled, last_run_at, last_run_status, \
                 last_run_message, next_run_at \
@@ -150,7 +147,7 @@ pub async fn update_job(
                 .await?
                 .ok_or(AppError::NotFound)?;
         let allowed: Vec<String> = serde_json::from_str(&allowed_json).unwrap_or_default();
-        if !allowed.iter().any(|p| *p == preset) {
+        if !allowed.contains(&preset) {
             return Err(AppError::BadRequest(format!(
                 "preset '{preset}' is not allowed for this job"
             )));
@@ -169,28 +166,20 @@ pub async fn update_job(
     // works: drop the in-memory schedule and rebuild from the DB. The
     // existing scheduler doesn't expose a per-job remove API on the
     // version we depend on, so the scheduler implementation handles
-    // duplicate registration gracefully.
+    // duplicate registration gracefully. `register_all` also refreshes
+    // every job's `next_run_at`; for the disabled-job branch we call
+    // `refresh_next_run_at_for_all` explicitly so the UI shows `null`.
     if let Some(sched) = state.scheduler.as_ref() {
         if let Err(err) = sched.register_all().await {
             tracing::warn!(%err, "re-registering cron jobs after update");
         }
+        if let Err(err) = sched.refresh_next_run_at_for_all().await {
+            tracing::warn!(%err, "refreshing next_run_at after update");
+        }
     }
 
     // Re-fetch the row.
-    let row: (
-        i64,
-        String,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        String,
-        i64,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    ) = sqlx::query_as(
+    let row: CronJobRow = sqlx::query_as(
         "SELECT id, name, description, job_type, schedule, schedule_preset, \
                 allowed_presets, enabled, last_run_at, last_run_status, \
                 last_run_message, next_run_at \
@@ -238,23 +227,7 @@ pub async fn list_runs(
     Ok(Json(runs))
 }
 
-#[allow(clippy::type_complexity)]
-fn into_view(
-    row: (
-        i64,
-        String,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        String,
-        i64,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    ),
-) -> CronJobView {
+fn into_view(row: CronJobRow) -> CronJobView {
     let (
         id,
         name,

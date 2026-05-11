@@ -200,6 +200,11 @@ async fn mark_subscription_synced(
 // Playlists
 // ---------------------------------------------------------------------------
 
+/// Tuple shape returned by the `child_playlists` SELECT in
+/// [`push_playlist_change`]. Columns in order: `sync_status,
+/// is_deleted, youtube_playlist_id, title, description, is_own`.
+type PlaylistSyncRow = (String, i64, Option<String>, String, Option<String>, i64);
+
 /// Reconcile a single `child_playlists` row with YouTube based on its
 /// current `sync_status`.
 pub async fn push_playlist_change(
@@ -207,7 +212,7 @@ pub async fn push_playlist_change(
     account_id: i64,
     playlist_id: i64,
 ) -> AppResult<()> {
-    let row: Option<(String, i64, Option<String>, String, Option<String>, i64)> = sqlx::query_as(
+    let row: Option<PlaylistSyncRow> = sqlx::query_as(
         "SELECT sync_status, is_deleted, youtube_playlist_id, title, description, is_own \
          FROM child_playlists WHERE id = ? AND child_account_id = ?",
     )
@@ -1276,27 +1281,16 @@ async fn update_sync_state(pool: &SqlitePool, account_id: i64, data_type: &str) 
 }
 
 async fn notify_sync_error(pool: &SqlitePool, child_id: i64, err: &str) -> AppResult<()> {
-    let parents: Vec<(i64,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
-            .fetch_all(pool)
-            .await?;
     let metadata = serde_json::json!({
         "child_account_id": child_id,
         "error": err,
-    })
-    .to_string();
-    for (parent_id,) in parents {
-        sqlx::query(
-            "INSERT INTO parent_notifications \
-                (parent_account_id, notification_type, title, message, metadata) \
-             VALUES (?, 'sync_error', ?, ?, ?)",
-        )
-        .bind(parent_id)
-        .bind("YouTube sync error")
-        .bind(format!("Couldn't sync child #{child_id}: {err}"))
-        .bind(&metadata)
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
+    });
+    crate::services::notifications::broadcast(
+        pool,
+        crate::services::notifications::TYPE_SYNC_ERROR,
+        "YouTube sync error",
+        &format!("Couldn't sync child #{child_id}: {err}"),
+        &metadata,
+    )
+    .await
 }

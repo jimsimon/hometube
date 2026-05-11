@@ -26,13 +26,15 @@
 //! library. This module also exposes [`preset_to_expression`] +
 //! [`expression_to_preset`] for the parent UI.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Utc;
+use cron::Schedule;
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::error::AppResult;
@@ -98,6 +100,39 @@ pub fn to_six_field(expr: &str) -> String {
         expr.to_string()
     } else {
         format!("0 {expr}")
+    }
+}
+
+/// Compute the next firing time of a cron expression as a unix
+/// timestamp. Accepts either the 5-field POSIX form or the 6-field form
+/// with leading seconds; we normalise to 6-field for the [`cron`]
+/// crate's parser.
+///
+/// Returns `None` if the expression doesn't parse or has no upcoming
+/// occurrence.
+pub fn compute_next_run_at(expression: &str) -> Option<i64> {
+    let six = to_six_field(expression);
+    let schedule = Schedule::from_str(&six).ok()?;
+    schedule.upcoming(Utc).next().map(|dt| dt.timestamp())
+}
+
+/// Persist the computed `next_run_at` for a job. Logs (and swallows)
+/// errors — the scheduler must keep running even if this update fails.
+async fn update_next_run_at(pool: &SqlitePool, job_id: i64, expression: &str) {
+    let next = compute_next_run_at(expression);
+    if next.is_none() {
+        debug!(
+            %expression,
+            "could not compute next_run_at for cron expression"
+        );
+    }
+    if let Err(err) = sqlx::query("UPDATE cron_jobs SET next_run_at = ? WHERE id = ?")
+        .bind(next)
+        .bind(job_id)
+        .execute(pool)
+        .await
+    {
+        warn!(%job_id, %err, "updating next_run_at");
     }
 }
 
@@ -181,12 +216,40 @@ impl Scheduler {
         })
         .map_err(|e| crate::error::AppError::Other(anyhow::anyhow!("building job: {e}")))?;
 
-        let sched = self.inner.lock().await;
-        sched
-            .add(job)
-            .await
-            .map_err(|e| crate::error::AppError::Other(anyhow::anyhow!("adding job: {e}")))?;
+        {
+            let sched = self.inner.lock().await;
+            sched
+                .add(job)
+                .await
+                .map_err(|e| crate::error::AppError::Other(anyhow::anyhow!("adding job: {e}")))?;
+        }
+        // Persist the next firing time so the parent UI's "Next run"
+        // column has something useful to display.
+        update_next_run_at(&self.pool, job_id, schedule).await;
         info!(%job_id, %name, "registered cron job");
+        Ok(())
+    }
+
+    /// Recompute and persist `next_run_at` for every enabled job. Used
+    /// after the API mutates a job's schedule (re-registration is
+    /// handled by [`Self::register_all`]).
+    pub async fn refresh_next_run_at_for_all(&self) -> AppResult<()> {
+        let rows: Vec<(i64, String, i64)> =
+            sqlx::query_as("SELECT id, schedule, enabled FROM cron_jobs")
+                .fetch_all(&self.pool)
+                .await?;
+        for (job_id, schedule, enabled) in rows {
+            if enabled == 0 {
+                // Still clear next_run_at so the UI doesn't show a stale
+                // value for a disabled job.
+                let _ = sqlx::query("UPDATE cron_jobs SET next_run_at = NULL WHERE id = ?")
+                    .bind(job_id)
+                    .execute(&self.pool)
+                    .await;
+                continue;
+            }
+            update_next_run_at(&self.pool, job_id, &schedule).await;
+        }
         Ok(())
     }
 
@@ -333,6 +396,10 @@ async fn finalize_run(
 // ---------------------------------------------------------------------------
 
 async fn run_ytdlp_update(pool: &SqlitePool, cfg: &Config) -> AppResult<String> {
+    // [`ytdlp::update_binary`] short-circuits on "already up to date"
+    // via [`ytdlp::check_for_update`], so it's cheap to call on every
+    // tick. We treat "no new version" + "actually downloaded" as the
+    // same successful outcome from the cron's perspective.
     let result = ytdlp::update_binary(pool, cfg).await;
     match result {
         Ok(version) => Ok(format!("yt-dlp updated to {version}")),
@@ -354,25 +421,15 @@ async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
 }
 
 async fn notify_parents_ytdlp_failure(pool: &SqlitePool, err: &str) -> AppResult<()> {
-    let parents: Vec<(i64,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
-            .fetch_all(pool)
-            .await?;
-    let metadata = serde_json::json!({ "error": err }).to_string();
-    for (parent_id,) in parents {
-        sqlx::query(
-            "INSERT INTO parent_notifications \
-                (parent_account_id, notification_type, title, message, metadata) \
-             VALUES (?, 'ytdlp_failure', ?, ?, ?)",
-        )
-        .bind(parent_id)
-        .bind("yt-dlp update failed")
-        .bind(err)
-        .bind(&metadata)
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
+    let metadata = serde_json::json!({ "error": err });
+    crate::services::notifications::broadcast(
+        pool,
+        crate::services::notifications::TYPE_YTDLP_FAILURE,
+        "yt-dlp update failed",
+        err,
+        &metadata,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

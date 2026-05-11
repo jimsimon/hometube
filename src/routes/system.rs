@@ -34,9 +34,12 @@ pub struct YtdlpStatus {
     pub binary_path: String,
 }
 
+/// Tuple shape returned by the `ytdlp_info` SELECT in [`get_ytdlp`].
+type YtdlpInfoRow = (Option<String>, Option<i64>, Option<i64>, String);
+
 /// `GET /api/system/ytdlp`.
 pub async fn get_ytdlp(State(state): State<AppState>) -> AppResult<Json<YtdlpStatus>> {
-    let row: Option<(Option<String>, Option<i64>, Option<i64>, String)> = sqlx::query_as(
+    let row: Option<YtdlpInfoRow> = sqlx::query_as(
         "SELECT current_version, last_checked_at, last_updated_at, binary_path \
          FROM ytdlp_info WHERE id = 1",
     )

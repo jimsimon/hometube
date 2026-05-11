@@ -308,20 +308,35 @@ pub async fn check_for_update(pool: &sqlx::SqlitePool) -> AppResult<Option<Strin
 }
 
 /// Download and install the latest yt-dlp binary. Returns the new
-/// version string on success. On any failure the existing binary is
-/// left untouched.
+/// version string on success (or the existing version if already up to
+/// date). On any failure the existing binary is left untouched.
 ///
 /// Implementation:
-///   1. Download to `<binary_path>.new`.
-///   2. `chmod +x`.
-///   3. Run `<binary_path>.new --version` to verify it actually works.
-///   4. Atomically rename to `<binary_path>` (replacing the old one).
+///   1. Use [`check_for_update`] to compare GitHub's latest tag with the
+///      `current_version` column. If they match, return early — no
+///      download necessary.
+///   2. Download to `<binary_path>.new`.
+///   3. `chmod +x`.
+///   4. Run `<binary_path>.new --version` to verify it actually works.
+///   5. Atomically rename to `<binary_path>` (replacing the old one).
 ///
-/// Best-effort: if step 3 fails the temp file is removed so we don't
+/// Best-effort: if step 4 fails the temp file is removed so we don't
 /// leave half-downloaded binaries lying around.
 pub async fn update_binary(pool: &sqlx::SqlitePool, cfg: &Config) -> AppResult<String> {
     use tokio::fs;
     use tokio::io::AsyncWriteExt;
+
+    // Skip the download entirely if we're already on the latest tag.
+    // [`check_for_update`] also touches `last_checked_at` on the
+    // `ytdlp_info` row.
+    if check_for_update(pool).await?.is_none() {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT current_version FROM ytdlp_info WHERE id = 1")
+                .fetch_optional(pool)
+                .await?
+                .flatten();
+        return Ok(current.unwrap_or_else(|| "unknown".to_string()));
+    }
 
     // Resolve target path. The configured path may be a bare command
     // name (e.g. `yt-dlp`) on first boot — in that case we install into

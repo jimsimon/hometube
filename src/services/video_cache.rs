@@ -196,7 +196,7 @@ pub async fn current_cache_size_label(pool: &SqlitePool) -> String {
 
 /// Persist the cache-size preset. Validates against [`CACHE_SIZE_PRESETS`].
 pub async fn set_cache_size(pool: &SqlitePool, label: &str) -> AppResult<()> {
-    if !CACHE_SIZE_PRESETS.iter().any(|p| *p == label) {
+    if !CACHE_SIZE_PRESETS.contains(&label) {
         return Err(AppError::Other(anyhow::anyhow!(
             "invalid cache size preset: {label}"
         )));

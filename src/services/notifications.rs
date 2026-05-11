@@ -1,18 +1,18 @@
 //! Parent-notification dispatcher.
 //!
-//! All notification inserts in the codebase should funnel through
-//! [`dispatch`] (or its higher-level helpers) so we have a single place
-//! to control:
+//! All notification inserts in the codebase funnel through [`dispatch`]
+//! (or one of the higher-level helpers built on top of it) so we have a
+//! single place to control:
 //!
 //! - validating the notification type against the `parent_notifications`
 //!   schema CHECK constraint;
 //! - persisting metadata as a JSON string;
-//! - applying simple in-process dedup for "one per child per day"
-//!   notifications without polluting handlers with that boilerplate.
+//! - applying simple "one per child per day" / "one per key per window"
+//!   dedup without polluting handlers with the boilerplate.
 //!
-//! The existing Phase 11 / Phase 12 / Phase 15 callers still write
-//! directly to the table; this module exposes equivalent helpers so
-//! they can migrate in a follow-up.
+//! The `TYPE_*` constants are the canonical strings stored in the
+//! `notification_type` column. Always pass one of them to [`dispatch`]
+//! (or to the typed wrappers) rather than hand-rolling a literal.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -29,7 +29,9 @@ pub const TYPE_TIME_LIMIT_APPROACHING: &str = "time_limit_approaching";
 pub const TYPE_TIME_LIMIT_REACHED: &str = "time_limit_reached";
 pub const TYPE_YTDLP_FAILURE: &str = "ytdlp_failure";
 pub const TYPE_SYNC_ERROR: &str = "sync_error";
+#[allow(dead_code)] // Reserved for the OAuth refresh flow (Phase 19+).
 pub const TYPE_TOKEN_EXPIRED: &str = "token_expired";
+#[allow(dead_code)] // Reserved for future search-term notifications.
 pub const TYPE_NEW_SEARCH_TERM: &str = "new_search_term";
 pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
 
@@ -37,9 +39,12 @@ pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
 /// [`dispatch_ytdlp_failure_deduped`].
 const YTDLP_FAILURE_DEDUP: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// One day in seconds — used by the per-day dedup helpers.
+const ONE_DAY_SECS: i64 = 24 * 60 * 60;
+
 /// Insert a single notification for one parent.
 ///
-/// `metadata` is serialised to JSON; pass `serde_json::Value::Null` (or
+/// `metadata` is serialised to JSON; pass `&serde_json::Value::Null` (or
 /// any small struct) when you have nothing structured to attach.
 pub async fn dispatch<T: Serialize>(
     pool: &SqlitePool,
@@ -81,6 +86,100 @@ pub async fn broadcast<T: Serialize>(
         dispatch(pool, parent_id, notification_type, title, message, metadata).await?;
     }
     Ok(())
+}
+
+/// Broadcast a notification to every parent **at most once per
+/// `notification_type` + dedup-key combination** within the past
+/// `window_seconds` seconds.
+///
+/// Dedup is implemented by pattern-matching `dedup_key` against the
+/// stored `metadata` JSON column (with a SQL `LIKE`). Callers are
+/// responsible for ensuring `dedup_key` is a substring that uniquely
+/// identifies the notification — the simplest pattern is a JSON
+/// fragment such as `"\"child_account_id\":42"`.
+///
+/// Set `window_seconds = ONE_DAY_SECS` for the common "one per day"
+/// case.
+pub async fn broadcast_once_within<T: Serialize>(
+    pool: &SqlitePool,
+    notification_type: &str,
+    dedup_key: &str,
+    window_seconds: i64,
+    title: &str,
+    message: &str,
+    metadata: &T,
+) -> AppResult<()> {
+    let parents: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
+            .fetch_all(pool)
+            .await?;
+    let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
+    let pattern = format!("%{dedup_key}%");
+    for (parent_id,) in parents {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM parent_notifications \
+             WHERE parent_account_id = ? \
+               AND notification_type = ? \
+               AND created_at >= unixepoch() - ? \
+               AND COALESCE(metadata, '') LIKE ?",
+        )
+        .bind(parent_id)
+        .bind(notification_type)
+        .bind(window_seconds)
+        .bind(&pattern)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        if exists > 0 {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO parent_notifications \
+                (parent_account_id, notification_type, title, message, metadata) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(parent_id)
+        .bind(notification_type)
+        .bind(title)
+        .bind(message)
+        .bind(&metadata_json)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Convenience: broadcast at most once per (`notification_type`,
+/// `dedup_key`) within a 24-hour window. The most common pattern.
+pub async fn broadcast_once_per_day<T: Serialize>(
+    pool: &SqlitePool,
+    notification_type: &str,
+    dedup_key: &str,
+    title: &str,
+    message: &str,
+    metadata: &T,
+) -> AppResult<()> {
+    broadcast_once_within(
+        pool,
+        notification_type,
+        dedup_key,
+        ONE_DAY_SECS,
+        title,
+        message,
+        metadata,
+    )
+    .await
+}
+
+/// Build a JSON-fragment dedup key like `"\"key\":value"` that can be
+/// matched against the `metadata` column with a `LIKE` substring search.
+///
+/// The output is guaranteed to round-trip safely against the JSON form
+/// `serde_json::to_string` produces — namely, `serde_json` never inserts
+/// whitespace around the colon for object keys.
+pub fn json_fragment_key(key: &str, value: &impl Serialize) -> String {
+    let value_json = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    format!("\"{key}\":{value_json}")
 }
 
 /// Dispatch a yt-dlp failure for a specific video, deduped against an

@@ -16,11 +16,12 @@ use axum::{
     extract::{Query, State},
     Json,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::models::account::AccountType;
 use crate::services::access::can_child_view;
 use crate::services::youtube::{SearchItem, SearchType, ThumbnailInfo, YoutubeClient};
 use crate::state::AppState;
@@ -67,12 +68,38 @@ pub struct ChildSearchQuery {
     /// One of `channel`, `playlist`, `video`, or `all` (default).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
-    /// Optional pagination token. Currently advisory — the child search
-    /// is bounded by the allowlist size, so we rarely need true paging.
+    /// Optional pagination cursor returned in a previous response's
+    /// `next_page_token` field. The token is an opaque base64url-encoded
+    /// JSON object of the form `{"offset": N}` and is applied uniformly
+    /// to every result bucket (channels / playlists / videos). When
+    /// absent we start at offset 0.
+    ///
+    /// We picked this scheme over a SQLite `rowid` cursor because the
+    /// child search aggregates rows from up to seven different tables —
+    /// `rowid` would have to be encoded per-bucket, which is more
+    /// complex than the integer offset that maps cleanly to SQL
+    /// `OFFSET`.
     #[serde(default)]
     pub page_token: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+/// Decoded form of `page_token`.
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PageCursor {
+    /// Number of rows already returned in earlier pages.
+    offset: i64,
+}
+
+fn decode_page_token(token: &str) -> Option<PageCursor> {
+    let decoded = URL_SAFE_NO_PAD.decode(token.as_bytes()).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+fn encode_page_token(cursor: &PageCursor) -> String {
+    let json = serde_json::to_vec(cursor).unwrap_or_else(|_| b"{}".to_vec());
+    URL_SAFE_NO_PAD.encode(json)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -132,9 +159,8 @@ pub async fn child_search(
     current: CurrentAccount,
     Query(q): Query<ChildSearchQuery>,
 ) -> AppResult<Json<ChildSearchResponse>> {
-    if !matches!(current.account_type, AccountType::Child) {
-        return Err(AppError::Forbidden);
-    }
+    // The route is gated by `require_child` middleware in
+    // [`crate::routes::router`], so we don't re-check the role here.
 
     let trimmed = q.q.trim();
     if trimmed.is_empty() {
@@ -143,6 +169,13 @@ pub async fn child_search(
     let kind_label = q.kind.clone().unwrap_or_else(|| "all".to_string());
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as i64;
     let pattern = format!("%{}%", trimmed.replace('%', "\\%").replace('_', "\\_"));
+
+    let cursor = q
+        .page_token
+        .as_deref()
+        .and_then(decode_page_token)
+        .unwrap_or_default();
+    let offset = cursor.offset.max(0);
 
     let mut results = ChildSearchResults {
         channels: Vec::new(),
@@ -155,13 +188,13 @@ pub async fn child_search(
     let want_videos = matches!(kind_label.as_str(), "video" | "all");
 
     if want_channels {
-        results.channels = search_channels(&state, current.id, &pattern, limit).await?;
+        results.channels = search_channels(&state, current.id, &pattern, limit, offset).await?;
     }
     if want_playlists {
-        results.playlists = search_playlists(&state, current.id, &pattern, limit).await?;
+        results.playlists = search_playlists(&state, current.id, &pattern, limit, offset).await?;
     }
     if want_videos {
-        results.videos = search_videos(&state, current.id, &pattern, limit).await?;
+        results.videos = search_videos(&state, current.id, &pattern, limit, offset).await?;
     }
 
     // Apply access control to every video hit so a blocked-then-
@@ -187,23 +220,37 @@ pub async fn child_search(
 
     let total = results.channels.len() + results.playlists.len() + results.videos.len();
 
-    // Always log, regardless of result count.
-    let _ = sqlx::query(
-        "INSERT INTO search_log (child_account_id, query, result_count) VALUES (?, ?, ?)",
-    )
-    .bind(current.id)
-    .bind(trimmed)
-    .bind(total as i64)
-    .execute(&state.db)
-    .await;
+    // Always log, regardless of result count. Only log the first page so
+    // a single search session doesn't produce duplicate `search_log`
+    // rows on every "load more" request.
+    if offset == 0 {
+        let _ = sqlx::query(
+            "INSERT INTO search_log (child_account_id, query, result_count) VALUES (?, ?, ?)",
+        )
+        .bind(current.id)
+        .bind(trimmed)
+        .bind(total as i64)
+        .execute(&state.db)
+        .await;
+    }
+
+    // Emit a `next_page_token` only if any individual bucket appears to
+    // be saturated at the per-bucket `limit`. A bucket with strictly
+    // fewer rows than `limit` has been fully drained.
+    let has_more = results.channels.len() as i64 >= limit
+        || results.playlists.len() as i64 >= limit
+        || results.videos.len() as i64 >= limit;
+    let next_page_token = has_more.then(|| {
+        encode_page_token(&PageCursor {
+            offset: offset + limit,
+        })
+    });
 
     Ok(Json(ChildSearchResponse {
         q: trimmed.to_string(),
         kind: kind_label,
         results,
-        // Pagination is currently best-effort — return None until the
-        // result set genuinely overflows a single page.
-        next_page_token: None,
+        next_page_token,
     }))
 }
 
@@ -212,6 +259,7 @@ async fn search_channels(
     child_id: i64,
     pattern: &str,
     limit: i64,
+    offset: i64,
 ) -> AppResult<Vec<ChildChannelHit>> {
     // Two sources of channel visibility:
     //   1. Direct allowlist
@@ -232,12 +280,13 @@ async fn search_channels(
          ) \
          WHERE channel_title LIKE ? ESCAPE '\\' \
          ORDER BY channel_title \
-         LIMIT ?",
+         LIMIT ? OFFSET ?",
     )
     .bind(child_id)
     .bind(child_id)
     .bind(pattern)
     .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
     Ok(rows
@@ -255,9 +304,16 @@ async fn search_playlists(
     child_id: i64,
     pattern: &str,
     limit: i64,
+    offset: i64,
 ) -> AppResult<Vec<ChildPlaylistHit>> {
     let mut out: Vec<ChildPlaylistHit> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+
+    // We fetch `limit + offset` from each bucket and apply the offset
+    // after dedup so the cursor is well-defined across all three
+    // sources. Each bucket is small (allowlist sizes, own playlists,
+    // family playlists) so the over-fetch is negligible.
+    let fetch_limit = limit + offset;
 
     // Allowlisted playlists.
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
@@ -268,7 +324,7 @@ async fn search_playlists(
     )
     .bind(child_id)
     .bind(pattern)
-    .bind(limit)
+    .bind(fetch_limit)
     .fetch_all(&state.db)
     .await?;
     for (id, title, thumb) in rows {
@@ -291,7 +347,7 @@ async fn search_playlists(
     )
     .bind(child_id)
     .bind(pattern)
-    .bind(limit)
+    .bind(fetch_limit)
     .fetch_all(&state.db)
     .await?;
     for (id, title) in own {
@@ -306,8 +362,9 @@ async fn search_playlists(
         }
     }
 
-    // Family playlists assigned to this child (Phase 18 — handled
-    // gracefully if the join returns nothing).
+    // Family playlists assigned to this child. Phase 18's schema makes
+    // family playlists visible only when there's a matching row in
+    // `family_playlist_members` for the child.
     let family: Vec<(i64, String)> = sqlx::query_as(
         "SELECT fp.id, fp.title \
          FROM family_playlists fp \
@@ -317,7 +374,7 @@ async fn search_playlists(
     )
     .bind(child_id)
     .bind(pattern)
-    .bind(limit)
+    .bind(fetch_limit)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -333,8 +390,11 @@ async fn search_playlists(
         }
     }
 
-    out.truncate(limit as usize);
-    Ok(out)
+    // Apply offset + limit *after* dedup so paging is consistent across
+    // bucket sources.
+    let start = (offset as usize).min(out.len());
+    let end = (start + limit as usize).min(out.len());
+    Ok(out[start..end].to_vec())
 }
 
 async fn search_videos(
@@ -342,6 +402,7 @@ async fn search_videos(
     child_id: i64,
     pattern: &str,
     limit: i64,
+    offset: i64,
 ) -> AppResult<Vec<ChildVideoHit>> {
     // We search local cached metadata first to keep the request fast.
     // Three local sources:
@@ -363,13 +424,14 @@ async fn search_videos(
          ) \
          WHERE video_title LIKE ? ESCAPE '\\' \
          ORDER BY video_title \
-         LIMIT ?",
+         LIMIT ? OFFSET ?",
     )
     .bind(child_id)
     .bind(child_id)
     .bind(child_id)
     .bind(pattern)
     .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();

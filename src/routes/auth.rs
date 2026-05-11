@@ -63,11 +63,16 @@ pub struct LoginQuery {
     #[serde(default)]
     pub role: Option<String>,
     /// Optional flow context. Currently understood values:
+    ///
     /// - `add_member` — add a new family member from `/parent/family`
     /// - `reauth` — re-authenticate an existing account
+    ///
     /// In both cases the actual state lives in the
     /// [`family::PENDING_MEMBER_COOKIE`] cookie; the query parameter is
     /// purely informational so the login URL is self-describing.
+    /// We accept it here so it doesn't get rejected as an unknown
+    /// query parameter, but the server never reads it.
+    #[allow(dead_code)]
     #[serde(default)]
     pub context: Option<String>,
 }
@@ -214,12 +219,14 @@ pub async fn callback(
             account::update_profile_and_tokens(
                 &state.db,
                 target.id,
-                &info.email,
-                &display_name,
-                avatar,
-                &access_token,
-                &refresh_token,
-                expires_at,
+                account::ProfileUpdate {
+                    email: &info.email,
+                    display_name: &display_name,
+                    avatar_url: avatar,
+                    access_token: &access_token,
+                    refresh_token: &refresh_token,
+                    token_expires_at: expires_at,
+                },
             )
             .await?;
             info!(account_id = target.id, "reauth completed");
@@ -261,12 +268,14 @@ pub async fn callback(
             account::update_profile_and_tokens(
                 &state.db,
                 existing.id,
-                &info.email,
-                &display_name,
-                avatar,
-                &access_token,
-                &refresh_token,
-                expires_at,
+                account::ProfileUpdate {
+                    email: &info.email,
+                    display_name: &display_name,
+                    avatar_url: avatar,
+                    access_token: &access_token,
+                    refresh_token: &refresh_token,
+                    token_expires_at: expires_at,
+                },
             )
             .await?;
             existing.id
@@ -406,6 +415,10 @@ pub async fn switch(
 /// Insert a soft "system_update" notification for every parent if more
 /// than five PIN failures have happened against `target_id` in the
 /// past five minutes.
+///
+/// Throttling: we only count rows where the JSON metadata contains both
+/// `"kind":"pin_attempt_failed"` and `"target_account_id":<target_id>`.
+/// Every 5th failure within the window emits a fresh notification.
 async fn record_failed_pin(state: &AppState, target_id: i64) -> AppResult<()> {
     let now = Utc::now().timestamp();
     let window_start = now - 5 * 60;
@@ -413,12 +426,7 @@ async fn record_failed_pin(state: &AppState, target_id: i64) -> AppResult<()> {
         "kind": "pin_attempt_failed",
         "target_account_id": target_id,
         "at": now,
-    })
-    .to_string();
-    let title = "Failed PIN attempt".to_string();
-    let message = format!(
-        "Someone tried to switch to a parent profile (id {target_id}) and entered the wrong PIN."
-    );
+    });
 
     // Count recent failures from `parent_notifications` metadata. The
     // metadata column is JSON — we use a substring filter so we don't
@@ -426,12 +434,13 @@ async fn record_failed_pin(state: &AppState, target_id: i64) -> AppResult<()> {
     // alert.
     let recent_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM parent_notifications \
-         WHERE notification_type = 'system_update' \
+         WHERE notification_type = ? \
            AND metadata LIKE '%pin_attempt_failed%' \
            AND metadata LIKE ? \
            AND created_at >= ?",
     )
-    .bind(format!("%\"target_account_id\":{}%", target_id))
+    .bind(crate::services::notifications::TYPE_SYSTEM_UPDATE)
+    .bind(format!("%\"target_account_id\":{target_id}%"))
     .bind(window_start)
     .fetch_one(&state.db)
     .await?;
@@ -441,24 +450,17 @@ async fn record_failed_pin(state: &AppState, target_id: i64) -> AppResult<()> {
         return Ok(());
     }
 
-    let parents: Vec<(i64,)> =
-        sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
-            .fetch_all(&state.db)
-            .await?;
-    for (pid,) in parents {
-        sqlx::query(
-            "INSERT INTO parent_notifications \
-                (parent_account_id, notification_type, title, message, metadata) \
-             VALUES (?, 'system_update', ?, ?, ?)",
-        )
-        .bind(pid)
-        .bind(&title)
-        .bind(&message)
-        .bind(&metadata)
-        .execute(&state.db)
-        .await?;
-    }
-    Ok(())
+    let message = format!(
+        "Someone tried to switch to a parent profile (id {target_id}) and entered the wrong PIN."
+    );
+    crate::services::notifications::broadcast(
+        &state.db,
+        crate::services::notifications::TYPE_SYSTEM_UPDATE,
+        "Failed PIN attempt",
+        &message,
+        &metadata,
+    )
+    .await
 }
 
 /// `PUT /api/auth/pin` — set/update the current account's PIN.

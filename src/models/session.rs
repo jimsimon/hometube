@@ -14,11 +14,18 @@ use crate::error::AppResult;
 use crate::models::account::{Account, AccountType};
 
 /// A row from the `sessions` table.
+///
+/// `account_id`, `expires_at`, and `created_at` are loaded for
+/// completeness even though the current handler set only reads `id` —
+/// admin tooling and future per-session listings will need them.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
+    #[allow(dead_code)]
     pub account_id: i64,
+    #[allow(dead_code)]
     pub expires_at: i64,
+    #[allow(dead_code)]
     pub created_at: i64,
 }
 

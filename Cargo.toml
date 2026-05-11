@@ -59,6 +59,8 @@ quick-xml = "0.37"
 # Utilities
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+tokio-util = { version = "0.7", features = ["io"] }
+cron = "0.12"
 
 [dev-dependencies]
 axum-test = "20"
