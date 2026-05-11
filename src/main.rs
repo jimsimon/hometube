@@ -13,19 +13,12 @@ use sqlx::SqlitePool;
 use tower_cookies::Key;
 use tracing::{info, warn};
 
-mod config;
-mod db;
-mod error;
-mod middleware;
-mod models;
-mod routes;
-mod services;
-mod state;
+use hometube::{config, db, state};
 
-use crate::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
-use crate::services::dash;
-use crate::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
-use crate::services::video_cache::{DEFAULT_TTL_HOURS, KEY_METADATA_CACHE_TTL_HOURS};
+use hometube::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
+use hometube::services::dash;
+use hometube::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
+use hometube::services::video_cache::{DEFAULT_TTL_HOURS, KEY_METADATA_CACHE_TTL_HOURS};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -78,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(sched) = scheduler {
         app_state = app_state.with_scheduler(sched);
     }
-    let app = routes::router(app_state);
+    let app = hometube::routes::router(app_state);
 
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
     info!(%addr, "listening");

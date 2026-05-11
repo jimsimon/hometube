@@ -282,4 +282,115 @@ mod tests {
         ];
         assert!(!verify_query(secret, &bad, &sig));
     }
+
+    /// A signature produced under one secret must not verify under a
+    /// different secret — guards against accidental key reuse / leaks
+    /// in production rotation.
+    #[test]
+    fn bad_signature_does_not_verify() {
+        let secret_a = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let secret_b = b"secret-bbbbbbbbbbbbbbbbbbbbbbbb";
+        let params: Vec<(&str, String)> = vec![
+            ("video_id", "abc123".into()),
+            ("format", "137".into()),
+            ("sq", "42".into()),
+        ];
+        let sig = sign_query(secret_a, &params);
+        assert!(
+            !verify_query(secret_b, &params, &sig),
+            "signature must not verify under a different key"
+        );
+
+        // A garbage signature also fails (constant-time compare).
+        assert!(!verify_query(secret_a, &params, "not-a-real-sig"));
+    }
+
+    /// An empty signature must not satisfy `verify_query`. The
+    /// constant-time compare returns false on length mismatch, so this
+    /// is the API-level surface of the missing-signature case.
+    #[test]
+    fn missing_signature_does_not_verify() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let params: Vec<(&str, String)> = vec![
+            ("video_id", "abc123".into()),
+            ("format", "137".into()),
+            ("sq", "42".into()),
+        ];
+        assert!(!verify_query(secret, &params, ""));
+    }
+
+    /// Parameter ordering must not affect the signature: callers
+    /// shouldn't have to sort their inputs.
+    #[test]
+    fn signature_is_order_independent() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let a: Vec<(&str, String)> = vec![
+            ("video_id", "v".into()),
+            ("format", "137".into()),
+            ("sq", "1".into()),
+        ];
+        let b: Vec<(&str, String)> = vec![
+            ("sq", "1".into()),
+            ("video_id", "v".into()),
+            ("format", "137".into()),
+        ];
+        assert_eq!(sign_query(secret, &a), sign_query(secret, &b));
+    }
+
+    /// `build_segment_proxy_url` produces a URL that contains the
+    /// signature it would itself verify against.
+    #[test]
+    fn build_segment_proxy_url_round_trip() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let url = build_segment_proxy_url(secret, "abc", "137", "42");
+        // Find sig=...
+        let (_, sig) = url.rsplit_once("sig=").expect("sig in url");
+        let params: Vec<(&str, String)> = vec![
+            ("video_id", "abc".into()),
+            ("format", "137".into()),
+            ("sq", "42".into()),
+        ];
+        assert!(verify_query(secret, &params, sig));
+    }
+
+    /// `rewrite_manifest` rewrites every `<SegmentURL media=…>` so the
+    /// resulting URL is a signed proxy URL. Garbage XML is preserved
+    /// verbatim outside the rewritten attributes.
+    #[test]
+    fn rewrite_manifest_swaps_segment_urls() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let manifest = r#"<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet>
+      <Representation id="137">
+        <SegmentList>
+          <SegmentURL media="https://rr1.googlevideo.com/x?sq=42&amp;y=1"/>
+          <SegmentURL media="https://rr1.googlevideo.com/x?sq=43"/>
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let rewritten = rewrite_manifest(secret, "video-1", manifest).expect("rewrite");
+        // No more raw googlevideo URLs.
+        assert!(!rewritten.contains("googlevideo.com"));
+        // Proxy URLs include the original sq value.
+        assert!(rewritten.contains("/api/proxy/segment"));
+        assert!(rewritten.contains("sq=42"));
+        assert!(rewritten.contains("sq=43"));
+        // Format-id is recovered from the parent <Representation>.
+        assert!(rewritten.contains("format=137"));
+    }
+
+    /// Verify that a manifest without any segment URLs round-trips
+    /// without modification.
+    #[test]
+    fn rewrite_manifest_passthrough() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let manifest = "<?xml version=\"1.0\"?><Empty/>";
+        let rewritten = rewrite_manifest(secret, "v", manifest).expect("rewrite");
+        // Should not contain any proxy URL since there are no segments.
+        assert!(!rewritten.contains("/api/proxy/segment"));
+    }
 }

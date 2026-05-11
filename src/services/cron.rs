@@ -535,3 +535,50 @@ pub async fn seed_ytdlp_info(pool: &SqlitePool, cfg: &Config) -> AppResult<()> {
 /// strings so they live for the program's lifetime.
 pub static CACHE_HIT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static CACHE_MISS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_round_trip_for_every_preset() {
+        for label in &[
+            "Every 15 minutes",
+            "Every 30 minutes",
+            "Every hour",
+            "Every 2 hours",
+            "Every 6 hours",
+            "Every 12 hours",
+            "Daily (3:00 AM)",
+            "Daily (4:00 AM)",
+            "Daily (midnight)",
+            "Weekly (Sunday 3 AM)",
+        ] {
+            let expr = preset_to_expression(label).unwrap_or_else(|| panic!("known preset {label}"));
+            assert_eq!(expression_to_preset(expr), *label);
+        }
+    }
+
+    #[test]
+    fn unknown_preset_round_trips_to_custom() {
+        assert!(preset_to_expression("nonsense").is_none());
+        assert_eq!(expression_to_preset("0 0 1 1 *"), "Custom");
+    }
+
+    #[test]
+    fn to_six_field_only_pads_when_needed() {
+        assert_eq!(to_six_field("0 * * * *"), "0 0 * * * *");
+        assert_eq!(to_six_field("0 0 * * * *"), "0 0 * * * *");
+    }
+
+    #[test]
+    fn compute_next_run_at_handles_known_expression() {
+        let next = compute_next_run_at("0 * * * *").expect("known cron");
+        assert!(next > chrono::Utc::now().timestamp());
+    }
+
+    #[test]
+    fn compute_next_run_at_returns_none_on_garbage() {
+        assert!(compute_next_run_at("not a cron").is_none());
+    }
+}

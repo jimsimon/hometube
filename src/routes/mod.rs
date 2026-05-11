@@ -57,6 +57,14 @@ pub mod usage;
 pub mod videos;
 
 /// Build the top-level Axum router.
+///
+/// Alias for [`router`] kept around so integration tests in `tests/`
+/// can call it under the documented name.
+pub fn build_router(state: AppState) -> Router {
+    router(state)
+}
+
+/// Build the top-level Axum router.
 pub fn router(state: AppState) -> Router {
     let static_dir = state.config.static_dir.clone();
 

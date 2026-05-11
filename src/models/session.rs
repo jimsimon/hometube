@@ -162,3 +162,24 @@ pub async fn account_type_for_session(
         .await?
         .map(|(_, a)| a.typed()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_session_id_is_alphanumeric_and_32_chars() {
+        for _ in 0..20 {
+            let id = new_session_id();
+            assert_eq!(id.len(), 32);
+            assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn new_session_id_is_unique() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_ne!(a, b);
+    }
+}

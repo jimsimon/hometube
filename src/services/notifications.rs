@@ -226,3 +226,20 @@ async fn should_dispatch_ytdlp_failure(video_id: &str) -> bool {
     guard.insert(video_id.to_string(), now);
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_fragment_key_emits_unspaced_pair() {
+        let key = json_fragment_key("child_account_id", &42);
+        assert_eq!(key, "\"child_account_id\":42");
+    }
+
+    #[test]
+    fn json_fragment_key_handles_strings() {
+        let key = json_fragment_key("video_id", &"abc");
+        assert_eq!(key, "\"video_id\":\"abc\"");
+    }
+}

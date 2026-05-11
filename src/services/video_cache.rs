@@ -413,3 +413,23 @@ pub async fn clear_all(pool: &SqlitePool) -> AppResult<()> {
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_round_trip_to_bytes() {
+        assert_eq!(cache_size_preset_to_bytes("5 GB"), 5 * 1024 * 1024 * 1024);
+        assert_eq!(cache_size_preset_to_bytes("10 GB"), 10 * 1024 * 1024 * 1024);
+        assert_eq!(cache_size_preset_to_bytes("Unlimited"), 0);
+        assert_eq!(cache_size_preset_to_bytes("nonsense"), 0);
+    }
+
+    #[test]
+    fn presets_list_is_sorted_in_presentation_order() {
+        // Sanity check — small set, deterministic order.
+        assert_eq!(CACHE_SIZE_PRESETS.first(), Some(&"5 GB"));
+        assert_eq!(CACHE_SIZE_PRESETS.last(), Some(&"Unlimited"));
+    }
+}

@@ -348,3 +348,70 @@ pub async fn set_pin_hash(pool: &SqlitePool, id: i64, pin_hash: &str) -> AppResu
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_type_parse_round_trips() {
+        assert_eq!(AccountType::parse("parent"), Some(AccountType::Parent));
+        assert_eq!(AccountType::parse("child"), Some(AccountType::Child));
+        assert_eq!(AccountType::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn account_type_as_str_round_trips() {
+        assert_eq!(AccountType::Parent.as_str(), "parent");
+        assert_eq!(AccountType::Child.as_str(), "child");
+        for t in [AccountType::Parent, AccountType::Child] {
+            assert_eq!(AccountType::parse(t.as_str()), Some(t));
+        }
+    }
+
+    #[test]
+    fn typed_falls_back_to_child_for_garbage() {
+        let acct = Account {
+            id: 1,
+            google_id: "g".into(),
+            email: "e".into(),
+            display_name: "n".into(),
+            avatar_url: None,
+            account_type: "garbage".into(),
+            pin_hash: None,
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            token_expires_at: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert_eq!(acct.typed(), AccountType::Child);
+    }
+
+    #[test]
+    fn account_summary_strips_tokens() {
+        let acct = Account {
+            id: 7,
+            google_id: "g".into(),
+            email: "e@e".into(),
+            display_name: "Display".into(),
+            avatar_url: Some("http://avatar".into()),
+            account_type: "parent".into(),
+            pin_hash: Some("hash".into()),
+            access_token: "secret-access".into(),
+            refresh_token: "secret-refresh".into(),
+            token_expires_at: 0,
+            created_at: 100,
+            updated_at: 200,
+        };
+        let summary = AccountSummary::from(&acct);
+        assert_eq!(summary.id, 7);
+        assert_eq!(summary.email, "e@e");
+        assert_eq!(summary.display_name, "Display");
+        assert!(summary.has_pin);
+        // Re-serialise and confirm tokens never leak.
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("secret-access"));
+        assert!(!json.contains("secret-refresh"));
+    }
+}
