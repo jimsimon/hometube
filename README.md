@@ -54,9 +54,16 @@ feature-complete for self-hosting, and the remaining work is hardening
   server's egress predictable
 
 The implementation plan (architecture diagrams, design decisions, and
-phase-by-phase TODOs) is tracked in our internal repo under
-`.kilo/plans/`. See the `Architecture` section of the source code's
-inline doc comments for a tour of the major modules.
+phase-by-phase TODOs) lives under [`plans/`](plans/):
+
+- [`plans/1778451852595-cosmic-panda.md`](plans/1778451852595-cosmic-panda.md)
+  — the original 20-phase implementation plan.
+- [`plans/1778483706981-followup-gaps.md`](plans/1778483706981-followup-gaps.md)
+  — follow-up tasks (T-1 through T-11) that close partial-implementation
+  gaps and divergences from the original plan.
+
+See the `Architecture` section of the source code's inline doc comments
+for a tour of the major modules.
 
 ## Development
 

@@ -57,3 +57,8 @@ AGENTS.md
 
 # ---------- Husky / lint config ----------
 .husky/
+
+# ---------- Docs not needed in the runtime image ----------
+plans/
+docs/
+README.md
