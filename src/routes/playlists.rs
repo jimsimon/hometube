@@ -39,6 +39,12 @@ pub struct PlaylistSummary {
     pub video_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `true` when the playlist is reachable through the child's
+    /// allowlist. Always `true` for `is_own=1` (child-created)
+    /// playlists; for `source='youtube'` library imports the flag
+    /// is computed by joining against `allowlisted_playlists` so
+    /// inbound playlists the parent never allowlisted stay hidden.
+    pub visible: bool,
 }
 
 /// Tuple shape produced by the SELECTs that hydrate
@@ -47,7 +53,7 @@ pub struct PlaylistSummary {
 ///
 /// Columns in order:
 /// `id, youtube_playlist_id, title, description, is_own, source,
-///  sync_status, video_count, created_at, updated_at`.
+///  sync_status, video_count, created_at, updated_at, visible`.
 type PlaylistSummaryRow = (
     i64,
     Option<String>,
@@ -59,9 +65,19 @@ type PlaylistSummaryRow = (
     i64,
     i64,
     i64,
+    i64,
 );
 
 /// `GET /api/playlists`.
+///
+/// Returns the child's playlists with a `visible` flag computed at
+/// query time. `is_own=1` rows are always visible (the child created
+/// them). `is_own=0, source='youtube'` rows — i.e. inbound library
+/// imports — are only marked visible when the underlying
+/// `youtube_playlist_id` is in `allowlisted_playlists` for this
+/// child. Hidden rows are still returned so the parent UI can
+/// reason about them, but the child UI is expected to filter them
+/// out.
 pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -71,10 +87,20 @@ pub async fn list(
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
                     p.source, p.sync_status, \
                     (SELECT COUNT(*) FROM child_playlist_videos v WHERE v.playlist_id = p.id) AS video_count, \
-                    p.created_at, p.updated_at \
+                    p.created_at, p.updated_at, \
+                    CASE \
+                        WHEN p.is_own = 1 THEN 1 \
+                        WHEN p.youtube_playlist_id IS NULL THEN 1 \
+                        WHEN EXISTS ( \
+                            SELECT 1 FROM allowlisted_playlists al \
+                            WHERE al.child_account_id = p.child_account_id \
+                              AND al.playlist_id = p.youtube_playlist_id \
+                        ) THEN 1 \
+                        ELSE 0 \
+                    END AS visible \
              FROM child_playlists p \
              WHERE p.child_account_id = ? AND p.is_deleted = 0 \
-             ORDER BY p.updated_at DESC",
+             ORDER BY visible DESC, p.updated_at DESC",
         )
         .bind(current.id)
         .fetch_all(&state.db)
@@ -93,6 +119,7 @@ pub async fn list(
                 video_count,
                 created_at,
                 updated_at,
+                visible,
             )| {
                 PlaylistSummary {
                     id,
@@ -105,6 +132,7 @@ pub async fn list(
                     video_count,
                     created_at,
                     updated_at,
+                    visible: visible != 0,
                 }
             },
         )
@@ -175,6 +203,14 @@ pub struct PlaylistDetail {
 }
 
 /// `GET /api/playlists/:id`.
+///
+/// For child-created playlists (`is_own=1`) every video is returned
+/// as-is. For YouTube-sourced library playlists (`is_own=0,
+/// source='youtube'`) the items are filtered through
+/// [`crate::services::access::can_child_view`] so videos the parent
+/// hasn't allowlisted (e.g., a deleted-from-allowlist channel that
+/// still has tracks in the inbound playlist mirror) are dropped from
+/// the response.
 pub async fn detail(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -191,6 +227,36 @@ pub async fn detail(
     .bind(playlist_id)
     .fetch_all(&state.db)
     .await?;
+    // Filter inbound YouTube-sourced playlists through access control.
+    let videos = if !summary.is_own && summary.source == "youtube" {
+        let yt_id = summary.youtube_playlist_id.clone().unwrap_or_default();
+        let mut out = Vec::with_capacity(videos.len());
+        for v in videos {
+            // We don't have channel_id on the row; pass the playlist's
+            // youtube_playlist_id as one of the playlist-IDs the video
+            // appears in so the allowlist-by-playlist branch fires.
+            let pl_ids = if yt_id.is_empty() {
+                vec![]
+            } else {
+                vec![yt_id.clone()]
+            };
+            if crate::services::access::can_child_view(
+                &state.db,
+                current.id,
+                &v.video_id,
+                None,
+                &pl_ids,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                out.push(v);
+            }
+        }
+        out
+    } else {
+        videos
+    };
     Ok(Json(PlaylistDetail { summary, videos }))
 }
 
@@ -594,7 +660,17 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
                     p.source, p.sync_status, \
                     (SELECT COUNT(*) FROM child_playlist_videos v WHERE v.playlist_id = p.id) AS video_count, \
-                    p.created_at, p.updated_at \
+                    p.created_at, p.updated_at, \
+                    CASE \
+                        WHEN p.is_own = 1 THEN 1 \
+                        WHEN p.youtube_playlist_id IS NULL THEN 1 \
+                        WHEN EXISTS ( \
+                            SELECT 1 FROM allowlisted_playlists al \
+                            WHERE al.child_account_id = p.child_account_id \
+                              AND al.playlist_id = p.youtube_playlist_id \
+                        ) THEN 1 \
+                        ELSE 0 \
+                    END AS visible \
              FROM child_playlists p WHERE p.id = ?",
         )
         .bind(playlist_id)
@@ -611,6 +687,7 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         video_count,
         created_at,
         updated_at,
+        visible,
     ) = row;
     Ok(PlaylistSummary {
         id,
@@ -623,6 +700,7 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         video_count,
         created_at,
         updated_at,
+        visible: visible != 0,
     })
 }
 

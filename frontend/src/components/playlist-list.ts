@@ -104,8 +104,13 @@ export class PlaylistList extends LitElement {
   override render() {
     if (this.loading) return html`<p class="empty">Loading…</p>`;
     if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
-    const own = this.playlists.filter((p) => p.is_own);
-    const library = this.playlists.filter((p) => !p.is_own);
+    // Filter out hidden inbound YouTube playlists (those whose
+    // youtube_playlist_id isn't in this child's allowlist). The server
+    // includes them in the response with `visible: false` so admin
+    // tooling can see the full set; the child UI hides them entirely.
+    const allowed = this.playlists.filter((p) => p.visible);
+    const own = allowed.filter((p) => p.is_own);
+    const library = allowed.filter((p) => !p.is_own);
     return html`
       <div class="toolbar">
         <button type="button" @click=${this.openCreate}>New playlist</button>

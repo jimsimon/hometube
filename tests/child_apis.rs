@@ -135,6 +135,62 @@ async fn subscriptions_list_returns_seeded_rows() {
 }
 
 #[tokio::test]
+async fn subscriptions_list_marks_inbound_youtube_invisible_until_allowlisted() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Inbound youtube subscription not yet allowlisted.
+    sqlx::query(
+        "INSERT INTO child_subscriptions \
+            (child_account_id, channel_id, channel_title, source) \
+         VALUES (?, 'yt-hidden', 'Hidden Channel', 'youtube')",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // App-sourced subscription that we'll allowlist.
+    sqlx::query(
+        "INSERT INTO child_subscriptions \
+            (child_account_id, channel_id, channel_title, source) \
+         VALUES (?, 'app-allowed', 'Good Channel', 'app')",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO allowlisted_channels \
+            (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'app-allowed', 'Good Channel', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/subscriptions").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let arr = body.as_array().unwrap();
+
+    let hidden = arr
+        .iter()
+        .find(|s| s["channel_id"] == "yt-hidden")
+        .expect("hidden row still returned with visible=false");
+    assert_eq!(hidden["visible"], false);
+
+    let allowed = arr
+        .iter()
+        .find(|s| s["channel_id"] == "app-allowed")
+        .expect("allowlisted row present");
+    assert_eq!(allowed["visible"], true);
+}
+
+#[tokio::test]
 async fn subscriptions_unsubscribe_marks_pending_delete() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
@@ -213,6 +269,60 @@ async fn likes_list_returns_seeded_rows() {
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body[0]["video_id"], "vid-1");
+}
+
+#[tokio::test]
+async fn likes_list_marks_inbound_youtube_likes_invisible_until_allowlisted() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Inbound YouTube-sourced like — not allowlisted.
+    sqlx::query(
+        "INSERT INTO video_likes (child_account_id, video_id, video_title, source) \
+         VALUES (?, 'yt-hidden', 'Hidden', 'youtube')",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // App-sourced like that we'll also allowlist as a video.
+    sqlx::query(
+        "INSERT INTO video_likes (child_account_id, video_id, video_title, source) \
+         VALUES (?, 'app-allowed', 'Allowed', 'app')",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO allowlisted_videos \
+            (child_account_id, video_id, video_title, added_by) \
+         VALUES (?, 'app-allowed', 'Allowed', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/likes").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let arr = body.as_array().unwrap();
+
+    let hidden = arr
+        .iter()
+        .find(|l| l["video_id"] == "yt-hidden")
+        .expect("inbound row still returned for parent visibility");
+    assert_eq!(hidden["visible"], false);
+
+    let allowed = arr
+        .iter()
+        .find(|l| l["video_id"] == "app-allowed")
+        .expect("allowlisted row present");
+    assert_eq!(allowed["visible"], true);
 }
 
 #[tokio::test]

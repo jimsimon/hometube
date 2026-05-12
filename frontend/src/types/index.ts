@@ -265,6 +265,14 @@ export interface PlaylistSummary {
   video_count: number;
   created_at: number;
   updated_at: number;
+  /**
+   * `true` when this playlist is reachable through the child's
+   * allowlist. Always true for `is_own=true`. For inbound
+   * `source='youtube'` library imports the flag is computed by
+   * joining against `allowlisted_playlists` server-side; child UIs
+   * should hide rows where `visible === false`.
+   */
+  visible: boolean;
 }
 
 export interface PlaylistVideo {
@@ -289,6 +297,14 @@ export interface LikeRow {
   source: "app" | "youtube";
   sync_status: SyncStatus;
   liked_at: number;
+  /**
+   * `true` when the liked video is reachable through the child's
+   * allowlist (direct video allowlist; `video_likes` doesn't carry
+   * channel/playlist metadata). Inbound YouTube-sourced likes that
+   * the parent hasn't allowlisted come back with `visible: false` so
+   * the child UI can drop them.
+   */
+  visible: boolean;
 }
 
 export interface UpNextItem {

@@ -27,23 +27,75 @@ pub struct LikeRow {
     pub source: String,
     pub sync_status: String,
     pub liked_at: i64,
+    /// `true` when the liked video is reachable through the child's
+    /// allowlist (direct video allowlist; the simpler join because
+    /// `video_likes` has no channel/playlist metadata column). Likes
+    /// pulled inbound from YouTube that aren't yet allowlisted will
+    /// have `visible: false` so the child UI can drop them.
+    pub visible: bool,
 }
 
+type LikeRowTuple = (
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    i64,
+    i64,
+);
+
 /// `GET /api/likes`.
+///
+/// Returns liked videos with a `visible` flag derived from a JOIN
+/// against `allowlisted_videos`. Inbound YouTube-sourced likes that
+/// the parent hasn't allowlisted are returned with `visible: false`
+/// so the child UI can filter them out — they are not leaked to the
+/// child even though the row stays in the local DB to support the
+/// outbound sync.
 pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<LikeRow>>> {
-    let rows: Vec<LikeRow> = sqlx::query_as(
-        "SELECT id, video_id, video_title, video_thumbnail_url, source, sync_status, liked_at \
-         FROM video_likes \
-         WHERE child_account_id = ? AND is_deleted = 0 \
-         ORDER BY liked_at DESC",
+    let rows: Vec<LikeRowTuple> = sqlx::query_as(
+        "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
+                l.source, l.sync_status, l.liked_at, \
+                CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
+         FROM video_likes l \
+         LEFT JOIN allowlisted_videos a \
+           ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
+         WHERE l.child_account_id = ? AND l.is_deleted = 0 \
+         ORDER BY visible DESC, l.liked_at DESC",
     )
     .bind(current.id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows))
+    let out = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                video_id,
+                video_title,
+                video_thumbnail_url,
+                source,
+                sync_status,
+                liked_at,
+                visible,
+            )| LikeRow {
+                id,
+                video_id,
+                video_title,
+                video_thumbnail_url,
+                source,
+                sync_status,
+                liked_at,
+                visible: visible != 0,
+            },
+        )
+        .collect();
+    Ok(Json(out))
 }
 
 /// `POST /api/likes/:videoId`.
