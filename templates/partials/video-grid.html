@@ -1,0 +1,35 @@
+{# Reusable SSR video grid.
+
+   Render a `Vec<VideoCardData>` (`crate::routes::pages::VideoCardData`)
+   as a responsive `.card-grid` of `<a>` cards. Each card links to the
+   child's video page so a no-JS browser still has a working
+   navigation surface.
+
+   Callers must expose the iteration variable as `videos`. Example:
+
+     {% include "partials/video-grid.html" %}
+
+   …with `videos: Vec<VideoCardData>` in the parent template's context.
+#}
+{% if !videos.is_empty() %}
+<div class="card-grid" role="list" aria-label="Videos">
+  {% for v in videos %}
+  <a class="video-card" role="listitem" href="/child/video/{{ v.video_id }}">
+    {% if let Some(thumb) = v.thumbnail_url %}
+    <img class="video-card__thumb" src="{{ thumb }}" alt="" loading="lazy" />
+    {% else %}
+    <div class="video-card__thumb video-card__thumb--placeholder" aria-hidden="true"></div>
+    {% endif %}
+    <div class="video-card__meta">
+      <strong class="video-card__title">{{ v.title }}</strong>
+      {% if let Some(channel) = v.channel_title %}
+      <span class="video-card__channel">{{ channel }}</span>
+      {% endif %}
+      {% if let Some(duration) = v.duration_label %}
+      <span class="video-card__duration">{{ duration }}</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}

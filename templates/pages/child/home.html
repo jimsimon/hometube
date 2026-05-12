@@ -15,6 +15,11 @@
     feed="new-videos"
     heading="New videos"
   ></hometube-video-row>
+
+  <noscript>
+    <h2>Your videos</h2>
+    {% include "partials/video-grid.html" %}
+  </noscript>
 </section>
 
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>

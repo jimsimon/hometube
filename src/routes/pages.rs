@@ -17,6 +17,33 @@ use crate::services::setup;
 use crate::services::video_cache::VideoCache;
 use crate::state::AppState;
 
+/// Lightweight video-card payload fed to the
+/// [`partials/video-grid.html`] askama include. Used by any page
+/// handler that wants to SSR a grid of videos without depending on
+/// JavaScript hydration (the default child pages still use the
+/// `<hometube-video-card>` Lit component for dynamic feeds).
+#[derive(Debug, Clone)]
+pub struct VideoCardData {
+    pub video_id: String,
+    pub title: String,
+    pub thumbnail_url: Option<String>,
+    pub channel_title: Option<String>,
+    /// Pre-formatted duration string (e.g. `"4:32"`); `None` when the
+    /// duration isn't known. Computed in the handler so the template
+    /// can stay free of format-specific logic.
+    pub duration_label: Option<String>,
+}
+
+impl VideoCardData {
+    /// Helper: format a `seconds` count as `"M:SS"` for the
+    /// `duration_label` field.
+    pub fn format_duration(seconds: i64) -> String {
+        let mins = seconds / 60;
+        let secs = seconds % 60;
+        format!("{mins}:{secs:02}")
+    }
+}
+
 #[derive(Template)]
 #[template(path = "pages/setup-wizard.html")]
 struct SetupWizardTemplate {
@@ -443,6 +470,11 @@ struct ChildVideoUnavailableTemplate {
     /// Optional friendly message — set when extraction errored vs the
     /// generic "not allowlisted" path.
     message: Option<String>,
+    /// "Try one of these" suggestions surfaced via the SSR
+    /// `partials/video-grid.html` include. Empty when no
+    /// allowlisted videos are available — the partial's own
+    /// `if !videos.is_empty()` guard handles that case.
+    videos: Vec<VideoCardData>,
 }
 
 /// Render the friendly "this video is unavailable" page. Exposed so
@@ -457,6 +489,25 @@ pub fn render_video_unavailable(
         display_name,
         video_id,
         message,
+        videos: Vec::new(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// Variant of [`render_video_unavailable`] that includes a list of
+/// suggested videos rendered via the SSR
+/// [`partials/video-grid.html`] include.
+pub fn render_video_unavailable_with_suggestions(
+    display_name: String,
+    video_id: String,
+    message: Option<String>,
+    videos: Vec<VideoCardData>,
+) -> AppResult<Response> {
+    let tpl = ChildVideoUnavailableTemplate {
+        display_name,
+        video_id,
+        message,
+        videos,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -465,15 +516,27 @@ pub fn render_video_unavailable(
 #[template(path = "pages/child/home.html")]
 struct ChildHomeTemplate {
     display_name: String,
+    /// SSR fallback grid for browsers without JavaScript. Rendered
+    /// inside a `<noscript>` block via the
+    /// [`partials/video-grid.html`] include so the home page is
+    /// still useful when the Lit feed components can't hydrate.
+    /// Populated with up to 12 of the child's allowlisted videos
+    /// when [`State`] is available; safe to leave empty when not.
+    videos: Vec<VideoCardData>,
 }
 
 /// `GET /child/home` — kid-friendly browse page with continue-watching +
 /// new-videos rows.
-pub async fn child_home(current: Option<CurrentAccount>) -> AppResult<Response> {
+pub async fn child_home(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Child) => {
+            let videos = fetch_allowlisted_video_cards(&state, c.id, 12).await;
             let tpl = ChildHomeTemplate {
                 display_name: c.display_name,
+                videos,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -481,6 +544,43 @@ pub async fn child_home(current: Option<CurrentAccount>) -> AppResult<Response> 
             Ok(Redirect::to("/parent/home").into_response())
         }
         _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+/// Pull up to `limit` allowlisted videos for `child_id` and shape them
+/// into the grid-friendly `VideoCardData` form. Best-effort: any
+/// database error returns an empty Vec so the page still renders.
+async fn fetch_allowlisted_video_cards(
+    state: &AppState,
+    child_id: i64,
+    limit: i64,
+) -> Vec<VideoCardData> {
+    type Row = (String, String, Option<String>, Option<String>);
+    let rows: Result<Vec<Row>, _> = sqlx::query_as(
+        "SELECT video_id, video_title, video_thumbnail_url, channel_title \
+         FROM allowlisted_videos \
+         WHERE child_account_id = ? \
+         ORDER BY created_at DESC \
+         LIMIT ?",
+    )
+    .bind(child_id)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rs) => rs
+            .into_iter()
+            .map(
+                |(video_id, title, thumbnail_url, channel_title)| VideoCardData {
+                    video_id,
+                    title,
+                    thumbnail_url,
+                    channel_title,
+                    duration_label: None,
+                },
+            )
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 

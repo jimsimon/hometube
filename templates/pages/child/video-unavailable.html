@@ -21,6 +21,13 @@
       <a href="/child/home" class="back-link">← Back to home</a>
     </p>
   </div>
+
+  {% if !videos.is_empty() %}
+  <div class="suggestions">
+    <h2>Try one of these</h2>
+    {% include "partials/video-grid.html" %}
+  </div>
+  {% endif %}
 </section>
 {% endblock %}
 

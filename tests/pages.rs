@@ -243,6 +243,63 @@ async fn login_page_passes_role_through_to_oauth_url() {
 }
 
 #[tokio::test]
+async fn video_grid_partial_renders_seeded_videos_on_child_home() {
+    // The /child/home handler populates `videos: Vec<VideoCardData>`
+    // from `allowlisted_videos`; the home template includes the
+    // `partials/video-grid.html` partial inside a <noscript> block.
+    // We seed two allowlisted videos and assert both their card
+    // anchors and thumbnail <img> tags appear in the response body.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    sqlx::query(
+        "INSERT INTO allowlisted_videos \
+            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
+         VALUES (?, 'vid-aa', 'Funny Cats', 'https://img.example/cats.jpg', 'Cats Inc.', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO allowlisted_videos \
+            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
+         VALUES (?, 'vid-bb', 'Big Trains', NULL, NULL, ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/child/home").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body = res.text();
+
+    // Both cards must appear, with the right hrefs.
+    assert!(
+        body.contains(r#"href="/child/video/vid-aa""#),
+        "first card href should appear, got: {body}"
+    );
+    assert!(
+        body.contains(r#"href="/child/video/vid-bb""#),
+        "second card href should appear, got: {body}"
+    );
+    // The thumbnail of the first video should be reflected.
+    assert!(
+        body.contains(r#"src="https://img.example/cats.jpg""#),
+        "first card's thumbnail src should appear in the partial output"
+    );
+    // Card grid wrapper must be present (the partial's outer div).
+    assert!(
+        body.contains(r#"class="card-grid""#),
+        "partial should render its .card-grid wrapper"
+    );
+}
+
+#[tokio::test]
 async fn login_is_reachable_before_setup_completes() {
     // Even with setup_complete=false the /login page should render
     // (the setup-redirect middleware allow-lists it). This guarantees
