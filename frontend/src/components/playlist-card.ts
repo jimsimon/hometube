@@ -2,14 +2,11 @@
  * <hometube-playlist-card>
  *
  * Tile representing a single playlist on the playlists list page. Shows
- * the title, video count, ownership badge ("yours" vs "library"), and
- * a sync-status indicator when out of sync with YouTube.
+ * the title, video count, and ownership badge ("yours" vs "library").
  */
 
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
-
-import type { SyncStatus } from "../types/index.js";
 
 @customElement("hometube-playlist-card")
 export class PlaylistCard extends LitElement {
@@ -27,9 +24,6 @@ export class PlaylistCard extends LitElement {
 
   @property({ type: Boolean, attribute: "is-own" })
   isOwn = true;
-
-  @property({ type: String, attribute: "sync-status" })
-  syncStatus: SyncStatus = "synced";
 
   static styles = css`
     :host {
@@ -88,24 +82,11 @@ export class PlaylistCard extends LitElement {
       background: var(--wa-color-brand-quiet, rgba(37, 99, 235, 0.15));
       color: var(--wa-color-brand-on-quiet);
     }
-    .badge.sync.pending {
-      background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
-      color: var(--wa-color-warning-on-quiet, #92400e);
-    }
-    .badge.sync.error {
-      background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
-      color: var(--wa-color-danger-on-quiet, #991b1b);
-    }
+
   `;
 
   override render() {
     const href = `/child/playlist/${this.playlistId}`;
-    const isPending =
-      this.syncStatus === "pending_create" ||
-      this.syncStatus === "pending_update" ||
-      this.syncStatus === "pending_delete" ||
-      this.syncStatus === "pending_push";
-    const isError = this.syncStatus === "error";
     return html`
       <a href=${href} aria-label=${this.title}>
         <div class="thumb">
@@ -114,13 +95,9 @@ export class PlaylistCard extends LitElement {
         <div class="title">${this.title}</div>
         <div class="row">
           <span class="meta">${this.videoCount} videos</span>
-          <span class="row" style="gap:0.25rem">
-            <span class="badge ${this.isOwn ? "own" : ""}"
-              >${this.isOwn ? "Yours" : "Library"}</span
-            >
-            ${isPending ? html`<span class="badge sync pending">Syncing…</span>` : null}
-            ${isError ? html`<span class="badge sync error">Sync error</span>` : null}
-          </span>
+          <span class="badge ${this.isOwn ? "own" : ""}"
+            >${this.isOwn ? "Yours" : "Library"}</span
+          >
         </div>
       </a>
     `;

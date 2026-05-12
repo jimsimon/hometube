@@ -2,9 +2,9 @@
  * <hometube-playlist-detail playlist-id="...">
  *
  * Detail view for /child/playlist/:id. Loads /api/playlists/:id, shows
- * the title + description + sync status, and renders the videos as a
- * reorderable list (HTML5 drag-and-drop) when the playlist is owned by
- * the child. Library playlists are read-only.
+ * the title + description, and renders the videos as a reorderable list
+ * (HTML5 drag-and-drop) when the playlist is owned by the child.
+ * Library playlists are read-only.
  *
  * Reorder UX: each <li> is `draggable=true`. On `drop`, the local
  * order is updated optimistically and the new order is PUT to
@@ -67,14 +67,7 @@ export class PlaylistDetailEl extends LitElement {
       color: var(--wa-color-text-quiet);
       margin-right: 0.25rem;
     }
-    .badge.pending {
-      background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
-      color: var(--wa-color-warning-on-quiet, #92400e);
-    }
-    .badge.error {
-      background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
-      color: var(--wa-color-danger-on-quiet, #991b1b);
-    }
+
     ol {
       list-style: none;
       padding: 0;
@@ -229,9 +222,6 @@ export class PlaylistDetailEl extends LitElement {
       return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     if (!this.detail) return null;
 
-    const isPending = this.detail.sync_status.startsWith("pending");
-    const isError = this.detail.sync_status === "error";
-
     return html`
       <header>
         <div class="meta">
@@ -243,8 +233,6 @@ export class PlaylistDetailEl extends LitElement {
           <span class="badge ${this.detail.is_own ? "" : ""}"
             >${this.detail.is_own ? "Yours" : "Library"}</span
           >
-          ${isPending ? html`<span class="badge pending">Syncing…</span>` : nothing}
-          ${isError ? html`<span class="badge error">Sync error</span>` : nothing}
         </div>
       </header>
 

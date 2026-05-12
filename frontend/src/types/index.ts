@@ -104,8 +104,8 @@ export interface ChildSearchChannelHit {
 }
 
 /**
- * Origin of a playlist hit. Mirrors the `source` column on the backend
- * struct and is used by `<hometube-search-results>` to render the
+ * Origin of a playlist hit in child search results. Used by
+ * `<hometube-search-results>` to render the
  * appropriate badge:
  *
  * - `allowlist` — playlist the parent allowlisted directly
@@ -210,14 +210,6 @@ export interface HeartbeatResponse {
 // Phase 7-9 types
 // ---------------------------------------------------------------------------
 
-export type SyncStatus =
-  | "synced"
-  | "pending_push"
-  | "pending_delete"
-  | "pending_create"
-  | "pending_update"
-  | "error";
-
 export interface ChannelInfo {
   id: string;
   title: string;
@@ -248,8 +240,6 @@ export interface SubscriptionRow {
   channel_id: string;
   channel_title: string;
   channel_thumbnail_url: string | null;
-  source: "app" | "youtube";
-  sync_status: SyncStatus;
   subscribed_at: number;
   visible: boolean;
 }
@@ -260,17 +250,15 @@ export interface PlaylistSummary {
   title: string;
   description: string | null;
   is_own: boolean;
-  source: "app" | "youtube";
-  sync_status: SyncStatus;
   video_count: number;
   created_at: number;
   updated_at: number;
   /**
    * `true` when this playlist is reachable through the child's
-   * allowlist. Always true for `is_own=true`. For inbound
-   * `source='youtube'` library imports the flag is computed by
-   * joining against `allowlisted_playlists` server-side; child UIs
-   * should hide rows where `visible === false`.
+   * allowlist. Always true for `is_own=true`. For YouTube library
+   * imports the flag is computed by joining against
+   * `allowlisted_playlists` server-side; child UIs should hide rows
+   * where `visible === false`.
    */
   visible: boolean;
 }
@@ -294,15 +282,13 @@ export interface LikeRow {
   video_id: string;
   video_title: string | null;
   video_thumbnail_url: string | null;
-  source: "app" | "youtube";
-  sync_status: SyncStatus;
   liked_at: number;
   /**
    * `true` when the liked video is reachable through the child's
    * allowlist (direct video allowlist; `video_likes` doesn't carry
-   * channel/playlist metadata). Inbound YouTube-sourced likes that
-   * the parent hasn't allowlisted come back with `visible: false` so
-   * the child UI can drop them.
+   * channel/playlist metadata). Likes for videos the parent hasn't
+   * allowlisted come back with `visible: false` so the child UI can
+   * drop them.
    */
   visible: boolean;
 }
@@ -381,8 +367,6 @@ export type NotificationType =
   | "time_limit_approaching"
   | "time_limit_reached"
   | "ytdlp_failure"
-  | "sync_error"
-  | "token_expired"
   | "new_search_term"
   | "system_update";
 

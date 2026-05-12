@@ -56,7 +56,6 @@ async fn default_jobs_are_seeded() {
         .map(|j| j["name"].as_str().unwrap().to_string())
         .collect();
     assert!(names.contains(&"ytdlp_update".to_string()));
-    assert!(names.contains(&"youtube_sync".to_string()));
     assert!(names.contains(&"cache_cleanup".to_string()));
 }
 
@@ -95,20 +94,20 @@ async fn put_disable_flips_enabled() {
 #[tokio::test]
 async fn put_known_preset_updates_schedule() {
     let app = boot_with_cron_seeded().await;
-    // youtube_sync's allowed_presets includes "Every hour".
-    let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'youtube_sync'")
+    // cache_cleanup's allowed_presets includes "Daily (3:00 AM)".
+    let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'cache_cleanup'")
         .fetch_one(&app.pool)
         .await
         .unwrap();
     let res = app
         .server
         .put(&format!("/api/cron/jobs/{id}"))
-        .json(&json!({ "schedule_preset": "Every hour" }))
+        .json(&json!({ "schedule_preset": "Daily (3:00 AM)" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
-    assert_eq!(body["schedule"], "0 * * * *");
-    assert_eq!(body["schedule_preset"], "Every hour");
+    assert_eq!(body["schedule"], "0 3 * * *");
+    assert_eq!(body["schedule_preset"], "Daily (3:00 AM)");
 }
 
 #[tokio::test]

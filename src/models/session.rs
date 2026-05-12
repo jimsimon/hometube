@@ -81,7 +81,7 @@ struct SessionAccountRow {
     s_expires_at: i64,
     s_created_at: i64,
     a_id: i64,
-    a_google_id: String,
+    a_google_id: Option<String>,
     a_email: String,
     a_display_name: String,
     a_avatar_url: Option<String>,

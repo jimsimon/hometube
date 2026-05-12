@@ -6,7 +6,6 @@
 //! maps to a Rust handler function:
 //!
 //! - `ytdlp_update`   → [`run_ytdlp_update`]
-//! - `youtube_sync`   → [`run_youtube_sync`]
 //! - `cache_cleanup`  → [`run_cache_cleanup`]
 //!
 //! Each invocation:
@@ -38,7 +37,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::error::AppResult;
-use crate::services::sync::sync_youtube_for_all_children;
 use crate::services::ytdlp;
 
 /// Maximum number of bytes of stdout/stderr we persist per run.
@@ -47,7 +45,6 @@ const OUTPUT_TRUNCATE_BYTES: usize = 8 * 1024;
 /// Names used as primary key in `cron_jobs.name`. The `name` column has
 /// a UNIQUE constraint, so reseeding is safe via `INSERT OR IGNORE`.
 pub const NAME_YTDLP_UPDATE: &str = "ytdlp_update";
-pub const NAME_YOUTUBE_SYNC: &str = "youtube_sync";
 pub const NAME_CACHE_CLEANUP: &str = "cache_cleanup";
 
 /// Allowed preset → cron expression map. The dropdown in the parent UI
@@ -344,10 +341,6 @@ async fn dispatch(pool: &SqlitePool, cfg: &Config, job_type: &str) -> RunOutcome
             Ok(msg) => RunOutcome::success(msg),
             Err(err) => RunOutcome::failure(format!("yt-dlp update failed: {err}")),
         },
-        "youtube_sync" => match run_youtube_sync(pool).await {
-            Ok(msg) => RunOutcome::success(msg),
-            Err(err) => RunOutcome::failure(format!("youtube sync failed: {err}")),
-        },
         "cache_cleanup" => match run_cache_cleanup(pool).await {
             Ok((msg, output)) => RunOutcome::success(msg).with_output(output),
             Err(err) => RunOutcome::failure(format!("cache cleanup failed: {err}")),
@@ -429,11 +422,6 @@ async fn run_ytdlp_update(pool: &SqlitePool, cfg: &Config) -> AppResult<String> 
     }
 }
 
-async fn run_youtube_sync(pool: &SqlitePool) -> AppResult<String> {
-    let summary = sync_youtube_for_all_children(pool).await?;
-    Ok(summary)
-}
-
 async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
     crate::services::video_cache::cleanup_segment_cache(pool).await
 }
@@ -465,13 +453,6 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
                 "Daily (midnight)",
                 "Weekly (Sunday 3 AM)",
             ],
-            "youtube_sync" => vec![
-                "Every 15 minutes",
-                "Every 30 minutes",
-                "Every hour",
-                "Every 2 hours",
-                "Every 6 hours",
-            ],
             "cache_cleanup" => vec!["Daily (3:00 AM)", "Daily (4:00 AM)"],
             _ => vec![],
         }
@@ -490,13 +471,6 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
             "ytdlp_update",
             "0 3 * * *",
             "Daily (3:00 AM)",
-        ),
-        (
-            NAME_YOUTUBE_SYNC,
-            "Pull subscriptions, likes, and playlists from YouTube.",
-            "youtube_sync",
-            "0 * * * *",
-            "Every hour",
         ),
         (
             NAME_CACHE_CLEANUP,

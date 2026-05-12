@@ -116,8 +116,8 @@ async fn up_next_with_playlist_context() {
     // Create a child playlist with two videos. Both videos are
     // allowlisted so they pass `can_child_view`.
     let pl_id: i64 = sqlx::query_scalar(
-        "INSERT INTO child_playlists (child_account_id, title, source) \
-         VALUES (?, 'Test PL', 'app') RETURNING id",
+        "INSERT INTO child_playlists (child_account_id, title) \
+         VALUES (?, 'Test PL') RETURNING id",
     )
     .bind(child_id)
     .fetch_one(&app.pool)

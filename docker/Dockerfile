@@ -55,7 +55,7 @@ FROM debian:bookworm-slim AS runtime
 #                     in many cases but a Python interpreter is the
 #                     supported fallback)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary and static assets.
@@ -70,12 +70,26 @@ RUN curl -fsSL \
         -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp
 
+# Install the bgutil PO token provider plugin for yt-dlp. This plugin
+# automatically fetches Proof-of-Origin tokens from the pot-server
+# sidecar container to bypass YouTube's bot detection.
+RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/latest" \
+        | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4) \
+    && curl -fsSL \
+        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${PLUGIN_VERSION}/bgutil-ytdlp-pot-provider.zip" \
+        -o /tmp/pot-plugin.zip \
+    && mkdir -p /usr/local/share/yt-dlp-plugins \
+    && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/ \
+    && rm /tmp/pot-plugin.zip
+
 WORKDIR /app
 EXPOSE 3000
 VOLUME ["/app/data"]
 
 ENV STATIC_DIR=/app/static \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
+    YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
+    POT_SERVER_URL=http://pot-server:4416 \
     DATABASE_PATH=/app/data/app.db
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

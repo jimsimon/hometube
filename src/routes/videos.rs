@@ -702,12 +702,27 @@ async fn enforce_access(
     if matches!(current.account_type, AccountType::Parent) {
         return Ok(());
     }
+    // Look up allowlisted playlist IDs that contain this video via
+    // child_playlist_videos → child_playlists → allowlisted_playlists.
+    let playlist_ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT ap.playlist_id \
+         FROM allowlisted_playlists ap \
+         INNER JOIN child_playlist_videos cpv ON cpv.video_id = ? \
+         INNER JOIN child_playlists cp ON cp.id = cpv.playlist_id \
+             AND cp.youtube_playlist_id = ap.playlist_id \
+         WHERE ap.child_account_id = ?",
+    )
+    .bind(video_id)
+    .bind(current.id)
+    .fetch_all(pool)
+    .await?;
+    let pl_ids: Vec<String> = playlist_ids.into_iter().map(|(id,)| id).collect();
     let allowed = can_child_view(
         pool,
         current.id,
         video_id,
         extracted.channel_id.as_deref(),
-        &[],
+        &pl_ids,
     )
     .await?;
     if !allowed {

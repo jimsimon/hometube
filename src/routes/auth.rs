@@ -241,10 +241,10 @@ pub async fn callback(
             let target = account::find_by_id(&state.db, target_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if target.google_id != info.sub {
+            if target.google_id.as_deref() != Some(&*info.sub) {
                 warn!(
                     target_id,
-                    expected = %target.google_id,
+                    expected = ?target.google_id,
                     got = %info.sub,
                     "reauth Google account mismatch"
                 );

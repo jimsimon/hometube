@@ -47,7 +47,8 @@ impl AccountType {
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
-    pub google_id: String,
+    /// NULL for local-only accounts, non-empty for Google-linked ones.
+    pub google_id: Option<String>,
     pub email: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
@@ -144,7 +145,7 @@ fn map_account(row: AccountRow) -> Account {
 #[derive(sqlx::FromRow)]
 struct AccountRow {
     id: i64,
-    google_id: String,
+    google_id: Option<String>,
     email: String,
     display_name: String,
     avatar_url: Option<String>,
@@ -194,7 +195,7 @@ pub async fn total_count(pool: &SqlitePool) -> AppResult<i64> {
     Ok(row.0)
 }
 
-/// Inserts a brand-new account row. Returns the new ID.
+/// Inserts a brand-new Google-linked account row. Returns the new ID.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert(
     pool: &SqlitePool,
@@ -226,6 +227,33 @@ pub async fn insert(
     .await?;
     Ok(row.0)
 }
+
+/// Create a local-only child account (no Google sign-in). YouTube sync
+/// can be linked later via the family management screen.
+///
+/// `google_id` is set to NULL so the existing UNIQUE constraint (which
+/// treats each NULL as distinct) naturally allows multiple local-only
+/// accounts.
+pub async fn insert_local_child(
+    pool: &SqlitePool,
+    display_name: &str,
+    avatar_url: Option<&str>,
+) -> AppResult<i64> {
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO accounts \
+         (google_id, email, display_name, avatar_url, account_type, \
+          access_token, refresh_token, token_expires_at) \
+         VALUES (NULL, '', ?, ?, 'child', '', '', 0) \
+         RETURNING id",
+    )
+    .bind(display_name)
+    .bind(avatar_url)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+
 
 /// Bag of fields that change on every successful OAuth callback. Kept
 /// as a struct (rather than a positional argument list) to satisfy
@@ -373,7 +401,7 @@ mod tests {
     fn typed_falls_back_to_child_for_garbage() {
         let acct = Account {
             id: 1,
-            google_id: "g".into(),
+            google_id: Some("g".into()),
             email: "e".into(),
             display_name: "n".into(),
             avatar_url: None,
@@ -392,7 +420,7 @@ mod tests {
     fn account_summary_strips_tokens() {
         let acct = Account {
             id: 7,
-            google_id: "g".into(),
+            google_id: Some("g".into()),
             email: "e@e".into(),
             display_name: "Display".into(),
             avatar_url: Some("http://avatar".into()),

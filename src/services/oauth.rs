@@ -6,21 +6,17 @@
 //! environment variables.
 //!
 //! In addition to the standard authorization-code + PKCE flow, this module
-//! exposes a `userinfo` helper that fetches the signed-in user's profile
-//! and a [`refresh_if_expired`] helper used by the token refresh strategy
-//! described in the implementation plan (refresh proactively if the token
-//! is within five minutes of expiry).
+//! exposes a `userinfo` helper that fetches the signed-in user's profile.
 
-use chrono::Utc;
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::reqwest as oauth_reqwest;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, EndpointNotSet, EndpointSet,
-    PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenUrl,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::error::{AppError, AppResult};
 use crate::services::setup::{
@@ -34,17 +30,11 @@ pub const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// Google userinfo endpoint (returns the OpenID-style profile claims).
 pub const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 
-/// Scopes requested for every HomeTube account. The YouTube scope grants
-/// read/write access to the user's subscriptions, playlists, and likes.
+/// Scopes requested for every HomeTube account (sign-in only).
 pub const SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
-
-/// Buffer used by [`refresh_if_expired`] — refresh proactively if the
-/// access token expires within this many seconds.
-pub const REFRESH_BUFFER_SECONDS: i64 = 5 * 60;
 
 /// Fully-configured Google OAuth2 client (auth URL, token URL, redirect,
 /// and client secret all set).
@@ -165,83 +155,6 @@ pub async fn userinfo(access_token: &str) -> AppResult<GoogleUserInfo> {
     }
     let info = res.json::<GoogleUserInfo>().await?;
     Ok(info)
-}
-
-/// If the access token for `account_id` will expire within
-/// [`REFRESH_BUFFER_SECONDS`], use the stored refresh token to obtain a
-/// fresh one and persist it. Returns the (possibly updated) access token
-/// suitable for an immediate API call.
-///
-/// The token-refresh strategy from the plan: "Before any YouTube API call,
-/// check if token expires within 5 minutes. If so, refresh proactively. If
-/// refresh fails (revoked), mark account as needing re-auth." This helper
-/// implements the first half — the "needs re-auth" bookkeeping is layered
-/// on top by callers.
-pub async fn refresh_if_expired(pool: &SqlitePool, account_id: i64) -> AppResult<String> {
-    let row: (String, String, i64) = sqlx::query_as(
-        "SELECT access_token, refresh_token, token_expires_at FROM accounts WHERE id = ?",
-    )
-    .bind(account_id)
-    .fetch_one(pool)
-    .await?;
-
-    let (access_token, refresh_tok, expires_at) = row;
-    let now = Utc::now().timestamp();
-    if expires_at - now > REFRESH_BUFFER_SECONDS {
-        return Ok(access_token);
-    }
-
-    debug!(account_id, "refreshing access token");
-    let client = build_client(pool).await?;
-    let response = match refresh_token(&client, &refresh_tok).await {
-        Ok(r) => r,
-        Err(err) => {
-            // Surface the failure to parents via a `token_expired`
-            // notification so the family knows to reconnect this
-            // Google account. Best-effort: never block the original
-            // error path on this bookkeeping.
-            if let Ok(Some((email, display_name))) = sqlx::query_as::<_, (String, String)>(
-                "SELECT email, display_name FROM accounts WHERE id = ?",
-            )
-            .bind(account_id)
-            .fetch_optional(pool)
-            .await
-            {
-                let _ = crate::services::notifications::dispatch_token_expired(
-                    pool,
-                    account_id,
-                    &email,
-                    &display_name,
-                )
-                .await;
-            }
-            return Err(err);
-        }
-    };
-
-    let new_access = response.access_token().secret().to_string();
-    let new_refresh = response
-        .refresh_token()
-        .map(|t| t.secret().to_string())
-        .unwrap_or(refresh_tok);
-    let new_expires = now
-        + response
-            .expires_in()
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(3600);
-
-    sqlx::query(
-        "UPDATE accounts SET access_token = ?, refresh_token = ?, token_expires_at = ?, \
-         updated_at = unixepoch() WHERE id = ?",
-    )
-    .bind(&new_access)
-    .bind(&new_refresh)
-    .bind(new_expires)
-    .bind(account_id)
-    .execute(pool)
-    .await?;
-
-    Ok(new_access)
 }
 
 /// Build an authorize URL with PKCE and a CSRF state.

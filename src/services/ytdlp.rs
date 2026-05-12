@@ -117,8 +117,9 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     cmd.arg("--dump-json")
         .arg("--no-playlist")
         .arg("--no-warnings")
-        .arg("--skip-download")
-        .arg(&url);
+        .arg("--skip-download");
+    append_youtube_args(&mut cmd);
+    cmd.arg(&url);
     debug!(?cmd, %video_id, "running yt-dlp");
 
     let output = timeout(DEFAULT_TIMEOUT, cmd.output())
@@ -169,8 +170,9 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
         .arg("vtt")
         .arg("--no-warnings")
         .arg("-o")
-        .arg(&template)
-        .arg(&url);
+        .arg(&template);
+    append_youtube_args(&mut cmd);
+    cmd.arg(&url);
     debug!(?cmd, %video_id, %lang, "running yt-dlp for subtitles");
 
     let output = timeout(DEFAULT_TIMEOUT, cmd.output())
@@ -222,6 +224,29 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
 
     let _ = tokio::fs::remove_dir_all(&tmp).await;
     Ok(body)
+}
+
+/// Append PO token arguments to a yt-dlp command:
+///
+/// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
+/// 2. `--extractor-args youtube-bgutilhttp:base_url=<url>` — PO token
+///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
+///    Compose sidecar at `http://pot-server:4416`).
+fn append_youtube_args(cmd: &mut Command) {
+    // PO token plugin directory.
+    let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
+        .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());
+    if std::path::Path::new(&plugin_dir).exists() {
+        cmd.arg("--plugin-dirs").arg(&plugin_dir);
+    }
+
+    // PO token server URL for the bgutil plugin.
+    let pot_url = std::env::var("POT_SERVER_URL")
+        .unwrap_or_else(|_| "http://pot-server:4416".to_string());
+    if !pot_url.is_empty() {
+        cmd.arg("--extractor-args")
+            .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
+    }
 }
 
 fn tempdir_for_video(video_id: &str) -> std::path::PathBuf {

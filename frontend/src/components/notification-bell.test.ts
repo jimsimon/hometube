@@ -191,8 +191,8 @@ describe("<hometube-notification-bell>", () => {
     const items = [
       {
         id: 2,
-        notification_type: "sync_error",
-        title: "Sync Error",
+        notification_type: "ytdlp_failure",
+        title: "Download Error",
         message: "Failed",
         is_read: 1,
         created_at: 1700000000,
@@ -280,7 +280,7 @@ describe("<hometube-notification-bell>", () => {
     const items = [
       {
         id: 7,
-        notification_type: "sync_error",
+        notification_type: "ytdlp_failure",
         title: "N7",
         message: "msg",
         is_read: 1,

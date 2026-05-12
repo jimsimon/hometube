@@ -142,6 +142,14 @@ fn error_code_to_message(code: &str) -> String {
     match code {
         "oauth_callback_failed" => "Sign-in didn't complete. Please try again.".to_string(),
         "access_denied" => "You declined the Google sign-in prompt.".to_string(),
+        "youtube_scope_missing" => {
+            "YouTube access was not granted. This can happen if the YouTube \
+             permission was unchecked on the consent screen, or if this is a \
+             supervised (Family Link) child account — Google does not allow \
+             YouTube API access for supervised accounts. Try with a \
+             non-supervised Google account, or use a local-only child profile."
+                .to_string()
+        }
         other => format!("Sign-in error: {other}"),
     }
 }

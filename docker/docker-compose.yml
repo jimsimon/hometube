@@ -1,8 +1,8 @@
 # HomeTube — Docker Compose stack.
 #
-# Single service. All configuration happens in the setup wizard the
-# first time you open the app — there are intentionally no environment
-# variables here.
+# Two services:
+#   app       — the HomeTube backend + frontend
+#   pot-server — bgutil PO token generator for YouTube bot-detection bypass
 
 services:
   app:
@@ -15,6 +15,9 @@ services:
     volumes:
       # SQLite DB, segment cache, downloaded yt-dlp binary updates.
       - app-data:/app/data
+    depends_on:
+      pot-server:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
@@ -22,6 +25,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # PO (Proof-of-Origin) token server — generates tokens that prove
+  # requests come from a legitimate browser. yt-dlp's bgutil plugin
+  # fetches tokens from this server automatically.
+  pot-server:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    # No ports exposed to host — only reachable by the app container
+    # via Docker's internal network at pot-server:4416.
+    restart: unless-stopped
 
 volumes:
   app-data:

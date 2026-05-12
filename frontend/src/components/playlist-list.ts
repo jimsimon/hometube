@@ -131,7 +131,6 @@ export class PlaylistList extends LitElement {
                     playlist-id=${p.id}
                     title=${p.title}
                     video-count=${p.video_count}
-                    sync-status=${p.sync_status}
                     ?is-own=${true}
                   ></hometube-playlist-card>
                 `,
@@ -150,7 +149,6 @@ export class PlaylistList extends LitElement {
                     playlist-id=${p.id}
                     title=${p.title}
                     video-count=${p.video_count}
-                    sync-status=${p.sync_status}
                   ></hometube-playlist-card>
                 `,
               )}
