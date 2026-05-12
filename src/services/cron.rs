@@ -400,9 +400,27 @@ async fn run_ytdlp_update(pool: &SqlitePool, cfg: &Config) -> AppResult<String> 
     // via [`ytdlp::check_for_update`], so it's cheap to call on every
     // tick. We treat "no new version" + "actually downloaded" as the
     // same successful outcome from the cron's perspective.
+    let prior_version: Option<String> =
+        sqlx::query_scalar("SELECT current_version FROM ytdlp_info WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+            .flatten();
     let result = ytdlp::update_binary(pool, cfg).await;
     match result {
-        Ok(version) => Ok(format!("yt-dlp updated to {version}")),
+        Ok(version) => {
+            // Only emit a `system_update` notification when the version
+            // actually changed; the no-op "already up to date" path
+            // returns the existing version unchanged.
+            if prior_version.as_deref() != Some(version.as_str()) {
+                let _ = crate::services::notifications::dispatch_ytdlp_upgraded(
+                    pool,
+                    prior_version.as_deref(),
+                    &version,
+                )
+                .await;
+            }
+            Ok(format!("yt-dlp updated to {version}"))
+        }
         Err(err) => {
             // Notify parents on failure.
             let _ = notify_parents_ytdlp_failure(pool, &err.to_string()).await;

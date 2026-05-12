@@ -29,9 +29,7 @@ pub const TYPE_TIME_LIMIT_APPROACHING: &str = "time_limit_approaching";
 pub const TYPE_TIME_LIMIT_REACHED: &str = "time_limit_reached";
 pub const TYPE_YTDLP_FAILURE: &str = "ytdlp_failure";
 pub const TYPE_SYNC_ERROR: &str = "sync_error";
-#[allow(dead_code)] // Reserved for the OAuth refresh flow (Phase 19+).
 pub const TYPE_TOKEN_EXPIRED: &str = "token_expired";
-#[allow(dead_code)] // Reserved for future search-term notifications.
 pub const TYPE_NEW_SEARCH_TERM: &str = "new_search_term";
 pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
 
@@ -207,6 +205,99 @@ pub async fn dispatch_ytdlp_failure_deduped(
         "Video extraction failed",
         &format!("Could not load metadata for video {video_id}."),
         &payload,
+    )
+    .await
+}
+
+/// Notify every parent that an account's Google OAuth refresh token has
+/// stopped working and the user needs to re-authenticate. Deduped to one
+/// per account per day so a steady stream of failed background refreshes
+/// doesn't spam the bell.
+pub async fn dispatch_token_expired(
+    pool: &SqlitePool,
+    account_id: i64,
+    email: &str,
+    display_name: &str,
+) -> AppResult<()> {
+    let key = json_fragment_key("account_id", &account_id);
+    let metadata = serde_json::json!({
+        "account_id": account_id,
+        "email": email,
+    });
+    broadcast_once_per_day(
+        pool,
+        TYPE_TOKEN_EXPIRED,
+        &key,
+        "Reconnect Google account",
+        &format!("{display_name} ({email}) needs to reconnect their Google account."),
+        &metadata,
+    )
+    .await
+}
+
+/// Notify every parent that a child entered a search term that has not
+/// been observed before for that child. Deduped to one notification per
+/// (child, query) per day so reloading the same search doesn't repeat.
+pub async fn dispatch_new_search_term(
+    pool: &SqlitePool,
+    child_id: i64,
+    child_display_name: &str,
+    query: &str,
+) -> AppResult<()> {
+    let metadata = serde_json::json!({
+        "child_account_id": child_id,
+        "query": query,
+    });
+    // Build a dedup key combining child + query JSON fragments. We
+    // can't rely on stable key ordering inside the metadata column
+    // (serde_json sorts object keys alphabetically), so we compose
+    // two single-key fragments and let `LIKE` find both.
+    let dedup_key = format!(
+        "{}%{}",
+        json_fragment_key("child_account_id", &child_id),
+        json_fragment_key("query", &query),
+    );
+    broadcast_once_per_day(
+        pool,
+        TYPE_NEW_SEARCH_TERM,
+        &dedup_key,
+        "New search term",
+        &format!("{child_display_name} searched for: {query}"),
+        &metadata,
+    )
+    .await
+}
+
+/// Notify every parent that yt-dlp has been upgraded to a new version.
+/// Deduped per `new_version` per day.
+pub async fn dispatch_ytdlp_upgraded(
+    pool: &SqlitePool,
+    old_version: Option<&str>,
+    new_version: &str,
+) -> AppResult<()> {
+    let metadata = serde_json::json!({
+        "kind": "ytdlp_upgraded",
+        "old_version": old_version,
+        "new_version": new_version,
+    });
+    // Combine `kind` and `new_version` fragments so other
+    // `system_update` notifications (e.g. PIN failures) don't
+    // collide with yt-dlp upgrade dedup.
+    let dedup_key = format!(
+        "{}%{}",
+        json_fragment_key("kind", &"ytdlp_upgraded"),
+        json_fragment_key("new_version", &new_version),
+    );
+    broadcast_once_per_day(
+        pool,
+        TYPE_SYSTEM_UPDATE,
+        &dedup_key,
+        "yt-dlp updated",
+        &match old_version {
+            Some(old) => format!("yt-dlp upgraded from {old} to {new_version}."),
+            None => format!("yt-dlp installed at version {new_version}."),
+        },
+        &metadata,
     )
     .await
 }

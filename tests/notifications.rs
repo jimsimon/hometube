@@ -12,7 +12,9 @@ mod common;
 use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
-use hometube::services::notifications::{self, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED};
+use hometube::services::notifications::{
+    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED, TYPE_TOKEN_EXPIRED,
+};
 
 #[tokio::test]
 async fn empty_initially() {
@@ -153,6 +155,146 @@ async fn read_all_marks_everything_read() {
     let res = app.server.get("/api/notifications/unread-count").await;
     let body: serde_json::Value = res.json();
     assert_eq!(body["unread"], 0);
+}
+
+#[tokio::test]
+async fn dispatch_token_expired_writes_one_row_per_parent() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let parent_id = app.parent_id.unwrap();
+
+    notifications::dispatch_token_expired(
+        &app.pool,
+        parent_id,
+        "parent@example.test",
+        "Parent One",
+    )
+    .await
+    .unwrap();
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_TOKEN_EXPIRED)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+
+    // Second call with the same account should be deduped within the
+    // 24-hour window.
+    notifications::dispatch_token_expired(
+        &app.pool,
+        parent_id,
+        "parent@example.test",
+        "Parent One",
+    )
+    .await
+    .unwrap();
+    let count_again: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_TOKEN_EXPIRED)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count_again, 1, "second call should dedupe");
+}
+
+#[tokio::test]
+async fn dispatch_new_search_term_dedupes_per_query() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    notifications::dispatch_new_search_term(&app.pool, child_id, "Tot", "dinosaurs")
+        .await
+        .unwrap();
+    notifications::dispatch_new_search_term(&app.pool, child_id, "Tot", "dinosaurs")
+        .await
+        .unwrap();
+    notifications::dispatch_new_search_term(&app.pool, child_id, "Tot", "trains")
+        .await
+        .unwrap();
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_NEW_SEARCH_TERM)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    // Two distinct queries → two notifications; the duplicate "dinosaurs" is deduped.
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn dispatch_ytdlp_upgraded_emits_system_update() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+
+    notifications::dispatch_ytdlp_upgraded(&app.pool, Some("2024.01.01"), "2024.02.01")
+        .await
+        .unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parent_notifications \
+         WHERE notification_type = ? AND metadata LIKE '%ytdlp_upgraded%'",
+    )
+    .bind(TYPE_SYSTEM_UPDATE)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+
+    // Repeat with the same versions → deduped.
+    notifications::dispatch_ytdlp_upgraded(&app.pool, Some("2024.01.01"), "2024.02.01")
+        .await
+        .unwrap();
+    let count_again: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parent_notifications \
+         WHERE notification_type = ? AND metadata LIKE '%ytdlp_upgraded%'",
+    )
+    .bind(TYPE_SYSTEM_UPDATE)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(count_again, 1);
+
+    // Different new version → fires again.
+    notifications::dispatch_ytdlp_upgraded(&app.pool, Some("2024.02.01"), "2024.03.01")
+        .await
+        .unwrap();
+    let count_three: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parent_notifications \
+         WHERE notification_type = ? AND metadata LIKE '%ytdlp_upgraded%'",
+    )
+    .bind(TYPE_SYSTEM_UPDATE)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(count_three, 2);
+}
+
+#[tokio::test]
+async fn child_search_emits_new_search_term_first_time() {
+    let (app, _auth) = common::boot_with_parent_and_child(AccountType::Child).await;
+
+    let res = app.server.get("/api/search?q=dinosaurs").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_NEW_SEARCH_TERM)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+
+    // Same child re-searching the same term should not fire again.
+    let res = app.server.get("/api/search?q=dinosaurs").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let count_again: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
+            .bind(TYPE_NEW_SEARCH_TERM)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count_again, 1);
 }
 
 #[tokio::test]

@@ -224,6 +224,18 @@ pub async fn child_search(
     // a single search session doesn't produce duplicate `search_log`
     // rows on every "load more" request.
     if offset == 0 {
+        // Detect "first time we've ever seen this query for this child"
+        // *before* writing the new row, so we can dispatch a
+        // `new_search_term` notification.
+        let prior: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM search_log WHERE child_account_id = ? AND query = ?",
+        )
+        .bind(current.id)
+        .bind(trimmed)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
         let _ = sqlx::query(
             "INSERT INTO search_log (child_account_id, query, result_count) VALUES (?, ?, ?)",
         )
@@ -232,6 +244,22 @@ pub async fn child_search(
         .bind(total as i64)
         .execute(&state.db)
         .await;
+
+        if prior == 0 {
+            let display_name: String =
+                sqlx::query_scalar("SELECT display_name FROM accounts WHERE id = ?")
+                    .bind(current.id)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or_else(|_| "A child".to_string());
+            let _ = crate::services::notifications::dispatch_new_search_term(
+                &state.db,
+                current.id,
+                &display_name,
+                trimmed,
+            )
+            .await;
+        }
     }
 
     // Emit a `next_page_token` only if any individual bucket appears to

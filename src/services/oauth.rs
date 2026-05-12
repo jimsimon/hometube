@@ -193,7 +193,31 @@ pub async fn refresh_if_expired(pool: &SqlitePool, account_id: i64) -> AppResult
 
     debug!(account_id, "refreshing access token");
     let client = build_client(pool).await?;
-    let response = refresh_token(&client, &refresh_tok).await?;
+    let response = match refresh_token(&client, &refresh_tok).await {
+        Ok(r) => r,
+        Err(err) => {
+            // Surface the failure to parents via a `token_expired`
+            // notification so the family knows to reconnect this
+            // Google account. Best-effort: never block the original
+            // error path on this bookkeeping.
+            if let Ok(Some((email, display_name))) = sqlx::query_as::<_, (String, String)>(
+                "SELECT email, display_name FROM accounts WHERE id = ?",
+            )
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            {
+                let _ = crate::services::notifications::dispatch_token_expired(
+                    pool,
+                    account_id,
+                    &email,
+                    &display_name,
+                )
+                .await;
+            }
+            return Err(err);
+        }
+    };
 
     let new_access = response.access_token().secret().to_string();
     let new_refresh = response
