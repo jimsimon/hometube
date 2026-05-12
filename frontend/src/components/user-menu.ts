@@ -71,9 +71,7 @@ export class UserMenu extends LitElement {
       ${this.displayName
         ? html`<span class="who">Signed in as ${this.displayName}</span>`
         : nothing}
-      ${!this.hideProfile
-        ? html`<a class="profile" href="/profiles">Switch profile</a>`
-        : nothing}
+      ${!this.hideProfile ? html`<a class="profile" href="/profiles">Switch profile</a>` : nothing}
       ${!this.hideLogout
         ? html`<button type="button" class="logout" @click=${this.onLogout}>Log out</button>`
         : nothing}
