@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}Video unavailable — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="video-unavailable" aria-label="Video unavailable">
   <div class="card">
     <h1>This video isn't available</h1>
@@ -47,8 +45,4 @@
     text-decoration: none;
   }
 </style>
-{% endblock %}
-
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
 {% endblock %}

@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}Playlist — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="child-playlist" aria-label="Playlist videos">
   {% if playlist_kind == "family" %}
   <hometube-family-playlist-view
@@ -20,8 +18,7 @@
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/playlist-detail.js"></script>
 <script type="module" src="/assets/components/family-playlist-view.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>

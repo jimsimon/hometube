@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-parent.html" %}
 
 {% block title %}HomeTube — System{% endblock %}
 
 {% block content %}
-{% include "partials/nav-parent.html" %}
-
 <section class="parent-system" aria-label="System management">
   <header class="page-header">
     <h1>System</h1>
@@ -32,8 +30,7 @@
 </section>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-parent.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/cron-job-card.js"></script>
 <script type="module" src="/assets/components/ytdlp-status-card.js"></script>
 <script type="module" src="/assets/components/cache-manager.js"></script>

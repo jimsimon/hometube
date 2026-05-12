@@ -8,13 +8,13 @@
     <!-- Web Awesome stylesheet (theme tokens, base styles). -->
     <link
       rel="stylesheet"
-      href="https://early.webawesome.com/webawesome@3.0.0-beta.5/dist/styles/webawesome.css"
+      href="https://ka-f.webawesome.com/webawesome@3.6.0/styles/webawesome.css"
     />
     <!-- Web Awesome auto-loader: lazily registers components as it
          encounters them in the DOM. -->
     <script
       type="module"
-      src="https://early.webawesome.com/webawesome@3.0.0-beta.5/dist/webawesome.loader.js"
+      src="https://ka-f.webawesome.com/webawesome@3.6.0/webawesome.loader.js"
     ></script>
 
     <link rel="stylesheet" href="/assets/styles/global.css" />
@@ -29,7 +29,7 @@
               ? 'dark'
               : 'light';
           }
-          document.documentElement.classList.add('wa-theme-' + t);
+          if (t === 'dark') document.documentElement.classList.add('wa-dark');
         } catch (e) {}
       })();
     </script>
@@ -37,11 +37,17 @@
     {% block head %}{% endblock %}
   </head>
   <body>
-    <wa-page>
+    <wa-page mobile-breakpoint="99999" {% block page_attrs %}disable-navigation-toggle{% endblock %}>
       <header slot="header">
         <a href="/" class="brand">HomeTube</a>
-        <hometube-theme-toggle></hometube-theme-toggle>
+        {% block header_actions %}
+        <div class="header-actions">
+          <hometube-theme-toggle></hometube-theme-toggle>
+        </div>
+        {% endblock %}
       </header>
+
+      {% block navigation %}{% endblock %}
 
       <main>{% block content %}{% endblock %}</main>
 

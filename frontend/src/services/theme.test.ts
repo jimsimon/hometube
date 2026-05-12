@@ -82,11 +82,12 @@ describe("theme service", () => {
     expect(resolveTheme("system")).toBe("dark");
   });
 
-  it("applyTheme swaps the wa-theme-* class", () => {
+  it("applyTheme toggles the wa-dark class", () => {
     applyTheme("light");
-    expect(document.documentElement.classList.contains("wa-theme-light")).toBe(true);
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(false);
     applyTheme("dark");
-    expect(document.documentElement.classList.contains("wa-theme-light")).toBe(false);
-    expect(document.documentElement.classList.contains("wa-theme-dark")).toBe(true);
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(true);
+    applyTheme("light");
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(false);
   });
 });

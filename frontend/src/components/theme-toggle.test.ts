@@ -48,7 +48,7 @@ describe("<hometube-theme-toggle>", () => {
     select.dispatchEvent(new Event("change"));
 
     expect(localStorage.getItem("hometube-theme")).toBe("dark");
-    expect(document.documentElement.classList.contains("wa-theme-dark")).toBe(true);
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(true);
   });
 
   it("reflects the persisted theme on mount", async () => {

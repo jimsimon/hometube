@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}Watch — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 {% if unavailable %}
 <section class="video-unavailable" aria-label="Video unavailable">
   <div class="card">
@@ -86,8 +84,7 @@
 </style>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/video-player.js"></script>
 <script type="module" src="/assets/components/up-next.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
