@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-parent.html" %}
 
 {% block title %}Family playlist — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-parent.html" %}
-
 <section class="parent-playlist" aria-label="Family playlist">
   <p>
     <a href="/parent/playlists" class="back-link">← Back to playlists</a>
@@ -29,8 +27,7 @@
 </style>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-parent.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/family-playlist-detail.js"></script>
 <script type="module" src="/assets/components/family-playlist-form.js"></script>
 {% endblock %}

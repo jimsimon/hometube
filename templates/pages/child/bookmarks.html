@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}Bookmarks — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="child-bookmarks" aria-label="Bookmarks">
   <header class="page-header">
     <h1>Your bookmarks</h1>
@@ -27,8 +25,7 @@
 </style>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/bookmarks-list.js"></script>
 <script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

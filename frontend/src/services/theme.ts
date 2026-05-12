@@ -2,8 +2,8 @@
  * Theme preference helpers.
  *
  * The user's preference (`light`, `dark`, or `system`) is persisted in
- * localStorage. The actual color scheme applied to <html> is one of
- * `wa-theme-light` or `wa-theme-dark` — when the preference is `system`,
+ * localStorage. Dark mode is activated by adding `.wa-dark` to <html>;
+ * removing it reverts to light mode. When the preference is `system`,
  * we resolve it via `prefers-color-scheme`.
  *
  * Per-account scoping (T-5):
@@ -15,8 +15,8 @@
  *
  *   Boot order:
  *     1. base.html runs an inline script that reads the legacy
- *        `hometube-theme` key and applies the resulting wa-theme-*
- *        class as early as possible (no FOUC for anonymous users).
+ *        `hometube-theme` key and adds `.wa-dark` if needed as
+ *        early as possible (no FOUC for anonymous users).
  *     2. After the page hydrates, `<hometube-theme-toggle>` calls
  *        `setAccountScope(accountId)` once /api/auth/me resolves;
  *        if a per-account preference exists it overrides the
@@ -105,8 +105,11 @@ export function resolveTheme(pref: ThemePreference): ResolvedTheme {
 
 export function applyTheme(theme: ResolvedTheme): void {
   const html = document.documentElement;
-  html.classList.remove("wa-theme-light", "wa-theme-dark");
-  html.classList.add(`wa-theme-${theme}`);
+  if (theme === "dark") {
+    html.classList.add("wa-dark");
+  } else {
+    html.classList.remove("wa-dark");
+  }
 }
 
 /**

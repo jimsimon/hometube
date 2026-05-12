@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}HomeTube — Search{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="child-search" aria-label="Search results">
   <header class="page-header">
     <h1>Search</h1>
@@ -20,9 +18,7 @@
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
-<script type="module" src="/assets/components/search-bar.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/search-results.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
 <script type="module" src="/assets/components/channel-card.js"></script>

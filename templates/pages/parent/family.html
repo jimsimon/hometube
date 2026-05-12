@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-parent.html" %}
 
 {% block title %}HomeTube — Family{% endblock %}
 
 {% block content %}
-{% include "partials/nav-parent.html" %}
-
 <section class="parent-family" aria-label="Family management">
   <header class="page-header">
     <h1>Family</h1>
@@ -18,8 +16,7 @@
 </section>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-parent.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/family-manager.js"></script>
 <script type="module" src="/assets/components/family-member-card.js"></script>
 <script type="module" src="/assets/components/add-member-dialog.js"></script>

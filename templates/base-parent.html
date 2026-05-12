@@ -1,0 +1,37 @@
+{# Base template for all parent (/parent/*) pages.
+   Extends the root base.html and provides:
+   - Header actions: theme toggle, notification bell, user menu
+   - Navigation drawer: parent dashboard links
+   - Script imports for shared parent components
+#}
+{% extends "base.html" %}
+
+{# Enable the navigation toggle (hamburger) — base.html disables it
+   by default for unauthenticated pages that have no navigation. #}
+{% block page_attrs %}{% endblock %}
+
+{% block header_actions %}
+<div class="header-actions">
+  <hometube-theme-toggle></hometube-theme-toggle>
+  <hometube-notification-bell></hometube-notification-bell>
+  <hometube-user-menu display-name="{{ display_name }}"></hometube-user-menu>
+</div>
+{% endblock %}
+
+{% block navigation %}
+<nav slot="navigation" aria-label="Parent navigation">
+  <ul class="nav-list">
+    <li><a href="/parent/home">Content</a></li>
+    <li><a href="/parent/playlists">Playlists</a></li>
+    <li><a href="/parent/activity">Activity</a></li>
+    <li><a href="/parent/family">Family</a></li>
+    <li><a href="/parent/system">System</a></li>
+  </ul>
+</nav>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/notification-bell.js"></script>
+<script type="module" src="/assets/components/user-menu.js"></script>
+{% block page_scripts %}{% endblock %}
+{% endblock %}

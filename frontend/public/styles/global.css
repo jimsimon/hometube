@@ -14,10 +14,11 @@ html,
 body {
   margin: 0;
   padding: 0;
+  min-height: 100%;
 }
 
 body {
-  font-family: var(--wa-font-family, system-ui, sans-serif);
+  font-family: var(--wa-font-family-body, system-ui, sans-serif);
   color: var(--wa-color-text-normal);
   background: var(--wa-color-surface-default);
   min-height: 100dvh;
@@ -27,20 +28,7 @@ a {
   color: var(--wa-color-brand-on-quiet);
 }
 
-header[slot="header"] {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--wa-space-m);
-  padding: var(--wa-space-m) var(--wa-space-l);
-  border-bottom: 1px solid var(--wa-color-surface-border);
-}
-
-footer[slot="footer"] {
-  padding: var(--wa-space-m) var(--wa-space-l);
-  border-top: 1px solid var(--wa-color-surface-border);
-  text-align: center;
-}
+/* ─── Header ─────────────────────────────────────────────────── */
 
 .brand {
   font-weight: 700;
@@ -49,10 +37,59 @@ footer[slot="footer"] {
   color: inherit;
 }
 
-main {
-  padding: var(--wa-space-l);
-  max-width: 72rem;
-  margin: 0 auto;
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* ─── Footer ─────────────────────────────────────────────────── */
+
+footer[slot="footer"] {
+  padding: var(--wa-space-m) var(--wa-space-l);
+  text-align: center;
+}
+
+/* ─── Navigation drawer link list ────────────────────────────── */
+
+.nav-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.nav-list a {
+  display: block;
+  padding: 0.625rem 0.75rem;
+  border-radius: var(--wa-border-radius-m);
+  color: inherit;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.nav-list a:hover,
+.nav-list a:focus-visible {
+  background: var(--wa-color-surface-raised);
+  outline: none;
+}
+
+/* ─── Page content ───────────────────────────────────────────── */
+
+.page-header {
+  margin-bottom: var(--wa-space-l);
+}
+
+.page-header h1 {
+  margin: 0 0 var(--wa-space-xs);
+}
+
+.page-header .subtitle {
+  margin: 0;
+  color: var(--wa-color-text-quiet);
+  line-height: 1.5;
 }
 
 .hero {
@@ -75,3 +112,5 @@ main {
   gap: var(--wa-space-m);
   grid-template-columns: repeat(auto-fill, minmax(min(16rem, 100%), 1fr));
 }
+
+

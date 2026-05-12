@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="child-home" aria-label="Home">
   <hometube-video-row
     feed="continue-watching"
@@ -25,8 +23,7 @@
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/video-row.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
 <script type="module" src="/assets/components/usage-limit-overlay.js"></script>

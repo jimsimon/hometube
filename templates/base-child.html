@@ -1,0 +1,37 @@
+{# Base template for all child (/child/*) pages.
+   Extends the root base.html and provides:
+   - Header actions: search bar, theme toggle, user menu
+   - Navigation drawer: child content links
+   - Script imports for shared child components
+#}
+{% extends "base.html" %}
+
+{# Enable the navigation toggle (hamburger) — base.html disables it
+   by default for unauthenticated pages that have no navigation. #}
+{% block page_attrs %}{% endblock %}
+
+{% block header_actions %}
+<div class="header-actions">
+  <hometube-search-bar></hometube-search-bar>
+  <hometube-theme-toggle></hometube-theme-toggle>
+  <hometube-user-menu display-name="{{ display_name }}"></hometube-user-menu>
+</div>
+{% endblock %}
+
+{% block navigation %}
+<nav slot="navigation" aria-label="Main navigation">
+  <ul class="nav-list">
+    <li><a href="/child/home">Home</a></li>
+    <li><a href="/child/channels">Channels</a></li>
+    <li><a href="/child/playlists">Playlists</a></li>
+    <li><a href="/child/bookmarks">Bookmarks</a></li>
+    <li><a href="/child/downloads">Downloads</a></li>
+  </ul>
+</nav>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/assets/components/search-bar.js"></script>
+<script type="module" src="/assets/components/user-menu.js"></script>
+{% block page_scripts %}{% endblock %}
+{% endblock %}

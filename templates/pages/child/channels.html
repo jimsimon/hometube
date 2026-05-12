@@ -1,10 +1,8 @@
-{% extends "base.html" %}
+{% extends "base-child.html" %}
 
 {% block title %}Channels — HomeTube{% endblock %}
 
 {% block content %}
-{% include "partials/nav-child.html" %}
-
 <section class="child-channels" aria-label="Subscribed channels">
   <header class="page-header">
     <h1>Channels</h1>
@@ -17,8 +15,7 @@
 <hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
-{% block scripts %}
-<script type="module" src="/assets/components/nav-child.js"></script>
+{% block page_scripts %}
 <script type="module" src="/assets/components/channel-card.js"></script>
 <script type="module" src="/assets/components/channel-list.js"></script>
 <script type="module" src="/assets/components/usage-limit-overlay.js"></script>
