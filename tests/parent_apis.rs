@@ -406,6 +406,8 @@ async fn family_update_member_renames() {
 #[tokio::test]
 async fn family_add_member_returns_login_url() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+
+    // Adding a child creates a local-only account immediately.
     let res = app
         .server
         .post("/api/family/members")
@@ -413,8 +415,18 @@ async fn family_add_member_returns_login_url() {
         .await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
+    assert_eq!(body["display_name"].as_str().unwrap(), "Kiddo");
+    assert_eq!(body["account_type"].as_str().unwrap(), "child");
+    // Adding a parent still returns a login URL for the OAuth flow.
+    let res = app
+        .server
+        .post("/api/family/members")
+        .json(&json!({ "role": "parent", "display_name": "Mom" }))
+        .await;
+    assert!(res.status_code().is_success());
+    let body: serde_json::Value = res.json();
     let url = body["login_url"].as_str().unwrap();
-    assert!(url.contains("role=child"));
+    assert!(url.contains("role=parent"));
     assert!(url.contains("context=add_member"));
 }
 

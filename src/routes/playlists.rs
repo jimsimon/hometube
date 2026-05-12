@@ -1,13 +1,9 @@
-//! Child playlist routes (YouTube-synced).
+//! Child playlist routes.
 //!
-//! `child_playlists` mirrors the child's playlists; rows have `is_own=1`
+//! `child_playlists` stores the child's playlists; rows have `is_own=1`
 //! when the child created the playlist in HomeTube and `is_own=0` when
 //! the playlist is a YouTube-side playlist that's been "added to
 //! library" via the parent's allowlist.
-//!
-//! All mutating endpoints write locally first, set the appropriate
-//! `sync_status`, and spawn a background task in
-//! [`crate::services::sync`] that reconciles with YouTube.
 
 use axum::{
     extract::{Path, State},
@@ -18,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::services::sync::{push_playlist_change, push_playlist_item_change, PlaylistItemAction};
 use crate::services::youtube::YoutubeClient;
 use crate::state::AppState;
 
@@ -34,16 +29,14 @@ pub struct PlaylistSummary {
     pub title: String,
     pub description: Option<String>,
     pub is_own: bool,
-    pub source: String,
-    pub sync_status: String,
     pub video_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
     /// `true` when the playlist is reachable through the child's
     /// allowlist. Always `true` for `is_own=1` (child-created)
-    /// playlists; for `source='youtube'` library imports the flag
-    /// is computed by joining against `allowlisted_playlists` so
-    /// inbound playlists the parent never allowlisted stay hidden.
+    /// playlists; for library imports the flag is computed by joining
+    /// against `allowlisted_playlists` so inbound playlists the parent
+    /// never allowlisted stay hidden.
     pub visible: bool,
 }
 
@@ -52,16 +45,14 @@ pub struct PlaylistSummary {
 /// `type_complexity` lint doesn't fire on every queried row binding.
 ///
 /// Columns in order:
-/// `id, youtube_playlist_id, title, description, is_own, source,
-///  sync_status, video_count, created_at, updated_at, visible`.
+/// `id, youtube_playlist_id, title, description, is_own,
+///  video_count, created_at, updated_at, visible`.
 type PlaylistSummaryRow = (
     i64,
     Option<String>,
     String,
     Option<String>,
     i64,
-    String,
-    String,
     i64,
     i64,
     i64,
@@ -72,8 +63,8 @@ type PlaylistSummaryRow = (
 ///
 /// Returns the child's playlists with a `visible` flag computed at
 /// query time. `is_own=1` rows are always visible (the child created
-/// them). `is_own=0, source='youtube'` rows — i.e. inbound library
-/// imports — are only marked visible when the underlying
+/// them). `is_own=0` rows with a `youtube_playlist_id` — i.e. inbound
+/// library imports — are only marked visible when the underlying
 /// `youtube_playlist_id` is in `allowlisted_playlists` for this
 /// child. Hidden rows are still returned so the parent UI can
 /// reason about them, but the child UI is expected to filter them
@@ -85,7 +76,6 @@ pub async fn list(
     let rows: Vec<PlaylistSummaryRow> =
         sqlx::query_as(
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
-                    p.source, p.sync_status, \
                     (SELECT COUNT(*) FROM child_playlist_videos v WHERE v.playlist_id = p.id) AS video_count, \
                     p.created_at, p.updated_at, \
                     CASE \
@@ -114,8 +104,6 @@ pub async fn list(
                 title,
                 description,
                 is_own,
-                source,
-                sync_status,
                 video_count,
                 created_at,
                 updated_at,
@@ -127,8 +115,6 @@ pub async fn list(
                     title,
                     description,
                     is_own: is_own != 0,
-                    source,
-                    sync_status,
                     video_count,
                     created_at,
                     updated_at,
@@ -164,8 +150,8 @@ pub async fn create(
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO child_playlists \
-            (child_account_id, title, description, is_own, source, sync_status, is_deleted) \
-         VALUES (?, ?, ?, 1, 'app', 'pending_create', 0) \
+            (child_account_id, title, description, is_own, is_deleted) \
+         VALUES (?, ?, ?, 1, 0) \
          RETURNING id",
     )
     .bind(current.id)
@@ -173,8 +159,6 @@ pub async fn create(
     .bind(&body.description)
     .fetch_one(&state.db)
     .await?;
-
-    spawn_playlist_push(state.clone(), current.id, id);
 
     let row = fetch_summary(&state, id).await?;
     Ok(Json(row))
@@ -205,8 +189,8 @@ pub struct PlaylistDetail {
 /// `GET /api/playlists/:id`.
 ///
 /// For child-created playlists (`is_own=1`) every video is returned
-/// as-is. For YouTube-sourced library playlists (`is_own=0,
-/// source='youtube'`) the items are filtered through
+/// as-is. For YouTube-sourced library playlists (`is_own=0` with a
+/// `youtube_playlist_id`) the items are filtered through
 /// [`crate::services::access::can_child_view`] so videos the parent
 /// hasn't allowlisted (e.g., a deleted-from-allowlist channel that
 /// still has tracks in the inbound playlist mirror) are dropped from
@@ -218,6 +202,34 @@ pub async fn detail(
 ) -> AppResult<Json<PlaylistDetail>> {
     require_owner(&state, current.id, playlist_id).await?;
     let summary = fetch_summary(&state, playlist_id).await?;
+
+    // Lazy-refresh: for YouTube-sourced library playlists, re-populate
+    // video items from YouTube if the playlist hasn't been refreshed
+    // recently. This avoids hammering the YouTube API on repeated views.
+    const REFRESH_INTERVAL_SECS: i64 = 15 * 60; // 15 minutes
+    if !summary.is_own && summary.youtube_playlist_id.is_some() {
+        let now = chrono::Utc::now().timestamp();
+        let stale = (now - summary.updated_at) >= REFRESH_INTERVAL_SECS;
+        if stale {
+            if let Some(yt_playlist_id) = summary.youtube_playlist_id.as_deref() {
+                if let Ok(yt) = YoutubeClient::from_db(&state.db).await {
+                    if populate_playlist_videos(&state, &yt, playlist_id, yt_playlist_id)
+                        .await
+                        .is_ok()
+                    {
+                        // Touch updated_at so we don't refresh again immediately.
+                        let _ = sqlx::query(
+                            "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
+                        )
+                        .bind(playlist_id)
+                        .execute(&state.db)
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
     let videos: Vec<PlaylistVideo> = sqlx::query_as(
         "SELECT id, video_id, video_title, video_thumbnail_url, channel_title, position, added_at \
          FROM child_playlist_videos \
@@ -228,7 +240,7 @@ pub async fn detail(
     .fetch_all(&state.db)
     .await?;
     // Filter inbound YouTube-sourced playlists through access control.
-    let videos = if !summary.is_own && summary.source == "youtube" {
+    let videos = if !summary.is_own && summary.youtube_playlist_id.is_some() {
         let yt_id = summary.youtube_playlist_id.clone().unwrap_or_default();
         let mut out = Vec::with_capacity(videos.len());
         for v in videos {
@@ -293,7 +305,7 @@ pub async fn update(
             return Err(AppError::BadRequest("title must not be empty".into()));
         }
         sqlx::query(
-            "UPDATE child_playlists SET title = ?, sync_status = 'pending_update', updated_at = unixepoch() \
+            "UPDATE child_playlists SET title = ?, updated_at = unixepoch() \
              WHERE id = ?",
         )
         .bind(trimmed)
@@ -303,7 +315,7 @@ pub async fn update(
     }
     if let Some(desc) = body.description.as_ref() {
         sqlx::query(
-            "UPDATE child_playlists SET description = ?, sync_status = 'pending_update', updated_at = unixepoch() \
+            "UPDATE child_playlists SET description = ?, updated_at = unixepoch() \
              WHERE id = ?",
         )
         .bind(desc.as_ref())
@@ -311,8 +323,6 @@ pub async fn update(
         .execute(&state.db)
         .await?;
     }
-
-    spawn_playlist_push(state.clone(), current.id, playlist_id);
 
     Ok(Json(fetch_summary(&state, playlist_id).await?))
 }
@@ -324,21 +334,16 @@ pub async fn delete(
     Path(playlist_id): Path<i64>,
 ) -> AppResult<StatusCode> {
     require_owner(&state, current.id, playlist_id).await?;
-    let is_own = is_own(&state, playlist_id).await?;
+
     sqlx::query(
         "UPDATE child_playlists \
          SET is_deleted = 1, \
-             sync_status = CASE WHEN ? = 1 THEN 'pending_delete' ELSE 'synced' END, \
              updated_at = unixepoch() \
          WHERE id = ?",
     )
-    .bind(is_own as i64)
     .bind(playlist_id)
     .execute(&state.db)
     .await?;
-    if is_own {
-        spawn_playlist_push(state.clone(), current.id, playlist_id);
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -409,20 +414,11 @@ pub async fn add_video(
     .await?;
 
     sqlx::query(
-        "UPDATE child_playlists SET sync_status = 'pending_update', updated_at = unixepoch() \
-         WHERE id = ?",
+        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
     )
     .bind(playlist_id)
     .execute(&state.db)
     .await?;
-
-    spawn_item_push(
-        state.clone(),
-        current.id,
-        playlist_id,
-        info.id.clone(),
-        PlaylistItemAction::Add,
-    );
 
     Ok(Json(row))
 }
@@ -450,20 +446,12 @@ pub async fn remove_video(
     }
 
     sqlx::query(
-        "UPDATE child_playlists SET sync_status = 'pending_update', updated_at = unixepoch() \
-         WHERE id = ?",
+        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
     )
     .bind(playlist_id)
     .execute(&state.db)
     .await?;
 
-    spawn_item_push(
-        state.clone(),
-        current.id,
-        playlist_id,
-        video_id,
-        PlaylistItemAction::Remove,
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -522,21 +510,12 @@ pub async fn reorder_videos(
         .await?;
     }
     sqlx::query(
-        "UPDATE child_playlists SET sync_status = 'pending_update', updated_at = unixepoch() \
-         WHERE id = ?",
+        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
     )
     .bind(playlist_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-
-    spawn_item_push(
-        state.clone(),
-        current.id,
-        playlist_id,
-        String::new(),
-        PlaylistItemAction::Reorder,
-    );
 
     let videos: Vec<PlaylistVideo> = sqlx::query_as(
         "SELECT id, video_id, video_title, video_thumbnail_url, channel_title, position, added_at \
@@ -597,10 +576,10 @@ pub async fn add_library(
     .await?;
     if let Some((id, _)) = existing {
         sqlx::query(
-            "UPDATE child_playlists SET is_deleted = 0, source = 'youtube', \
-                                          is_own = 0, sync_status = 'synced', \
-                                          title = ?, description = ?, \
-                                          updated_at = unixepoch() \
+            "UPDATE child_playlists SET is_deleted = 0, \
+                                           is_own = 0, \
+                                           title = ?, description = ?, \
+                                           updated_at = unixepoch() \
              WHERE id = ?",
         )
         .bind(&info.title)
@@ -608,13 +587,14 @@ pub async fn add_library(
         .bind(id)
         .execute(&state.db)
         .await?;
+        populate_playlist_videos(&state, &yt, id, &body.youtube_playlist_id).await?;
         return Ok(Json(fetch_summary(&state, id).await?));
     }
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO child_playlists \
-            (child_account_id, youtube_playlist_id, title, description, is_own, source, sync_status, is_deleted) \
-         VALUES (?, ?, ?, ?, 0, 'youtube', 'synced', 0) \
+            (child_account_id, youtube_playlist_id, title, description, is_own, is_deleted) \
+         VALUES (?, ?, ?, ?, 0, 0) \
          RETURNING id",
     )
     .bind(current.id)
@@ -623,7 +603,65 @@ pub async fn add_library(
     .bind(&info.description)
     .fetch_one(&state.db)
     .await?;
+    populate_playlist_videos(&state, &yt, id, &body.youtube_playlist_id).await?;
     Ok(Json(fetch_summary(&state, id).await?))
+}
+
+// ---------------------------------------------------------------------------
+// Populate playlist videos from YouTube
+// ---------------------------------------------------------------------------
+
+/// Fetch all video items from a YouTube playlist and upsert them into
+/// `child_playlist_videos`. Used when importing a library playlist and
+/// as a lazy-refresh when the child views the playlist detail.
+async fn populate_playlist_videos(
+    state: &AppState,
+    yt: &YoutubeClient,
+    playlist_row_id: i64,
+    youtube_playlist_id: &str,
+) -> AppResult<()> {
+    let mut page_token: Option<String> = None;
+    let mut idx: usize = 0;
+    loop {
+        let page = yt
+            .list_playlist_items(youtube_playlist_id, 50, page_token.as_deref())
+            .await?;
+        for item in &page.items {
+            let thumb_url = item
+                .thumbnails
+                .get("maxres")
+                .or_else(|| item.thumbnails.get("high"))
+                .or_else(|| item.thumbnails.get("standard"))
+                .or_else(|| item.thumbnails.get("medium"))
+                .or_else(|| item.thumbnails.get("default"))
+                .map(|t| t.url.clone());
+            let position = item.position.unwrap_or(idx as i64);
+            sqlx::query(
+                "INSERT INTO child_playlist_videos \
+                     (playlist_id, video_id, video_title, video_thumbnail_url, channel_title, position) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(playlist_id, video_id) DO UPDATE SET \
+                     video_title = excluded.video_title, \
+                     video_thumbnail_url = excluded.video_thumbnail_url, \
+                     channel_title = excluded.channel_title, \
+                     position = excluded.position",
+            )
+            .bind(playlist_row_id)
+            .bind(&item.video_id)
+            .bind(&item.title)
+            .bind(&thumb_url)
+            .bind(&item.channel_title)
+            .bind(position)
+            .execute(&state.db)
+            .await?;
+            idx += 1;
+        }
+        match page.next_page_token {
+            Some(tok) => page_token = Some(tok),
+            None => break,
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +696,6 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
     let row: PlaylistSummaryRow =
         sqlx::query_as(
             "SELECT p.id, p.youtube_playlist_id, p.title, p.description, p.is_own, \
-                    p.source, p.sync_status, \
                     (SELECT COUNT(*) FROM child_playlist_videos v WHERE v.playlist_id = p.id) AS video_count, \
                     p.created_at, p.updated_at, \
                     CASE \
@@ -682,8 +719,6 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         title,
         description,
         is_own,
-        source,
-        sync_status,
         video_count,
         created_at,
         updated_at,
@@ -695,8 +730,6 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         title,
         description,
         is_own: is_own != 0,
-        source,
-        sync_status,
         video_count,
         created_at,
         updated_at,
@@ -704,32 +737,4 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
     })
 }
 
-fn spawn_playlist_push(state: AppState, account_id: i64, playlist_id: i64) {
-    tokio::spawn(async move {
-        if let Err(err) = push_playlist_change(&state.db, account_id, playlist_id).await {
-            tracing::warn!(account_id, playlist_id, %err, "playlist push failed");
-        }
-    });
-}
 
-fn spawn_item_push(
-    state: AppState,
-    account_id: i64,
-    playlist_id: i64,
-    video_id: String,
-    action: PlaylistItemAction,
-) {
-    tokio::spawn(async move {
-        if let Err(err) =
-            push_playlist_item_change(&state.db, account_id, playlist_id, &video_id, action).await
-        {
-            tracing::warn!(
-                account_id,
-                playlist_id,
-                %video_id,
-                %err,
-                "playlist-item push failed"
-            );
-        }
-    });
-}

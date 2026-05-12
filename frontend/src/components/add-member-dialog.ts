@@ -24,6 +24,7 @@ export class AddMemberDialog extends LitElement {
 
   @state() private busy = false;
   @state() private error = "";
+  @state() private selectedRole = "child";
 
   @query("wa-dialog") private dialog!: HTMLElement & {
     show?: () => void;
@@ -102,6 +103,10 @@ export class AddMemberDialog extends LitElement {
     );
   }
 
+  private onRoleChange(e: Event): void {
+    this.selectedRole = (e.target as HTMLSelectElement).value;
+  }
+
   private errorMessage(err: unknown): string {
     if (err instanceof ApiError) {
       if (typeof err.body === "string" && err.body.length > 0) return err.body;
@@ -120,14 +125,25 @@ export class AddMemberDialog extends LitElement {
     this.busy = true;
     this.error = "";
     try {
-      const res = await api.post<{ login_url: string }>("/api/family/members", {
+      const res = await api.post<{ login_url?: string }>("/api/family/members", {
         role,
         display_name: display_name || undefined,
       });
-      // Send the browser through the OAuth flow. The auth callback
-      // will pick the role + display name back out of the signed
-      // pending-member cookie and redirect to /parent/family.
-      window.location.href = res.login_url;
+      if (res.login_url) {
+        // Parent account — send through the OAuth flow.
+        window.location.href = res.login_url;
+      } else {
+        // Child account created locally — close the dialog and
+        // tell the parent component to refresh.
+        this.open = false;
+        this.dispatchEvent(
+          new CustomEvent("family-changed", {
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        this.busy = false;
+      }
     } catch (err) {
       this.error = this.errorMessage(err);
       this.busy = false;
@@ -139,12 +155,12 @@ export class AddMemberDialog extends LitElement {
       <wa-dialog label="Add a family member" ?open=${this.open} @wa-after-hide=${this.close}>
         <form @submit=${this.onSubmit}>
           <p>
-            Adding a family member starts a Google sign-in for that person. Have them sit down with
-            you to pick the account.
+            Children are created as local profiles — no Google account needed. You can optionally
+            link a YouTube account later. Parents require a Google sign-in.
           </p>
           <label>
             Role
-            <select name="role" required>
+            <select name="role" required @change=${this.onRoleChange}>
               <option value="child" selected>Child</option>
               <option value="parent">Parent</option>
             </select>
@@ -155,7 +171,10 @@ export class AddMemberDialog extends LitElement {
               name="display_name"
               type="text"
               autocomplete="off"
-              placeholder="Optional — defaults to their Google name"
+              placeholder=${this.selectedRole === "parent"
+                ? "Optional — defaults to their Google name"
+                : "Required — pick a name for this profile"}
+              ?required=${this.selectedRole === "child"}
             />
           </label>
           ${this.error
@@ -164,7 +183,11 @@ export class AddMemberDialog extends LitElement {
           <div class="actions">
             <button type="button" @click=${this.close} ?disabled=${this.busy}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>
-              ${this.busy ? "Working…" : "Continue with Google"}
+              ${this.busy
+                ? "Working…"
+                : this.selectedRole === "parent"
+                  ? "Continue with Google"
+                  : "Create profile"}
             </button>
           </div>
         </form>

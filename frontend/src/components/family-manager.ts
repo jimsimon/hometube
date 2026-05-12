@@ -58,8 +58,33 @@ export class FamilyManager extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Surface errors from OAuth redirect flows (e.g., supervised account
+    // can't grant YouTube scope).
+    const params = new URLSearchParams(window.location.search);
+    const errorCode = params.get("error");
+    if (errorCode) {
+      this.error = this.errorCodeToMessage(errorCode);
+      // Clean up the URL so refreshing doesn't re-show the error.
+      const clean = new URL(window.location.href);
+      clean.searchParams.delete("error");
+      window.history.replaceState({}, "", clean.pathname + clean.search);
+    }
     void this.refresh();
     this.addEventListener("family-changed", () => void this.refresh());
+  }
+
+  private errorCodeToMessage(code: string): string {
+    switch (code) {
+      case "youtube_scope_missing":
+        return (
+          "YouTube access was not granted. This can happen if the YouTube permission was " +
+          "unchecked on the consent screen, or if the Google account is a supervised " +
+          "(Family Link) account. Supervised accounts cannot use YouTube API access. " +
+          "The child profile will work fine without it — YouTube linking is optional."
+        );
+      default:
+        return `An error occurred: ${code}`;
+    }
   }
 
   private errorMessage(err: unknown): string {

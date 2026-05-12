@@ -13,6 +13,9 @@ cfg = config.parse()
 local_resource(
     'backend',
     serve_cmd='cargo watch -w src -w templates -w migrations -x run',
+    serve_env={
+        'POT_SERVER_URL': 'http://127.0.0.1:4416',
+    },
     deps=['src/', 'templates/', 'Cargo.toml', 'migrations/'],
     labels=['server'],
     readiness_probe=probe(
@@ -27,14 +30,27 @@ local_resource(
     'frontend',
     serve_cmd='npm run dev',
     deps=['frontend/src/', 'frontend/vite.config.ts', 'frontend/tsconfig.json'],
-    dir='frontend',
+    serve_dir='frontend',
     labels=['client'],
+)
+
+# PO token server: generates proof-of-origin tokens so yt-dlp can
+# bypass YouTube's bot detection. Runs the bgutil Docker sidecar on
+# port 4416 (same as docker-compose.yml).
+local_resource(
+    'pot-server',
+    serve_cmd='docker run --rm -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest',
+    labels=['deps'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=4416, path="/ping"),
+    ),
 )
 
 # Verify yt-dlp is available so missing-binary failures surface
 # immediately rather than at first video play.
 local_resource(
     'ytdlp-check',
-    cmd='yt-dlp --version || (echo "WARNING: yt-dlp not found on PATH" && exit 0)',
+    cmd='yt-dlp --version || (echo "ERROR: yt-dlp not found on PATH – install it: https://github.com/yt-dlp/yt-dlp#installation" && exit 1)',
     labels=['deps'],
 )

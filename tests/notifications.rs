@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
 use hometube::services::notifications::{
-    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED, TYPE_TOKEN_EXPIRED,
+    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED,
 };
 
 #[tokio::test]
@@ -155,47 +155,6 @@ async fn read_all_marks_everything_read() {
     let res = app.server.get("/api/notifications/unread-count").await;
     let body: serde_json::Value = res.json();
     assert_eq!(body["unread"], 0);
-}
-
-#[tokio::test]
-async fn dispatch_token_expired_writes_one_row_per_parent() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let parent_id = app.parent_id.unwrap();
-
-    notifications::dispatch_token_expired(
-        &app.pool,
-        parent_id,
-        "parent@example.test",
-        "Parent One",
-    )
-    .await
-    .unwrap();
-
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
-            .bind(TYPE_TOKEN_EXPIRED)
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 1);
-
-    // Second call with the same account should be deduped within the
-    // 24-hour window.
-    notifications::dispatch_token_expired(
-        &app.pool,
-        parent_id,
-        "parent@example.test",
-        "Parent One",
-    )
-    .await
-    .unwrap();
-    let count_again: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM parent_notifications WHERE notification_type = ?")
-            .bind(TYPE_TOKEN_EXPIRED)
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
-    assert_eq!(count_again, 1, "second call should dedupe");
 }
 
 #[tokio::test]

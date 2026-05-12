@@ -28,8 +28,6 @@ use crate::error::AppResult;
 pub const TYPE_TIME_LIMIT_APPROACHING: &str = "time_limit_approaching";
 pub const TYPE_TIME_LIMIT_REACHED: &str = "time_limit_reached";
 pub const TYPE_YTDLP_FAILURE: &str = "ytdlp_failure";
-pub const TYPE_SYNC_ERROR: &str = "sync_error";
-pub const TYPE_TOKEN_EXPIRED: &str = "token_expired";
 pub const TYPE_NEW_SEARCH_TERM: &str = "new_search_term";
 pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
 
@@ -205,32 +203,6 @@ pub async fn dispatch_ytdlp_failure_deduped(
         "Video extraction failed",
         &format!("Could not load metadata for video {video_id}."),
         &payload,
-    )
-    .await
-}
-
-/// Notify every parent that an account's Google OAuth refresh token has
-/// stopped working and the user needs to re-authenticate. Deduped to one
-/// per account per day so a steady stream of failed background refreshes
-/// doesn't spam the bell.
-pub async fn dispatch_token_expired(
-    pool: &SqlitePool,
-    account_id: i64,
-    email: &str,
-    display_name: &str,
-) -> AppResult<()> {
-    let key = json_fragment_key("account_id", &account_id);
-    let metadata = serde_json::json!({
-        "account_id": account_id,
-        "email": email,
-    });
-    broadcast_once_per_day(
-        pool,
-        TYPE_TOKEN_EXPIRED,
-        &key,
-        "Reconnect Google account",
-        &format!("{display_name} ({email}) needs to reconnect their Google account."),
-        &metadata,
     )
     .await
 }

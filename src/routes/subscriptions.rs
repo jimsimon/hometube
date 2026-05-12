@@ -1,18 +1,15 @@
 //! Child subscription routes.
 //!
-//! `child_subscriptions` is the local mirror of the child's YouTube
-//! subscriptions. Three endpoints:
+//! `child_subscriptions` stores the child's channel subscriptions.
+//! Three endpoints:
 //!
 //! - `GET /api/subscriptions` — list non-deleted subscriptions, with a
 //!   `visible` flag computed by joining against
 //!   `allowlisted_channels`. Hidden rows are still returned so the UI
 //!   can grey them out and prompt the parent to allowlist them.
 //! - `POST /api/subscriptions` — body `{ channel_id }`. Inserts (or
-//!   un-soft-deletes) a row, marks it `pending_push`, and spawns a
-//!   background task to call `subscriptions.insert` on YouTube via
-//!   [`crate::services::sync::push_subscription_change`].
-//! - `DELETE /api/subscriptions/:channelId` — soft-deletes the row,
-//!   marks it `pending_delete`, and spawns the analogous push.
+//!   un-soft-deletes) a row.
+//! - `DELETE /api/subscriptions/:channelId` — soft-deletes the row.
 
 use axum::{
     extract::{Path, State},
@@ -23,7 +20,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::services::sync::push_subscription_change;
 use crate::services::youtube::YoutubeClient;
 use crate::state::AppState;
 
@@ -34,13 +30,10 @@ pub struct SubscriptionRow {
     pub channel_id: String,
     pub channel_title: String,
     pub channel_thumbnail_url: Option<String>,
-    pub source: String,
-    pub sync_status: String,
     pub subscribed_at: i64,
     /// `true` when the channel is in this child's allowlist; `false` when
-    /// the subscription exists locally (or on YouTube) but the parent
-    /// hasn't allowlisted it yet, in which case the UI should grey it
-    /// out.
+    /// the subscription exists locally but the parent hasn't allowlisted
+    /// it yet, in which case the UI should grey it out.
     pub visible: bool,
 }
 
@@ -48,15 +41,13 @@ pub struct SubscriptionRow {
 /// satisfy clippy's `type_complexity` lint.
 ///
 /// Columns in order:
-/// `id, channel_id, channel_title, channel_thumbnail_url, source,
-///  sync_status, subscribed_at, visible`.
+/// `id, channel_id, channel_title, channel_thumbnail_url,
+///  subscribed_at, visible`.
 type SubscriptionRowTuple = (
     i64,
     String,
     String,
     Option<String>,
-    String,
-    String,
     i64,
     i64,
 );
@@ -68,7 +59,7 @@ pub async fn list(
 ) -> AppResult<Json<Vec<SubscriptionRow>>> {
     let rows: Vec<SubscriptionRowTuple> = sqlx::query_as(
         "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
-                    s.source, s.sync_status, s.subscribed_at, \
+                    s.subscribed_at, \
                     CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
              FROM child_subscriptions s \
              LEFT JOIN allowlisted_channels a \
@@ -88,8 +79,6 @@ pub async fn list(
                 channel_id,
                 channel_title,
                 channel_thumbnail_url,
-                source,
-                sync_status,
                 subscribed_at,
                 visible,
             )| SubscriptionRow {
@@ -97,8 +86,6 @@ pub async fn list(
                 channel_id,
                 channel_title,
                 channel_thumbnail_url,
-                source,
-                sync_status,
                 subscribed_at,
                 visible: visible != 0,
             },
@@ -114,10 +101,8 @@ pub struct SubscribeBody {
 
 /// `POST /api/subscriptions` — subscribe to a channel.
 ///
-/// Inserts (or revives a soft-deleted row) with `source='app'` and
-/// `sync_status='pending_push'`, then spawns a background task to push
-/// the change to YouTube. Returns the freshly-inserted row immediately
-/// so the UI can render an optimistic "pending" pill.
+/// Inserts (or revives a soft-deleted row).
+/// Returns the freshly-inserted row immediately.
 pub async fn subscribe(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -135,13 +120,11 @@ pub async fn subscribe(
     sqlx::query(
         "INSERT INTO child_subscriptions \
             (child_account_id, channel_id, channel_title, channel_thumbnail_url, \
-             source, sync_status, is_deleted) \
-         VALUES (?, ?, ?, ?, 'app', 'pending_push', 0) \
+             is_deleted) \
+         VALUES (?, ?, ?, ?, 0) \
          ON CONFLICT(child_account_id, channel_id) DO UPDATE SET \
             channel_title = excluded.channel_title, \
             channel_thumbnail_url = excluded.channel_thumbnail_url, \
-            source = 'app', \
-            sync_status = 'pending_push', \
             is_deleted = 0, \
             updated_at = unixepoch()",
     )
@@ -151,8 +134,6 @@ pub async fn subscribe(
     .bind(thumb)
     .execute(&state.db)
     .await?;
-
-    spawn_sub_push(state.clone(), current.id, info.id.clone());
 
     let row = fetch_one(&state, current.id, &info.id).await?;
     Ok(Json(row))
@@ -166,7 +147,7 @@ pub async fn unsubscribe(
 ) -> AppResult<StatusCode> {
     let result = sqlx::query(
         "UPDATE child_subscriptions \
-         SET is_deleted = 1, sync_status = 'pending_delete', updated_at = unixepoch() \
+         SET is_deleted = 1, updated_at = unixepoch() \
          WHERE child_account_id = ? AND channel_id = ?",
     )
     .bind(current.id)
@@ -176,21 +157,12 @@ pub async fn unsubscribe(
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    spawn_sub_push(state.clone(), current.id, channel_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn spawn_sub_push(state: AppState, account_id: i64, channel_id: String) {
-    tokio::spawn(async move {
-        if let Err(err) = push_subscription_change(&state.db, account_id, &channel_id).await {
-            tracing::warn!(account_id, %channel_id, %err, "subscription push failed");
-        }
-    });
-}
 
 async fn fetch_one(
     state: &AppState,
@@ -202,13 +174,11 @@ async fn fetch_one(
         String,
         String,
         Option<String>,
-        String,
-        String,
         i64,
         i64,
     ) = sqlx::query_as(
         "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
-                s.source, s.sync_status, s.subscribed_at, \
+                s.subscribed_at, \
                 CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
          FROM child_subscriptions s \
          LEFT JOIN allowlisted_channels a \
@@ -224,8 +194,6 @@ async fn fetch_one(
         channel_id,
         channel_title,
         channel_thumbnail_url,
-        source,
-        sync_status,
         subscribed_at,
         visible,
     ) = row;
@@ -234,8 +202,6 @@ async fn fetch_one(
         channel_id,
         channel_title,
         channel_thumbnail_url,
-        source,
-        sync_status,
         subscribed_at,
         visible: visible != 0,
     })

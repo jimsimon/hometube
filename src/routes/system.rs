@@ -5,6 +5,7 @@
 //!   background if older than 1 hour).
 //! - `POST /api/system/ytdlp/update` — kick off the update job
 //!   immediately by triggering the matching `cron_jobs` row.
+//! - `GET /api/system/pot-server` — PO token server status.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -99,4 +100,52 @@ pub async fn update_ytdlp(State(state): State<AppState>) -> AppResult<Json<Updat
         .ok_or(AppError::NotFound)?;
     let run_id = sched.run_now(job_id).await?;
     Ok(Json(UpdateResponse { run_id }))
+}
+
+// -----------------------------------------------------------------------
+// PO token server status
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct PotServerStatus {
+    /// Whether the PO token server is reachable.
+    pub available: bool,
+    /// The URL we're trying to reach.
+    pub url: String,
+    /// Error message if unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether the yt-dlp plugin is installed.
+    pub plugin_installed: bool,
+}
+
+/// `GET /api/system/pot-server` — check PO token server health.
+pub async fn get_pot_server_status() -> Json<PotServerStatus> {
+    let pot_url = std::env::var("POT_SERVER_URL")
+        .unwrap_or_else(|_| "http://pot-server:4416".to_string());
+
+    let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
+        .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());
+    let plugin_installed = std::path::Path::new(&plugin_dir).exists()
+        && std::fs::read_dir(&plugin_dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+
+    // Ping the pot server's health endpoint (/ping).
+    let ping_url = format!("{}/ping", pot_url.trim_end_matches('/'));
+    let (available, error) = match reqwest::get(&ping_url).await {
+        Ok(resp) if resp.status().is_success() => (true, None),
+        Ok(resp) => (
+            false,
+            Some(format!("server returned status {}", resp.status())),
+        ),
+        Err(e) => (false, Some(format!("connection failed: {e}"))),
+    };
+
+    Json(PotServerStatus {
+        available,
+        url: pot_url,
+        error,
+        plugin_installed,
+    })
 }

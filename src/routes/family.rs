@@ -132,26 +132,53 @@ pub async fn list_members(State(state): State<AppState>) -> AppResult<Json<Vec<F
             last_login_at,
         });
     }
+
     Ok(Json(members))
 }
 
-/// `POST /api/family/members` — store a "pending member" cookie and
-/// return the URL the browser should navigate to in order to start the
-/// OAuth flow. The auth callback reads the cookie back out and creates
-/// the account with the requested role.
+/// Response for add-member: either a login_url (for parents who must
+/// OAuth) or the created member (for local-only children).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AddMemberResponse {
+    /// Parent account — browser must navigate to this URL for OAuth.
+    Redirect(LoginUrlResponse),
+    /// Child account — created immediately as local-only.
+    Created(FamilyMember),
+}
+
+/// `POST /api/family/members` — for children, creates a local-only
+/// account immediately and returns the new member. For parents, stores
+/// a pending-member cookie and returns a login URL for the OAuth flow.
 pub async fn add_member(
     State(state): State<AppState>,
     cookies: Cookies,
     Json(body): Json<AddMemberBody>,
-) -> AppResult<Json<LoginUrlResponse>> {
+) -> AppResult<Json<AddMemberResponse>> {
     let role = body.role.trim().to_ascii_lowercase();
-    if AccountType::parse(&role).is_none() {
-        return Err(AppError::BadRequest(format!(
+    let parsed_role = AccountType::parse(&role).ok_or_else(|| {
+        AppError::BadRequest(format!(
             "unknown role {:?}; expected \"parent\" or \"child\"",
             body.role
-        )));
+        ))
+    })?;
+
+    // Children are created as local-only accounts — no Google sign-in needed.
+    if parsed_role == AccountType::Child {
+        let display_name = body
+            .display_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::BadRequest("display_name is required for child accounts".into())
+            })?;
+        let id = account::insert_local_child(&state.db, display_name, None).await?;
+        info!(account_id = id, display_name, "created local child account");
+        let member = list_one(&state, id).await?;
+        return Ok(Json(AddMemberResponse::Created(member)));
     }
 
+    // Parents still require Google OAuth for identity.
     let pending = PendingMember {
         context: "add_member".into(),
         role: Some(role.clone()),
@@ -163,7 +190,9 @@ pub async fn add_member(
 
     let login_url = format!("/api/auth/login?role={role}&context=add_member");
     info!(role = %role, "queued add_member flow");
-    Ok(Json(LoginUrlResponse { login_url }))
+    Ok(Json(AddMemberResponse::Redirect(LoginUrlResponse {
+        login_url,
+    })))
 }
 
 /// `PUT /api/family/members/:id` — rename / change role.

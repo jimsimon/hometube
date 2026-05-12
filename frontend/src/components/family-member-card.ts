@@ -282,7 +282,6 @@ export class FamilyMemberCard extends LitElement {
             ${m.account_type === "parent" && !m.has_pin
               ? html`<span class="badge warn" title="Set PIN required">Set PIN required</span>`
               : nothing}
-            ${m.token_expired ? html`<span class="badge expired">Token expired</span>` : nothing}
             <span class="badge">Last login: ${this.fmtDate(m.last_login_at)}</span>
           </div>
         </div>
@@ -294,9 +293,11 @@ export class FamilyMemberCard extends LitElement {
           >
             ${this.editing ? "Cancel" : "Edit"}
           </button>
-          <button type="button" ?disabled=${this.busy} @click=${this.onReauth}>
-            Re-authenticate
-          </button>
+          ${m.account_type === "parent"
+            ? html`<button type="button" ?disabled=${this.busy} @click=${this.onReauth}>
+                Re-authenticate
+              </button>`
+            : nothing}
           <button type="button" class="danger" ?disabled=${this.busy} @click=${this.openRemove}>
             Remove
           </button>

@@ -70,6 +70,7 @@ for a tour of the major modules.
 Requirements:
 
 - [`rustup`](https://rustup.rs/) (toolchain pinned via `rust-toolchain.toml`)
+- [`cargo-watch`](https://github.com/watchexec/cargo-watch) — `cargo install cargo-watch`
 - [`nvm`](https://github.com/nvm-sh/nvm) (Node version pinned via `.nvmrc`)
 - [`tilt`](https://tilt.dev/) for the dev environment
 - `yt-dlp` on `PATH`
@@ -86,9 +87,14 @@ App runs at <http://localhost:3000>.
 ## Deployment
 
 ```bash
-docker run -p 3000:3000 -v hometube-data:/app/data \
-  ghcr.io/jimsimon/hometube:latest
+cd docker && docker compose up -d
 ```
+
+This starts two containers:
+- **app** — the HomeTube server on port 3000
+- **pot-server** — a PO (Proof-of-Origin) token server that helps yt-dlp
+  bypass YouTube's bot detection. Runs automatically in the background;
+  no configuration needed.
 
 Then open <http://localhost:3000> and follow the setup wizard.
 

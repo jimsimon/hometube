@@ -140,22 +140,22 @@ async fn subscriptions_list_marks_inbound_youtube_invisible_until_allowlisted() 
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Inbound youtube subscription not yet allowlisted.
+    // Subscription not yet allowlisted.
     sqlx::query(
         "INSERT INTO child_subscriptions \
-            (child_account_id, channel_id, channel_title, source) \
-         VALUES (?, 'yt-hidden', 'Hidden Channel', 'youtube')",
+            (child_account_id, channel_id, channel_title) \
+         VALUES (?, 'yt-hidden', 'Hidden Channel')",
     )
     .bind(child_id)
     .execute(&app.pool)
     .await
     .unwrap();
 
-    // App-sourced subscription that we'll allowlist.
+    // Subscription that we'll allowlist.
     sqlx::query(
         "INSERT INTO child_subscriptions \
-            (child_account_id, channel_id, channel_title, source) \
-         VALUES (?, 'app-allowed', 'Good Channel', 'app')",
+            (child_account_id, channel_id, channel_title) \
+         VALUES (?, 'app-allowed', 'Good Channel')",
     )
     .bind(child_id)
     .execute(&app.pool)
@@ -191,7 +191,7 @@ async fn subscriptions_list_marks_inbound_youtube_invisible_until_allowlisted() 
 }
 
 #[tokio::test]
-async fn subscriptions_unsubscribe_marks_pending_delete() {
+async fn subscriptions_unsubscribe_soft_deletes() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
     sqlx::query(
@@ -207,15 +207,14 @@ async fn subscriptions_unsubscribe_marks_pending_delete() {
     let res = app.server.delete("/api/subscriptions/chan-1").await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 
-    let (deleted, status): (i64, String) = sqlx::query_as(
-        "SELECT is_deleted, sync_status FROM child_subscriptions WHERE channel_id = ?",
+    let deleted: i64 = sqlx::query_scalar(
+        "SELECT is_deleted FROM child_subscriptions WHERE channel_id = ?",
     )
     .bind("chan-1")
     .fetch_one(&app.pool)
     .await
     .unwrap();
     assert_eq!(deleted, 1);
-    assert_eq!(status, "pending_delete");
 }
 
 #[tokio::test]
@@ -277,20 +276,20 @@ async fn likes_list_marks_inbound_youtube_likes_invisible_until_allowlisted() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Inbound YouTube-sourced like — not allowlisted.
+    // Like — not allowlisted.
     sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title, source) \
-         VALUES (?, 'yt-hidden', 'Hidden', 'youtube')",
+        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
+         VALUES (?, 'yt-hidden', 'Hidden')",
     )
     .bind(child_id)
     .execute(&app.pool)
     .await
     .unwrap();
 
-    // App-sourced like that we'll also allowlist as a video.
+    // Like that we'll also allowlist as a video.
     sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title, source) \
-         VALUES (?, 'app-allowed', 'Allowed', 'app')",
+        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
+         VALUES (?, 'app-allowed', 'Allowed')",
     )
     .bind(child_id)
     .execute(&app.pool)

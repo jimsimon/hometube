@@ -35,7 +35,6 @@ async fn create_with_description() {
     let body: serde_json::Value = res.json();
     assert_eq!(body["title"], "Mix");
     assert_eq!(body["description"], "fun stuff");
-    assert_eq!(body["sync_status"], "pending_create");
 }
 
 #[tokio::test]
@@ -191,8 +190,8 @@ async fn list_marks_inbound_youtube_playlists_invisible_until_allowlisted() {
     // Seed a YouTube-sourced playlist that is *not* allowlisted.
     let hidden_id: i64 = sqlx::query_scalar(
         "INSERT INTO child_playlists \
-            (child_account_id, youtube_playlist_id, title, is_own, source, sync_status, is_deleted) \
-         VALUES (?, 'YT_HIDDEN', 'Hidden Playlist', 0, 'youtube', 'synced', 0) \
+            (child_account_id, youtube_playlist_id, title, is_own, is_deleted) \
+         VALUES (?, 'YT_HIDDEN', 'Hidden Playlist', 0, 0) \
          RETURNING id",
     )
     .bind(child_id)
@@ -255,8 +254,8 @@ async fn detail_filters_inbound_videos_by_allowlist() {
     // Create the YouTube-sourced playlist locally.
     let pl_id: i64 = sqlx::query_scalar(
         "INSERT INTO child_playlists \
-            (child_account_id, youtube_playlist_id, title, is_own, source, sync_status, is_deleted) \
-         VALUES (?, 'YT_PL', 'YT Playlist', 0, 'youtube', 'synced', 0) \
+            (child_account_id, youtube_playlist_id, title, is_own, is_deleted) \
+         VALUES (?, 'YT_PL', 'YT Playlist', 0, 0) \
          RETURNING id",
     )
     .bind(child_id)
