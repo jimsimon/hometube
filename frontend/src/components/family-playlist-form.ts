@@ -14,9 +14,10 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, query, state } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
-import type { AccountSummary, FamilyPlaylistDetail } from "../types/index.js";
+import type { FamilyPlaylistDetail } from "../types/index.js";
 
 import "./error-banner.js";
+import "./account-selector.js";
 
 @customElement("hometube-family-playlist-form")
 export class FamilyPlaylistForm extends LitElement {
@@ -24,7 +25,6 @@ export class FamilyPlaylistForm extends LitElement {
   @state() private titleValue = "";
   @state() private description = "";
   @state() private childIds: number[] = [];
-  @state() private childrenList: AccountSummary[] = [];
   @state() private error = "";
   @state() private saving = false;
 
@@ -92,11 +92,6 @@ export class FamilyPlaylistForm extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    void this.loadChildren();
-  }
-
   /** Open in create mode (no existing) or edit mode (existing). */
   open(existing?: FamilyPlaylistDetail): void {
     this.existing = existing ?? null;
@@ -105,24 +100,6 @@ export class FamilyPlaylistForm extends LitElement {
     this.childIds = existing ? [...existing.child_ids] : [];
     this.error = "";
     this.dialog?.show?.();
-  }
-
-  private async loadChildren(): Promise<void> {
-    try {
-      this.childrenList = await api.get<AccountSummary[]>("/api/accounts?type=child");
-    } catch {
-      // ignore: the form still works for the title/description path.
-    }
-  }
-
-  private toggleChild(id: number, checked: boolean): void {
-    if (checked) {
-      if (!this.childIds.includes(id)) {
-        this.childIds = [...this.childIds, id];
-      }
-    } else {
-      this.childIds = this.childIds.filter((c) => c !== id);
-    }
   }
 
   private onSubmit = async (e: Event): Promise<void> => {
@@ -187,21 +164,15 @@ export class FamilyPlaylistForm extends LitElement {
           </label>
           <fieldset class="members">
             <legend>Children with access</legend>
-            ${this.childrenList.length === 0
-              ? html`<span class="error">No child accounts found.</span>`
-              : this.childrenList.map(
-                  (c) => html`
-                    <label class="row">
-                      <input
-                        type="checkbox"
-                        .checked=${this.childIds.includes(c.id)}
-                        @change=${(e: Event) =>
-                          this.toggleChild(c.id, (e.target as HTMLInputElement).checked)}
-                      />
-                      ${c.display_name}
-                    </label>
-                  `,
-                )}
+            <hometube-account-selector
+              multiple
+              account-type="child"
+              .selected=${this.childIds}
+              empty-message="No child accounts found."
+              @account-changed=${(e: CustomEvent<{ accountIds?: number[] }>) => {
+                if (e.detail.accountIds) this.childIds = e.detail.accountIds;
+              }}
+            ></hometube-account-selector>
           </fieldset>
           ${this.error
             ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`

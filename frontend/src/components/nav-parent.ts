@@ -1,56 +1,34 @@
 /**
  * <hometube-nav-parent>
  *
- * Top navigation bar shown on every parent dashboard page. Renders:
- *   - the HomeTube wordmark / link to /parent/home
- *   - section links (Content, Family, System)
- *   - a child-selector dropdown driven by /api/accounts?type=child
- *   - the global theme toggle
- *   - a logout button (POST /api/auth/logout)
+ * Top navigation for the parent dashboard. Composed of:
+ *
+ *   - <hometube-nav-bar>           — the responsive shell + logout
+ *   - <hometube-account-selector>  — child-picker dropdown
+ *   - <hometube-notification-bell> — alerts pill
+ *   - <hometube-theme-toggle>      — dark/light switch
  *
  * On every change of the child dropdown the component dispatches a
  * bubbling `child-changed` CustomEvent with `{ detail: { childId } }`,
- * which the page wiring in `templates/pages/parent/home.html` fans out
- * to every child-aware component on the page.
+ * which the page wiring in `templates/pages/parent/home.html` fans
+ * out to every child-aware component on the page.
  */
 
 import { LitElement, html, css } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
-
-import { api } from "../services/api.js";
-import type { AccountSummary } from "../types/index.js";
+import { customElement, property } from "lit/decorators.js";
 
 import "./notification-bell.js";
-
-const SELECTED_CHILD_KEY = "hometube-selected-child";
+import "./nav-bar.js";
+import "./account-selector.js";
 
 @customElement("hometube-nav-parent")
 export class NavParent extends LitElement {
   @property({ type: String, attribute: "display-name" })
   displayName = "";
 
-  @state() private childrenList: AccountSummary[] = [];
-  @state() private selectedChildId: number | null = null;
-  @state() private loading = false;
-  @state() private error = "";
-
   static styles = css`
     :host {
       display: block;
-    }
-    nav {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 1rem;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--wa-color-surface-border);
-      background: var(--wa-color-surface-default);
-    }
-    .brand {
-      font-weight: 700;
-      text-decoration: none;
-      color: inherit;
     }
     .links {
       display: flex;
@@ -63,140 +41,48 @@ export class NavParent extends LitElement {
     .links a:hover {
       text-decoration: underline;
     }
-    .spacer {
-      flex: 1;
-    }
-    label.child-picker {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.9rem;
-    }
-    select {
-      padding: 0.25rem 0.5rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      border-radius: 0.375rem;
-      background: var(--wa-color-surface-default);
-      color: var(--wa-color-text-normal);
-      font: inherit;
-    }
-    button {
-      padding: 0.25rem 0.75rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: transparent;
-      color: var(--wa-color-text-normal);
-      font: inherit;
-      cursor: pointer;
-    }
-    .who {
-      color: var(--wa-color-text-quiet);
-      font-size: 0.85rem;
-    }
-    .error {
-      color: var(--wa-color-danger-fill, #b91c1c);
-      font-size: 0.85rem;
+    .brand {
+      font-weight: 700;
+      text-decoration: none;
+      color: inherit;
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    void this.loadChildren();
-  }
-
-  private async loadChildren(): Promise<void> {
-    this.loading = true;
-    this.error = "";
-    try {
-      const list = await api.get<AccountSummary[]>("/api/accounts?type=child");
-      this.childrenList = list;
-      const stored = Number(localStorage.getItem(SELECTED_CHILD_KEY));
-      const fromStore = list.find((c) => c.id === stored);
-      const initial = fromStore ?? list[0];
-      if (initial) {
-        this.selectedChildId = initial.id;
-        this.dispatchChildChanged(initial.id);
-      }
-    } catch (err) {
-      this.error = `Could not load children: ${(err as Error).message}`;
-    } finally {
-      this.loading = false;
-    }
-  }
-
-  private dispatchChildChanged(childId: number): void {
-    localStorage.setItem(SELECTED_CHILD_KEY, String(childId));
-    this.dispatchEvent(
-      new CustomEvent("child-changed", {
-        detail: { childId },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-  }
-
-  private onChildChange = (e: Event): void => {
-    const id = Number((e.target as HTMLSelectElement).value);
-    this.selectedChildId = id;
-    this.dispatchChildChanged(id);
-  };
-
-  private onLogout = async (): Promise<void> => {
-    try {
-      await api.post("/api/auth/logout");
-    } finally {
-      window.location.href = "/profiles";
+  private onAccountChanged = (
+    e: CustomEvent<{ accountId?: number; accountIds?: number[] }>,
+  ): void => {
+    const id = e.detail.accountId;
+    if (id != null) {
+      this.dispatchEvent(
+        new CustomEvent("child-changed", {
+          detail: { childId: id },
+          bubbles: true,
+          composed: true,
+        }),
+      );
     }
   };
 
   override render() {
     return html`
-      <nav aria-label="Parent navigation">
-        <a href="/parent/home" class="brand">HomeTube</a>
-
-        <div class="links">
+      <hometube-nav-bar nav-label="Parent navigation" display-name=${this.displayName}>
+        <a slot="brand" href="/parent/home" class="brand">HomeTube</a>
+        <div slot="primary" class="links">
           <a href="/parent/home">Content</a>
           <a href="/parent/playlists">Playlists</a>
           <a href="/parent/activity">Activity</a>
           <a href="/parent/family">Family</a>
           <a href="/parent/system">System</a>
         </div>
-
-        <div class="spacer"></div>
-
-        ${this.loading
-          ? html`<span class="who">Loading…</span>`
-          : this.childrenList.length === 0
-            ? html`<span class="who">No children yet</span>`
-            : html`
-                <label class="child-picker" for="child-select">
-                  Child
-                  <select
-                    id="child-select"
-                    aria-label="Active child"
-                    .value=${String(this.selectedChildId ?? "")}
-                    @change=${this.onChildChange}
-                  >
-                    ${this.childrenList.map(
-                      (c) =>
-                        html`<option value=${c.id} ?selected=${c.id === this.selectedChildId}>
-                          ${c.display_name}
-                        </option>`,
-                    )}
-                  </select>
-                </label>
-              `}
-
-        <hometube-notification-bell></hometube-notification-bell>
-        <hometube-theme-toggle></hometube-theme-toggle>
-
-        <span class="who" aria-hidden="true">
-          ${this.displayName ? `Signed in as ${this.displayName}` : ""}
-        </span>
-        <a href="/profiles">Switch profile</a>
-        <button type="button" @click=${this.onLogout}>Log out</button>
-        ${this.error ? html`<span class="error" role="alert">${this.error}</span>` : null}
-      </nav>
+        <hometube-account-selector
+          slot="actions"
+          account-type="child"
+          empty-message="No children yet"
+          @account-changed=${this.onAccountChanged}
+        ></hometube-account-selector>
+        <hometube-notification-bell slot="actions"></hometube-notification-bell>
+        <hometube-theme-toggle slot="actions"></hometube-theme-toggle>
+      </hometube-nav-bar>
     `;
   }
 }
