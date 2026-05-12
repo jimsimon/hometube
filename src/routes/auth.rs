@@ -79,8 +79,18 @@ pub struct LoginQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
-    pub code: String,
-    pub state: String,
+    /// Authorization code on a successful round-trip. `None` when
+    /// Google returns an error (the `error` field is set instead).
+    #[serde(default)]
+    pub code: Option<String>,
+    /// CSRF state token on a successful round-trip. `None` on error.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Set by Google when the user cancels or otherwise can't sign
+    /// in (e.g. `access_denied`). Surfaces a redirect to
+    /// `/login?error=<code>` instead of a bare 400.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +158,18 @@ pub async fn callback(
 ) -> AppResult<Response> {
     let signed = cookies.signed(&state.cookie_key);
 
+    // Google returned an error (user cancelled, scope refused, etc.).
+    // Clear cookies and bounce to /login so the user has a clear path
+    // forward instead of seeing a bare 400.
+    if let Some(error_code) = q.error.as_deref() {
+        let mut clear = Cookie::new(OAUTH_COOKIE, "");
+        clear.set_path("/");
+        signed.remove(clear);
+        family::clear_pending_cookie(&cookies, &state);
+        warn!(error = %error_code, "OAuth callback returned error");
+        return Ok(Redirect::to(&format!("/login?error={error_code}")).into_response());
+    }
+
     let flow_state: OAuthFlowState = signed
         .get(OAUTH_COOKIE)
         .and_then(|c| serde_json::from_str(c.value()).ok())
@@ -164,13 +186,20 @@ pub async fn callback(
     // out, we don't want a stale cookie hanging around.
     family::clear_pending_cookie(&cookies, &state);
 
-    if flow_state.csrf != q.state {
+    let code = q
+        .code
+        .ok_or_else(|| AppError::BadRequest("OAuth callback missing `code` parameter".into()))?;
+    let state_token = q
+        .state
+        .ok_or_else(|| AppError::BadRequest("OAuth callback missing `state` parameter".into()))?;
+
+    if flow_state.csrf != state_token {
         return Err(AppError::BadRequest("OAuth state mismatch".into()));
     }
 
     let client = oauth_svc::build_client(&state.db).await?;
     let pkce = PkceCodeVerifier::new(flow_state.pkce_verifier);
-    let token = oauth_svc::exchange_code(&client, q.code, pkce).await?;
+    let token = oauth_svc::exchange_code(&client, code, pkce).await?;
 
     let access_token = token.access_token().secret().to_string();
     let refresh_token = token

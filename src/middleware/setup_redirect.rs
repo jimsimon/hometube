@@ -39,6 +39,7 @@ const ALLOWED_PREFIXES: &[&str] = &[
     // flow). Allowing them here is harmless during setup since the
     // pages themselves redirect to /setup when no parent exists.
     "/profiles",
+    "/login",
 ];
 
 fn is_allowed(uri: &Uri) -> bool {

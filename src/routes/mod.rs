@@ -422,6 +422,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(pages::root_or_setup))
         .route("/setup", get(pages::setup_wizard))
         .route("/setup/pin", get(pages::set_pin))
+        .route("/login", get(pages::login))
         .route("/profiles", get(pages::profile_picker))
         .route("/parent/home", get(pages::parent_home))
         .route("/parent/family", get(pages::parent_family))
