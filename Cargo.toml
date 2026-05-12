@@ -62,6 +62,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
 cron = "0.12"
 
+[features]
+# `test-login` exposes a small set of unauthenticated HTTP routes that
+# seed the database with deterministic accounts and mint session
+# cookies. Used exclusively by the Playwright E2E suite — production
+# builds MUST NOT enable this feature.
+test-login = []
+
 [dev-dependencies]
 axum-test = "20"
 tower = { version = "0.5", features = ["util"] }

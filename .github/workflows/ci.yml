@@ -187,8 +187,8 @@ jobs:
         run: npm install --no-audit --no-fund
         working-directory: e2e
 
-      - name: Build backend (release)
-        run: cargo build --release --locked
+      - name: Build backend (release + test-login feature)
+        run: cargo build --release --locked --features test-login
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium

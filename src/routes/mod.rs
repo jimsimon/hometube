@@ -57,6 +57,8 @@ pub mod search;
 pub mod setup;
 pub mod subscriptions;
 pub mod system;
+#[cfg(feature = "test-login")]
+pub mod test_login;
 pub mod timer;
 pub mod usage;
 pub mod videos;
@@ -447,10 +449,24 @@ pub fn router(state: AppState) -> Router {
     // to live at the document root for browsers to honour them.
     let static_root = PathBuf::from(&static_dir);
 
-    Router::new()
+    #[cfg(feature = "test-login")]
+    let test_login_routes = Router::new()
+        .route("/api/test/seed", post(test_login::seed))
+        .route("/api/test/login-as", post(test_login::login_as))
+        .route("/api/test/reset", post(test_login::reset));
+
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .merge(page_routes)
         .merge(video_page)
-        .route("/api/health", get(health))
+        .route("/api/health", get(health));
+
+    #[cfg(feature = "test-login")]
+    {
+        router = router.merge(test_login_routes);
+    }
+
+    router
         .nest_service("/assets", ServeDir::new(&static_dir))
         .route_service("/sw.js", ServeFile::new(static_root.join("sw.js")))
         .route_service("/sw.js.map", ServeFile::new(static_root.join("sw.js.map")))
