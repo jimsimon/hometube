@@ -139,43 +139,36 @@ pub async fn login_as(
     Ok(Json(serde_json::json!({ "session_id": session_id })))
 }
 
-/// `POST /api/test/reset` — wipe everything except sqlite_*.
+/// `POST /api/test/reset` — wipe everything except sqlite_* and
+/// migration-tracking tables. Dynamically enumerates user tables from
+/// `sqlite_master` so this endpoint doesn't drift out of sync when
+/// new migrations add tables.
 pub async fn reset(State(state): State<AppState>) -> AppResult<StatusCode> {
-    // Order matters: foreign keys cascade only where ON DELETE CASCADE
-    // is declared; we delete from leaf tables first and walk up.
-    let tables = [
-        "watch_history",
-        "search_log",
-        "child_playlist_videos",
-        "child_playlists",
-        "video_likes",
-        "child_subscriptions",
-        "blocked_videos",
-        "allowlisted_videos",
-        "allowlisted_channels",
-        "allowlisted_playlists",
-        "bookmarks",
-        "parent_notifications",
-        "usage_limits",
-        "child_settings",
-        "family_playlist_items",
-        "family_playlist_members",
-        "family_playlists",
-        "sleep_timers",
-        "offline_downloads",
-        "video_metadata_cache",
-        "ytdlp_info",
-        "cron_job_runs",
-        "cron_jobs",
-        "sessions",
-        "accounts",
-        "app_config",
-    ];
-    for t in tables {
-        let _ = sqlx::query(&format!("DELETE FROM {t}"))
+    // Enumerate all user tables (excludes sqlite internals and the
+    // sqlx migrations table).
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'table' \
+           AND name NOT LIKE 'sqlite_%' \
+           AND name != '_sqlx_migrations' \
+         ORDER BY name",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    // Temporarily disable FK checks so we can DELETE in any order
+    // without cascading failures. Re-enable after the loop.
+    let _ = sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&state.db)
+        .await;
+    for (table,) in &tables {
+        let _ = sqlx::query(&format!("DELETE FROM [{table}]"))
             .execute(&state.db)
             .await;
     }
+    let _ = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&state.db)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -147,12 +147,25 @@ export async function saveVideoToOpfs(
   }
 
   const dir = await videoSubdir(videoId, true);
-  const fileHandle = await dir.getFileHandle(qualityFilename(quality), {
+  const filename = qualityFilename(quality);
+  const fileHandle = await dir.getFileHandle(filename, {
     create: true,
   });
   const writable = await fileHandle.createWritable();
   // Streamed pipe — tap the response body directly into the file.
-  await response.body.pipeTo(writable);
+  // On network failure the partial file is removed so we don't leak
+  // storage on interrupted downloads.
+  try {
+    await response.body.pipeTo(writable);
+  } catch (err) {
+    try {
+      await dir.removeEntry(filename);
+    } catch {
+      // Best-effort cleanup; the file may not exist if pipeTo failed
+      // before any bytes were written.
+    }
+    throw err;
+  }
 
   const written = await fileHandle.getFile();
 

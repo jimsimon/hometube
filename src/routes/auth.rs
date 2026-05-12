@@ -167,7 +167,14 @@ pub async fn callback(
         signed.remove(clear);
         family::clear_pending_cookie(&cookies, &state);
         warn!(error = %error_code, "OAuth callback returned error");
-        return Ok(Redirect::to(&format!("/login?error={error_code}")).into_response());
+        // Sanitize: only allow safe alphanumeric + underscore chars into
+        // the redirect URL to prevent header injection / open-redirect.
+        let sanitized: String = error_code
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(64)
+            .collect();
+        return Ok(Redirect::to(&format!("/login?error={sanitized}")).into_response());
     }
 
     let flow_state: OAuthFlowState = signed
