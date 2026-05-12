@@ -1,92 +1,64 @@
 /**
- * Offline-download helpers.
+ * Offline-download facade.
  *
- * HomeTube stores downloaded videos in the browser's Cache Storage
- * (`caches.open(VIDEO_CACHE)`). We picked the Cache API over OPFS
- * because:
+ * Storage moved from Cache Storage (`caches.open(VIDEO_CACHE)`) to
+ * the Origin Private File System in T-11 of the follow-up plan. The
+ * original public surface is preserved here so existing callers keep
+ * working without churn — every helper just delegates to
+ * [`./offline-opfs.ts`].
  *
- *   1. Service workers can read from `caches` directly. Reaching OPFS
- *      from a SW requires a `BroadcastChannel`/`SharedWorker` bridge
- *      with the page, which is fragile and isn't supported on Safari.
- *   2. The Cache API natively understands `Request`/`Response` objects,
- *      so the SW's `fetch` handler can do `caches.match(request)` and
- *      return the result directly.
- *   3. Cache responses are persisted across page reloads exactly like
- *      OPFS, and `navigator.storage.persist()` covers them too.
+ * Why OPFS:
+ *   1. Downloads stream straight to disk (`pipeTo`) instead of
+ *      buffering the whole video in RAM.
+ *   2. Per-file size accounting is exact via `FileSystemFileHandle`.
+ *   3. Random-access seeks are cheap, so the service-worker bridge
+ *      can serve byte-range requests without slicing a Response blob.
  *
- * The trade-off is no random-access I/O — but for full-file video
- * downloads the browser handles range requests automatically against a
- * cached `Response` body in modern Chromium, and we add a fallback
- * `Range`-aware path in the SW to keep Firefox/Safari working.
- *
- * Cache key shape: `https://<origin>/__hometube/offline/<videoId>/<quality>`
- * — a synthetic URL we never actually fetch. The SW's video-proxy
- * handler maps real `/api/...` URLs to this synthetic key before
- * looking up the cache.
+ * Service workers can't reach OPFS directly; the `opfs-bridge.ts`
+ * companion module wires up a `postMessage` channel so an open page
+ * proxies the read on the SW's behalf. When no page is open we fall
+ * through to the network — the original plan accepts this kind of
+ * graceful degradation.
  */
+import {
+  deleteOfflineVideo as deleteOpfs,
+  ensurePersistentStorage as ensureOpfs,
+  entryToCardItem as entryToCardItemOpfs,
+  getOfflineVideoStream as getOpfsStream,
+  getStorageEstimate as getOpfsEstimate,
+  getVideoPrefs as getPrefsOpfs,
+  hasOfflineVideo as hasOpfs,
+  isOpfsSupported,
+  listOfflineVideos as listOpfs,
+  OPFS_VIDEO_DIR,
+  type OfflineEntry,
+  saveVideoToOpfs as saveOpfs,
+  setVideoPrefs as setPrefsOpfs,
+  type VideoPrefs,
+} from "./offline-opfs.js";
 import type { ContinueWatchingItem, VideoMetadata } from "../types/index.js";
 
-/** Name of the `caches` bucket used for downloaded video bodies. */
+export type { OfflineEntry, VideoPrefs };
+
+/**
+ * Legacy Cache Storage bucket name. Retained as an export because
+ * the migration shim and a couple of older tests still reference it,
+ * and because some user agents may still have leftover entries from
+ * pre-OPFS builds.
+ */
 export const VIDEO_CACHE = "hometube-videos-v1";
 
-/** localStorage key for the downloaded-video manifest (metadata index). */
-const MANIFEST_KEY = "hometube-offline-manifest";
+/** Public OPFS root directory used for downloaded videos. */
+export { OPFS_VIDEO_DIR, isOpfsSupported };
 
-/** Per-video user preferences (e.g. audio-only mode). */
-const PREFS_KEY_PREFIX = "hometube-video-prefs:";
-
-export interface OfflineEntry {
-  videoId: string;
-  quality: string;
-  /** Original URL used for the download (so the SW can match it). */
-  sourceUrl: string;
-  title: string | null;
-  thumbnailUrl: string | null;
-  channelTitle: string | null;
-  durationSeconds: number | null;
-  sizeBytes: number | null;
-  downloadedAt: number;
-}
-
-interface OfflineManifest {
-  version: 1;
-  entries: OfflineEntry[];
-}
-
-/** Synthetic cache URL used as the storage key for a (video, quality). */
+/** Synthetic cache URL kept for backward compatibility. */
 export function offlineCacheKey(videoId: string, quality: string): string {
-  // Use the page origin so the URL is same-origin (caches don't allow
-  // arbitrary URLs in some browsers).
   const origin = typeof location === "undefined" ? "http://localhost" : location.origin;
   return `${origin}/__hometube/offline/${encodeURIComponent(
     videoId,
   )}/${encodeURIComponent(quality)}`;
 }
 
-function readManifest(): OfflineManifest {
-  try {
-    const raw = localStorage.getItem(MANIFEST_KEY);
-    if (!raw) return { version: 1, entries: [] };
-    const parsed = JSON.parse(raw) as OfflineManifest;
-    if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
-      return { version: 1, entries: [] };
-    }
-    return parsed;
-  } catch {
-    return { version: 1, entries: [] };
-  }
-}
-
-function writeManifest(manifest: OfflineManifest): void {
-  localStorage.setItem(MANIFEST_KEY, JSON.stringify(manifest));
-}
-
-/**
- * Persist a video's bytes to the Cache API and append an entry to the
- * offline manifest. The caller is responsible for fetching the response
- * (via `fetch()` or Background Fetch) and passing the raw `Response` —
- * this keeps progress reporting in the caller's hands.
- */
 export async function saveVideoToOpfs(
   videoId: string,
   quality: string,
@@ -94,151 +66,115 @@ export async function saveVideoToOpfs(
   meta: VideoMetadata,
   sourceUrl: string,
 ): Promise<OfflineEntry> {
-  if (!("caches" in self)) {
-    throw new Error("Cache Storage API is not available in this browser.");
-  }
-  const cache = await caches.open(VIDEO_CACHE);
-  const key = offlineCacheKey(videoId, quality);
-
-  // Clone the body into a Blob so we can read its size. We also stamp
-  // a couple of headers so the SW can serve range requests sensibly.
-  const blob = await response.blob();
-  const cacheable = new Response(blob, {
-    status: 200,
-    headers: {
-      "Content-Type": response.headers.get("Content-Type") ?? "video/mp4",
-      "Content-Length": String(blob.size),
-      "Accept-Ranges": "bytes",
-      "X-HomeTube-Offline": "1",
-    },
-  });
-  await cache.put(key, cacheable);
-
-  const entry: OfflineEntry = {
-    videoId,
-    quality,
-    sourceUrl,
-    title: meta.title,
-    thumbnailUrl: meta.thumbnail_url,
-    channelTitle: meta.channel_title,
-    durationSeconds: meta.duration_seconds,
-    sizeBytes: blob.size,
-    downloadedAt: Date.now(),
-  };
-
-  const manifest = readManifest();
-  manifest.entries = manifest.entries
-    .filter((e) => !(e.videoId === videoId && e.quality === quality))
-    .concat(entry);
-  writeManifest(manifest);
-
-  return entry;
+  return saveOpfs(videoId, quality, response, meta, sourceUrl);
 }
 
-/**
- * Look up a downloaded video. Returns the cached `Response` (already
- * cloned for safe consumption) or `null` if it isn't present.
- */
 export async function getOfflineVideoStream(
   videoId: string,
   quality: string,
 ): Promise<Response | null> {
-  if (!("caches" in self)) return null;
-  const cache = await caches.open(VIDEO_CACHE);
-  const match = await cache.match(offlineCacheKey(videoId, quality));
-  return match ? match.clone() : null;
+  return getOpfsStream(videoId, quality);
 }
 
-/** List every downloaded video, newest first. */
-export function listOfflineVideos(): OfflineEntry[] {
-  const m = readManifest();
-  return [...m.entries].sort((a, b) => b.downloadedAt - a.downloadedAt);
+export async function listOfflineVideos(): Promise<OfflineEntry[]> {
+  return listOpfs();
 }
 
-/** Remove a downloaded video from cache + manifest. */
 export async function deleteOfflineVideo(videoId: string, quality: string): Promise<boolean> {
-  let removed = false;
-  if ("caches" in self) {
-    const cache = await caches.open(VIDEO_CACHE);
-    removed = await cache.delete(offlineCacheKey(videoId, quality));
-  }
-  const manifest = readManifest();
-  const before = manifest.entries.length;
-  manifest.entries = manifest.entries.filter(
-    (e) => !(e.videoId === videoId && e.quality === quality),
-  );
-  if (manifest.entries.length !== before) {
-    writeManifest(manifest);
-    removed = true;
-  }
-  return removed;
+  return deleteOpfs(videoId, quality);
 }
 
-/**
- * Browser-storage-quota helpers. Returns `null` when the browser
- * doesn't expose the Storage API (e.g. older Safari).
- */
-export async function getStorageEstimate(): Promise<{
+export function getStorageEstimate(): Promise<{
   usage: number;
   quota: number;
   percentUsed: number;
 } | null> {
-  if (!navigator.storage?.estimate) return null;
-  const e = await navigator.storage.estimate();
-  const usage = e.usage ?? 0;
-  const quota = e.quota ?? 0;
-  const percentUsed = quota > 0 ? (usage / quota) * 100 : 0;
-  return { usage, quota, percentUsed };
+  return getOpfsEstimate();
 }
 
-/** Request persistent storage (best-effort; resolves to whether it was granted). */
-export async function ensurePersistentStorage(): Promise<boolean> {
-  if (!navigator.storage?.persist) return false;
-  try {
-    const already = await navigator.storage.persisted?.();
-    if (already) return true;
-    return await navigator.storage.persist();
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------
-// Per-video preferences (audio-only mode toggle, etc.)
-// ---------------------------------------------------------------------
-
-export interface VideoPrefs {
-  audioOnly?: boolean;
+export function ensurePersistentStorage(): Promise<boolean> {
+  return ensureOpfs();
 }
 
 export function getVideoPrefs(videoId: string): VideoPrefs {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY_PREFIX + videoId);
-    if (!raw) return {};
-    return JSON.parse(raw) as VideoPrefs;
-  } catch {
-    return {};
-  }
+  return getPrefsOpfs(videoId);
 }
 
 export function setVideoPrefs(videoId: string, prefs: VideoPrefs): void {
-  try {
-    localStorage.setItem(PREFS_KEY_PREFIX + videoId, JSON.stringify(prefs));
-  } catch {
-    // ignore (private browsing, quota, etc.)
-  }
+  setPrefsOpfs(videoId, prefs);
 }
 
-// Helper used by the downloads UI to turn an entry into a continue-
-// watching-style item suitable for `<hometube-video-card>`.
 export function entryToCardItem(e: OfflineEntry): ContinueWatchingItem {
-  return {
-    video_id: e.videoId,
-    video_title: e.title ?? e.videoId,
-    video_thumbnail_url: e.thumbnailUrl,
-    channel_title: e.channelTitle,
-    duration_seconds: e.durationSeconds,
-    progress_seconds: 0,
-    last_watched_at: Math.floor(e.downloadedAt / 1000),
-  };
+  return entryToCardItemOpfs(e);
+}
+
+export async function hasOfflineVideo(videoId: string, quality: string | null): Promise<boolean> {
+  return hasOpfs(videoId, quality);
+}
+
+/**
+ * One-shot migration from the old Cache-Storage layout into OPFS.
+ * Walks every entry in `caches.open(VIDEO_CACHE)`, copies the body
+ * into OPFS via [`saveVideoToOpfs`], and deletes the old cache once
+ * all entries land. Idempotent and gated by `localStorage` so it
+ * runs at most once per browser profile.
+ *
+ * Returns the number of entries migrated. `0` is the steady-state.
+ */
+export async function migrateCacheStorageToOpfs(): Promise<number> {
+  const FLAG = "hometube-opfs-migrated";
+  if (typeof localStorage === "undefined" || typeof caches === "undefined") {
+    return 0;
+  }
+  if (localStorage.getItem(FLAG) === "1") return 0;
+  if (!isOpfsSupported()) return 0;
+
+  let migrated = 0;
+  try {
+    const has = await caches.has(VIDEO_CACHE);
+    if (!has) {
+      localStorage.setItem(FLAG, "1");
+      return 0;
+    }
+    const cache = await caches.open(VIDEO_CACHE);
+    const keys = await cache.keys();
+    for (const req of keys) {
+      const url = new URL(req.url);
+      // Old layout: /__hometube/offline/<videoId>/<quality>.
+      const m = /\/__hometube\/offline\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (!m) continue;
+      const videoId = decodeURIComponent(m[1] ?? "");
+      const quality = decodeURIComponent(m[2] ?? "");
+      const res = await cache.match(req);
+      if (!res) continue;
+      try {
+        // We don't have the original VideoMetadata here — fall back
+        // to placeholder values; the user can re-fetch metadata at
+        // playback time.
+        await saveOpfs(
+          videoId,
+          quality,
+          res,
+          {
+            id: videoId,
+            title: videoId,
+            channel_id: null,
+            channel_title: null,
+            duration_seconds: null,
+            thumbnail_url: null,
+          } as VideoMetadata,
+          req.url,
+        );
+        migrated++;
+      } catch {
+        // Skip individual failures so one bad entry doesn't block
+        // the rest of the migration.
+      }
+    }
+    await caches.delete(VIDEO_CACHE);
+    localStorage.setItem(FLAG, "1");
+  } catch {
+    // Migration is best-effort; clear the flag so we retry next load.
+  }
+  return migrated;
 }

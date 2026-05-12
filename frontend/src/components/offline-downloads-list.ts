@@ -97,7 +97,7 @@ export class OfflineDownloadsList extends LitElement {
   }
 
   private async refresh(): Promise<void> {
-    this.entries = listOfflineVideos();
+    this.entries = await listOfflineVideos();
     this.storage = await getStorageEstimate();
   }
 

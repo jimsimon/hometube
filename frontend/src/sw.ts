@@ -2,24 +2,24 @@
  * HomeTube service worker.
  *
  * Built with `vite-plugin-pwa` in `injectManifest` mode — Workbox
- * generates a precache list and replaces `self.__WB_MANIFEST` with it
- * at build time.
+ * generates a precache list and replaces `self.__WB_MANIFEST` with
+ * it at build time.
  *
  * Responsibilities:
- *   1. Precache the app shell (index page, JS/CSS bundles, the offline
- *      fallback page) via Workbox's `precacheAndRoute`.
- *   2. Cache-first the proxied video bytes — once a kid downloads a
- *      video, replays should never hit the network.
- *   3. Stale-while-revalidate the JSON API responses we mark as
- *      cacheable (e.g. recent playlists), so the UI still has data
- *      when offline.
- *   4. Serve a friendly `/offline.html` fallback when an HTML
+ *   1. Precache the app shell (index page, JS/CSS bundles, the
+ *      offline fallback page) via Workbox's `precacheAndRoute`.
+ *   2. When a download is requested, ask any open client whether it
+ *      has the file in OPFS via the [`opfs-bridge`](./services/opfs-bridge.ts)
+ *      message protocol, and serve the bytes back. If no client can
+ *      answer, fall through to the network.
+ *   3. Serve a friendly `/offline.html` fallback when an HTML
  *      navigation fails offline.
  *
- * Range-request handling: the Cache API stores a single `Response`
- * per key. Modern Chromium serves byte-range requests against a cached
- * response transparently; for Firefox/Safari we slice the cached blob
- * manually.
+ * OPFS-from-SW is impossible in the current spec — the SW can only
+ * forward read requests to a window/worker that *does* have OPFS
+ * access. When the user visits the page from a closed-PWA cold-start
+ * with no other tab open, we degrade to "downloads unavailable until
+ * a tab is open" — the original plan accepts this trade-off.
  */
 /// <reference lib="webworker" />
 import { precacheAndRoute } from "workbox-precaching";
@@ -28,7 +28,6 @@ declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: { url: string; revision: string | null }[];
 };
 
-const VIDEO_CACHE = "hometube-videos-v1";
 const RUNTIME_CACHE = "hometube-runtime-v1";
 const OFFLINE_HTML = "/offline.html";
 
@@ -48,7 +47,6 @@ self.addEventListener("activate", (event: ExtendableEvent) => {
           .filter(
             (n) =>
               n.startsWith("hometube-") &&
-              n !== VIDEO_CACHE &&
               n !== RUNTIME_CACHE &&
               !n.startsWith("workbox-precache-"),
           )
@@ -59,80 +57,173 @@ self.addEventListener("activate", (event: ExtendableEvent) => {
   );
 });
 
-/**
- * Same logic as `services/offline.ts::offlineCacheKey`, duplicated
- * here so the SW doesn't have to import the page bundle (it runs in
- * its own global).
- */
-function offlineKey(videoId: string, quality: string): string {
-  return `${self.location.origin}/__hometube/offline/${encodeURIComponent(
-    videoId,
-  )}/${encodeURIComponent(quality)}`;
+interface OpfsExistsRequest {
+  type: "opfs.exists";
+  videoId: string;
+  quality: string | null;
 }
 
-/** Match a downloaded video by inspecting URL params. */
-async function matchOfflineVideo(req: Request): Promise<Response | null> {
-  const url = new URL(req.url);
-  const isProxy = url.pathname === "/api/proxy/video";
-  const isDownload = /^\/api\/downloads\/[^/]+\/stream$/.test(url.pathname);
-  if (!isProxy && !isDownload) return null;
+interface OpfsReadRequest {
+  type: "opfs.read";
+  videoId: string;
+  quality: string;
+  range?: [number, number];
+}
 
-  let videoId: string | null = null;
-  let quality: string | null = null;
+interface OpfsExistsResponse {
+  ok: true;
+  type: "opfs.exists.response";
+  has: boolean;
+}
 
-  if (isProxy) {
-    videoId = url.searchParams.get("video_id");
-    quality = url.searchParams.get("quality") ?? url.searchParams.get("format");
-  } else {
-    const m = url.pathname.match(/^\/api\/downloads\/([^/]+)\/stream$/);
-    videoId = m ? decodeURIComponent(m[1] ?? "") : null;
-    quality = url.searchParams.get("quality");
-  }
-  if (!videoId) return null;
+interface OpfsReadOkResponse {
+  ok: true;
+  type: "opfs.read.response";
+  body: ArrayBuffer;
+  contentType: string;
+  contentLength: number;
+  contentRange?: { start: number; end: number; total: number };
+}
 
-  const cache = await caches.open(VIDEO_CACHE);
-  // Try the exact (videoId, quality) key first; if that misses fall
-  // back to *any* cached quality of this video.
-  if (quality) {
-    const exact = await cache.match(offlineKey(videoId, quality));
-    if (exact) return rangeAware(req, exact);
-  }
-  // Fallback: scan the cache for any download of this video.
-  const keys = await cache.keys();
-  const prefix = `${self.location.origin}/__hometube/offline/${encodeURIComponent(videoId)}/`;
-  const fallbackKey = keys.find((k) => k.url.startsWith(prefix));
-  if (fallbackKey) {
-    const res = await cache.match(fallbackKey);
-    if (res) return rangeAware(req, res);
+type OpfsResponse = OpfsExistsResponse | OpfsReadOkResponse | { ok: false };
+
+/**
+ * Send a single message to one client and return the first reply.
+ * Times out at `timeoutMs` so a misbehaving page can't pin the SW.
+ */
+async function askClient(
+  client: Client,
+  message: OpfsExistsRequest | OpfsReadRequest,
+  timeoutMs = 8000,
+): Promise<OpfsResponse | null> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => {
+      channel.port1.close();
+      resolve(null);
+    }, timeoutMs);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      resolve(event.data as OpfsResponse);
+    };
+    try {
+      client.postMessage(message, [channel.port2]);
+    } catch {
+      clearTimeout(timer);
+      resolve(null);
+    }
+  });
+}
+
+async function findClientWithVideo(
+  videoId: string,
+  quality: string | null,
+): Promise<Client | null> {
+  const clients = await self.clients.matchAll({
+    includeUncontrolled: true,
+    type: "window",
+  });
+  for (const client of clients) {
+    const reply = await askClient(client, {
+      type: "opfs.exists",
+      videoId,
+      quality,
+    });
+    if (reply && reply.ok && "has" in reply && reply.has) {
+      return client;
+    }
   }
   return null;
 }
 
-/** Slice a cached response when the request includes a `Range` header. */
-async function rangeAware(req: Request, cached: Response): Promise<Response> {
-  const range = req.headers.get("Range");
-  if (!range) return cached.clone();
+function parseVideoRequest(
+  url: URL,
+  pathname: string,
+): { videoId: string; quality: string | null } | null {
+  if (pathname === "/api/proxy/video") {
+    const videoId = url.searchParams.get("video_id");
+    if (!videoId) return null;
+    const quality = url.searchParams.get("quality") ?? url.searchParams.get("format");
+    return { videoId, quality };
+  }
+  const m = /^\/api\/downloads\/([^/]+)\/stream$/.exec(pathname);
+  if (m) {
+    const videoId = decodeURIComponent(m[1] ?? "");
+    if (!videoId) return null;
+    return { videoId, quality: url.searchParams.get("quality") };
+  }
+  return null;
+}
 
-  const m = /bytes=(\d*)-(\d*)/.exec(range);
-  if (!m) return cached.clone();
-
-  const blob = await cached.clone().blob();
-  const total = blob.size;
+function parseRange(header: string | null): [number, number?] | null {
+  if (!header) return null;
+  const m = /bytes=(\d*)-(\d*)/.exec(header);
+  if (!m) return null;
   const start = m[1] ? Number(m[1]) : 0;
-  const end = m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
-  if (start >= total || start < 0 || end < start) {
-    return new Response(null, {
-      status: 416,
-      headers: { "Content-Range": `bytes */${total}` },
+  const end = m[2] ? Number(m[2]) : undefined;
+  return end === undefined ? [start] : [start, end];
+}
+
+/**
+ * Try to serve a downloaded video out of OPFS via a client bridge.
+ * Returns `null` if no client can serve it.
+ */
+async function matchOfflineVideo(req: Request): Promise<Response | null> {
+  const url = new URL(req.url);
+  const parsed = parseVideoRequest(url, url.pathname);
+  if (!parsed) return null;
+
+  const client = await findClientWithVideo(parsed.videoId, parsed.quality);
+  if (!client) return null;
+
+  // We need a real quality string to issue the read. If the request
+  // didn't specify one, ask the client to pick the first match.
+  const range = parseRange(req.headers.get("Range"));
+  const readReq: OpfsReadRequest = {
+    type: "opfs.read",
+    videoId: parsed.videoId,
+    quality: parsed.quality ?? "",
+    ...(range && range[1] !== undefined ? { range: [range[0], range[1]] as [number, number] } : {}),
+  };
+  // Empty quality → ask the client which one to use. Expanded
+  // negotiation can come later; for now the client maps "" to the
+  // first available file.
+  if (!parsed.quality) {
+    // Heuristic: prefer 720p, then 480p, then anything.
+    for (const candidate of ["720p", "480p", "1080p", "360p"]) {
+      const probe = await askClient(client, {
+        type: "opfs.exists",
+        videoId: parsed.videoId,
+        quality: candidate,
+      });
+      if (probe && probe.ok && "has" in probe && probe.has) {
+        readReq.quality = candidate;
+        break;
+      }
+    }
+  }
+  if (!readReq.quality) return null;
+
+  const reply = await askClient(client, readReq, 30_000);
+  if (!reply || !reply.ok || reply.type !== "opfs.read.response") return null;
+
+  if (reply.contentRange) {
+    return new Response(reply.body, {
+      status: 206,
+      headers: {
+        "Content-Type": reply.contentType,
+        "Content-Length": String(reply.contentLength),
+        "Content-Range": `bytes ${reply.contentRange.start}-${reply.contentRange.end}/${reply.contentRange.total}`,
+        "Accept-Ranges": "bytes",
+      },
     });
   }
-  const slice = blob.slice(start, end + 1, blob.type);
-  return new Response(slice, {
-    status: 206,
+  return new Response(reply.body, {
+    status: 200,
     headers: {
-      "Content-Type": cached.headers.get("Content-Type") ?? "video/mp4",
-      "Content-Length": String(end - start + 1),
-      "Content-Range": `bytes ${start}-${end}/${total}`,
+      "Content-Type": reply.contentType,
+      "Content-Length": String(reply.contentLength),
       "Accept-Ranges": "bytes",
     },
   });
@@ -145,15 +236,19 @@ self.addEventListener("fetch", (event: FetchEvent) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // 1. Cache-first for downloaded videos.
+  // 1. OPFS-bridged offline lookup for downloaded videos.
   if (
     url.pathname === "/api/proxy/video" ||
     /^\/api\/downloads\/[^/]+\/stream$/.test(url.pathname)
   ) {
     event.respondWith(
       (async () => {
-        const cached = await matchOfflineVideo(req);
-        if (cached) return cached;
+        try {
+          const offline = await matchOfflineVideo(req);
+          if (offline) return offline;
+        } catch {
+          // Fall through to the network.
+        }
         try {
           return await fetch(req);
         } catch {

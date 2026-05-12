@@ -2,22 +2,26 @@
  * Unit tests for the offline-downloads service.
  *
  * Vitest runs these in real Chromium via `@vitest/browser-playwright`,
- * so the Cache API and `navigator.storage` are available.
+ * so OPFS (`navigator.storage.getDirectory`) and `localStorage` are
+ * available.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  VIDEO_CACHE,
   deleteOfflineVideo,
   ensurePersistentStorage,
   entryToCardItem,
   getOfflineVideoStream,
   getStorageEstimate,
   getVideoPrefs,
+  hasOfflineVideo,
+  isOpfsSupported,
   listOfflineVideos,
   offlineCacheKey,
+  OPFS_VIDEO_DIR,
   saveVideoToOpfs,
   setVideoPrefs,
+  VIDEO_CACHE,
 } from "./offline.js";
 import type { VideoMetadata } from "../types/index.js";
 
@@ -30,7 +34,18 @@ const META: VideoMetadata = {
   thumbnail_url: "https://example.com/thumb.jpg",
 };
 
+async function clearOpfs(): Promise<void> {
+  if (!isOpfsSupported()) return;
+  try {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry(OPFS_VIDEO_DIR, { recursive: true });
+  } catch {
+    // Directory may not exist; ignore.
+  }
+}
+
 async function clearAll(): Promise<void> {
+  await clearOpfs();
   if ("caches" in self) {
     await caches.delete(VIDEO_CACHE);
   }
@@ -54,7 +69,7 @@ describe("offline service", () => {
     expect(k).toContain("720p");
   });
 
-  it("save → list → get round-trip", async () => {
+  it("save → list → get round-trip via OPFS", async () => {
     const blob = new Blob(["hello world"], { type: "video/mp4" });
     const res = new Response(blob, {
       status: 200,
@@ -64,7 +79,7 @@ describe("offline service", () => {
     expect(entry.videoId).toBe("abc");
     expect(entry.sizeBytes).toBeGreaterThan(0);
 
-    const list = listOfflineVideos();
+    const list = await listOfflineVideos();
     expect(list).toHaveLength(1);
     expect(list[0]?.title).toBe("A test");
 
@@ -72,6 +87,10 @@ describe("offline service", () => {
     expect(cached).not.toBeNull();
     const text = await cached!.text();
     expect(text).toBe("hello world");
+
+    expect(await hasOfflineVideo("abc", "720p")).toBe(true);
+    expect(await hasOfflineVideo("abc", null)).toBe(true);
+    expect(await hasOfflineVideo("nope", "720p")).toBe(false);
   });
 
   it("returns null for missing offline videos", async () => {
@@ -79,15 +98,16 @@ describe("offline service", () => {
     expect(cached).toBeNull();
   });
 
-  it("deleteOfflineVideo removes from cache and manifest", async () => {
+  it("deleteOfflineVideo removes from OPFS and manifest", async () => {
     const res = new Response(new Blob(["x"]), { status: 200 });
     await saveVideoToOpfs("abc", "480p", res, META, "/api/x");
-    expect(listOfflineVideos()).toHaveLength(1);
+    expect(await listOfflineVideos()).toHaveLength(1);
 
     const removed = await deleteOfflineVideo("abc", "480p");
     expect(removed).toBe(true);
-    expect(listOfflineVideos()).toHaveLength(0);
+    expect(await listOfflineVideos()).toHaveLength(0);
     expect(await getOfflineVideoStream("abc", "480p")).toBeNull();
+    expect(await hasOfflineVideo("abc", "480p")).toBe(false);
   });
 
   it("saving the same (video, quality) replaces the previous entry", async () => {
@@ -105,7 +125,7 @@ describe("offline service", () => {
       META,
       "/api/x",
     );
-    expect(listOfflineVideos()).toHaveLength(1);
+    expect(await listOfflineVideos()).toHaveLength(1);
     const cached = await getOfflineVideoStream("abc", "720p");
     expect(await cached!.text()).toBe("v2");
   });

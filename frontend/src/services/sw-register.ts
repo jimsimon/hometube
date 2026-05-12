@@ -1,13 +1,19 @@
 /**
- * Tiny script that registers the HomeTube service worker.
+ * Service-worker bootstrap.
  *
- * Loaded at the bottom of `templates/base.html`. Kept separate from the
- * theme/nav bundles so the SW can be registered before any other JS
- * runs.
+ * Loaded at the bottom of `templates/base.html`. Kept separate from
+ * the theme/nav bundles so the SW can be registered before any other
+ * JS runs.
  *
- * The SW file itself is emitted by `vite-plugin-pwa` to `/sw.js` at the
- * root of the dist directory.
+ * In addition to registering the SW, this module:
+ *   - Installs the OPFS bridge so the SW can serve downloaded videos
+ *     via `postMessage` (T-11 of the follow-up plan).
+ *   - Runs a one-shot migration that copies any leftover Cache-API
+ *     downloads into OPFS and clears the old cache.
  */
+
+import { migrateCacheStorageToOpfs } from "./offline.js";
+import { registerOpfsBridge } from "./opfs-bridge.js";
 
 declare global {
   interface Window {
@@ -15,6 +21,15 @@ declare global {
     __HOMETUBE_NO_SW?: boolean;
   }
 }
+
+// Always install the OPFS bridge — even if the SW isn't registered
+// (dev mode or http://) the bridge is harmless and ready in case a
+// future SW activates.
+registerOpfsBridge();
+
+// Best-effort migration. Runs at most once per profile thanks to the
+// internal `localStorage` flag.
+void migrateCacheStorageToOpfs();
 
 if (
   "serviceWorker" in navigator &&
