@@ -11,7 +11,7 @@
  */
 
 import { LitElement, html, css, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, property, query, state } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
 import {
@@ -22,6 +22,10 @@ import {
   type SearchItem,
   type SearchResponse,
 } from "../types/index.js";
+
+import "./preview-channel.js";
+import "./preview-playlist.js";
+import "./preview-video.js";
 
 type Kind = "channel" | "playlist" | "video";
 
@@ -38,6 +42,22 @@ export class AllowlistManager extends LitElement {
   @state() private searchResults: SearchItem[] = [];
   @state() private searching = false;
   @state() private error = "";
+  /**
+   * Currently-previewed search result. When non-null the preview
+   * `<wa-dialog>` is open and showing the corresponding component
+   * (channel / playlist / video). The dialog closes when this goes
+   * back to `null` — either via the explicit close button, the
+   * `wa-after-hide` event, or after a successful "Add to allowlist".
+   */
+  @state() private previewItem: SearchItem | null = null;
+  @state() private previewKind: Kind = "channel";
+  @state() private addingFromPreview = false;
+
+  @query("wa-dialog.preview-dialog") private previewDialog!: HTMLElement & {
+    open?: boolean;
+    show?: () => void;
+    hide?: () => void;
+  };
 
   static styles = css`
     :host {
@@ -162,12 +182,16 @@ export class AllowlistManager extends LitElement {
   }
 
   private async addItem(item: SearchItem): Promise<void> {
+    await this.addItemForKind(item, this.activeTab);
+  }
+
+  private async addItemForKind(item: SearchItem, kind: Kind): Promise<void> {
     if (this.childId == null) return;
-    const base = `/api/children/${this.childId}/allowlist/${this.activeTab}s`;
+    const base = `/api/children/${this.childId}/allowlist/${kind}s`;
     const payload =
-      this.activeTab === "channel"
+      kind === "channel"
         ? { channel_id: item.id }
-        : this.activeTab === "playlist"
+        : kind === "playlist"
           ? { playlist_id: item.id }
           : { video_id: item.id };
     try {
@@ -175,6 +199,29 @@ export class AllowlistManager extends LitElement {
       await this.refreshAll();
     } catch (err) {
       this.error = (err as Error).message;
+    }
+  }
+
+  private openPreview(item: SearchItem): void {
+    this.previewItem = item;
+    this.previewKind = this.activeTab;
+    queueMicrotask(() => this.previewDialog?.show?.());
+  }
+
+  private closePreview = (): void => {
+    this.previewDialog?.hide?.();
+    this.previewItem = null;
+    this.addingFromPreview = false;
+  };
+
+  private async addFromPreview(): Promise<void> {
+    if (!this.previewItem) return;
+    this.addingFromPreview = true;
+    try {
+      await this.addItemForKind(this.previewItem, this.previewKind);
+      this.closePreview();
+    } finally {
+      this.addingFromPreview = false;
     }
   }
 
@@ -239,16 +286,14 @@ export class AllowlistManager extends LitElement {
                       <strong>${item.title}</strong>
                       <span class="empty">${item.channel_title ?? ""}</span>
                       <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
-                        <a
+                        <button
+                          type="button"
                           class="secondary"
-                          style="padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--wa-color-surface-border); text-decoration: none; color: inherit; font: inherit;"
-                          href=${`/parent/preview/${this.activeTab}/${encodeURIComponent(item.id)}`}
-                          target="_blank"
-                          rel="noopener"
                           aria-label=${`Preview ${item.title}`}
+                          @click=${() => this.openPreview(item)}
                         >
                           Preview
-                        </a>
+                        </button>
                         <button
                           type="button"
                           class="secondary"
@@ -266,7 +311,48 @@ export class AllowlistManager extends LitElement {
         : nothing}
 
       <h3>Allowlisted ${this.activeTab}s</h3>
-      ${this.renderCurrent()}
+      ${this.renderCurrent()} ${this.renderPreviewDialog()}
+    `;
+  }
+
+  private renderPreviewDialog() {
+    const item = this.previewItem;
+    const dialogLabel = item ? `Preview ${this.previewKind}: ${item.title}` : "Preview";
+    return html`
+      <wa-dialog
+        class="preview-dialog"
+        label=${dialogLabel}
+        aria-label=${dialogLabel}
+        @wa-after-hide=${this.closePreview}
+      >
+        ${item
+          ? this.previewKind === "channel"
+            ? html`<hometube-preview-channel channel-id=${item.id}></hometube-preview-channel>`
+            : this.previewKind === "playlist"
+              ? html`<hometube-preview-playlist playlist-id=${item.id}></hometube-preview-playlist>`
+              : html`<hometube-preview-video video-id=${item.id}></hometube-preview-video>`
+          : nothing}
+        <div
+          style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem;"
+          slot="footer"
+        >
+          <button
+            type="button"
+            class="secondary"
+            @click=${this.closePreview}
+            ?disabled=${this.addingFromPreview}
+          >
+            Close
+          </button>
+          <button
+            type="button"
+            @click=${() => void this.addFromPreview()}
+            ?disabled=${this.addingFromPreview}
+          >
+            ${this.addingFromPreview ? "Adding…" : "Add to allowlist"}
+          </button>
+        </div>
+      </wa-dialog>
     `;
   }
 
