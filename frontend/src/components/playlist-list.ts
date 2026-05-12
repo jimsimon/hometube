@@ -14,6 +14,8 @@ import type { FamilyPlaylistSummary, PlaylistSummary } from "../types/index.js";
 
 import "./playlist-card.js";
 import "./create-playlist-dialog.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 import type { CreatePlaylistDialog } from "./create-playlist-dialog.js";
 
 @customElement("hometube-playlist-list")
@@ -102,8 +104,10 @@ export class PlaylistList extends LitElement {
   };
 
   override render() {
-    if (this.loading) return html`<p class="empty">Loading…</p>`;
-    if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
+    if (this.loading)
+      return html`<hometube-loading-spinner label="Loading playlists…"></hometube-loading-spinner>`;
+    if (this.error)
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     // Filter out hidden inbound YouTube playlists (those whose
     // youtube_playlist_id isn't in this child's allowlist). The server
     // includes them in the response with `visible: false` so admin

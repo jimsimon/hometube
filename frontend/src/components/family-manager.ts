@@ -18,6 +18,8 @@ import { ApiError, api } from "../services/api.js";
 
 import "./family-member-card.js";
 import "./add-member-dialog.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 import type { FamilyMember } from "./family-member-card.js";
 
 @customElement("hometube-family-manager")
@@ -90,9 +92,11 @@ export class FamilyManager extends LitElement {
       </div>
 
       ${this.loading
-        ? html`<p>Loading family members…</p>`
+        ? html`<hometube-loading-spinner
+            label="Loading family members…"
+          ></hometube-loading-spinner>`
         : this.error
-          ? html`<p class="error" role="alert">${this.error}</p>`
+          ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
           : this.members.length === 0
             ? html`<p class="empty">No family members yet.</p>`
             : html`<div role="list">

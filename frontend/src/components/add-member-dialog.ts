@@ -16,6 +16,8 @@ import { customElement, property, state, query } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
 
+import "./error-banner.js";
+
 @customElement("hometube-add-member-dialog")
 export class AddMemberDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
@@ -156,7 +158,9 @@ export class AddMemberDialog extends LitElement {
               placeholder="Optional — defaults to their Google name"
             />
           </label>
-          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : null}
+          ${this.error
+            ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+            : null}
           <div class="actions">
             <button type="button" @click=${this.close} ?disabled=${this.busy}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>

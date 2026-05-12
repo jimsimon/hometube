@@ -12,6 +12,9 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
 import type { ChildSettings } from "../types/index.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+
 const QUALITY_OPTIONS = ["unlimited", "480p", "720p", "1080p"] as const;
 
 @customElement("hometube-child-settings-form")
@@ -118,7 +121,7 @@ export class ChildSettingsForm extends LitElement {
       return html`<p class="empty">Pick a child to edit settings.</p>`;
     }
     if (!this.settings) {
-      return html`<p class="empty">Loading…</p>`;
+      return html`<hometube-loading-spinner label="Loading settings…"></hometube-loading-spinner>`;
     }
     const s = this.settings;
     return html`
@@ -196,7 +199,9 @@ export class ChildSettingsForm extends LitElement {
 
         <button type="submit" ?disabled=${this.saving}>${this.saving ? "Saving…" : "Save"}</button>
         ${this.message ? html`<p class="ok" role="status">${this.message}</p>` : nothing}
-        ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+        ${this.error
+          ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+          : nothing}
       </form>
     `;
   }

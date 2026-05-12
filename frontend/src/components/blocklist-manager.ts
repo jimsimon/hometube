@@ -12,6 +12,9 @@ import { customElement, property, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { BlockedVideo } from "../types/index.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+
 @customElement("hometube-blocklist-manager")
 export class BlocklistManager extends LitElement {
   @property({ type: Number, attribute: "child-id" })
@@ -171,7 +174,9 @@ export class BlocklistManager extends LitElement {
         </button>
       </form>
 
-      ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+      ${this.error
+        ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+        : nothing}
       ${this.videos.length === 0
         ? html`<p class="empty">No blocked videos.</p>`
         : html`

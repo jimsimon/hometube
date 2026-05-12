@@ -17,6 +17,8 @@ import { customElement, property, state, query } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
 
+import "./error-banner.js";
+
 @customElement("hometube-pin-entry-dialog")
 export class PinEntryDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
@@ -165,7 +167,9 @@ export class PinEntryDialog extends LitElement {
               autofocus
             />
           </label>
-          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+          ${this.error
+            ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+            : nothing}
           <div class="actions">
             <button type="button" ?disabled=${this.busy} @click=${this.close}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>

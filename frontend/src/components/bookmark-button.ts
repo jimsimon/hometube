@@ -20,6 +20,8 @@ import { customElement, property, query, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { Bookmark } from "../types/index.js";
 
+import "./error-banner.js";
+
 @customElement("hometube-bookmark-button")
 export class BookmarkButton extends LitElement {
   @property({ type: String, attribute: "video-id" })
@@ -185,7 +187,9 @@ export class BookmarkButton extends LitElement {
               @input=${(e: Event) => (this.label = (e.target as HTMLInputElement).value)}
             />
           </label>
-          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : null}
+          ${this.error
+            ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+            : null}
           <div class="actions">
             <button type="button" @click=${this.close} ?disabled=${this.busy}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>

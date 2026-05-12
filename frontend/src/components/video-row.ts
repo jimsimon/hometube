@@ -13,6 +13,8 @@ import { api } from "../services/api.js";
 import type { ContinueWatchingItem, NewVideoItem } from "../types/index.js";
 
 import "./video-card.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 type Feed = "continue-watching" | "new-videos";
 
@@ -110,9 +112,9 @@ export class VideoRow extends LitElement {
     return html`
       ${this.heading ? html`<h2>${this.heading}</h2>` : nothing}
       ${this.loading
-        ? html`<p class="empty">Loading…</p>`
+        ? html`<hometube-loading-spinner></hometube-loading-spinner>`
         : this.error
-          ? html`<p class="error" role="alert">${this.error}</p>`
+          ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
           : this.cards.length === 0
             ? html`<p class="empty">Nothing here yet.</p>`
             : html`

@@ -14,6 +14,8 @@ import { api } from "../services/api.js";
 import type { SubscriptionRow } from "../types/index.js";
 
 import "./channel-card.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 @customElement("hometube-channel-list")
 export class ChannelList extends LitElement {
@@ -73,9 +75,10 @@ export class ChannelList extends LitElement {
   }
 
   override render() {
-    if (this.loading) return html`<p class="empty">Loading…</p>`;
+    if (this.loading)
+      return html`<hometube-loading-spinner label="Loading channels…"></hometube-loading-spinner>`;
     if (this.error) {
-      return html`<p class="error" role="alert">${this.error}</p>`;
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
     if (this.subs.length === 0) {
       return html`<p class="empty">You haven't subscribed to any channels yet.</p>`;

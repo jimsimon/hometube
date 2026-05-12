@@ -16,6 +16,7 @@ import type { ChannelInfo, ChannelVideosPage } from "../types/index.js";
 
 import "./subscribe-button.js";
 import "./video-card.js";
+import "./error-banner.js";
 
 @customElement("hometube-channel-detail")
 export class ChannelDetail extends LitElement {
@@ -157,7 +158,7 @@ export class ChannelDetail extends LitElement {
 
   override render() {
     if (this.error) {
-      return html`<p class="error" role="alert">${this.error}</p>`;
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
     return html`
       <header>

@@ -20,6 +20,8 @@ import { customElement, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 
 import "./pin-entry-dialog.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 interface ProfileSummary {
   id: number;
@@ -193,8 +195,10 @@ export class ProfilePicker extends LitElement {
   }
 
   override render() {
-    if (this.loading) return html`<p class="empty">Loading profiles…</p>`;
-    if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
+    if (this.loading)
+      return html`<hometube-loading-spinner label="Loading profiles…"></hometube-loading-spinner>`;
+    if (this.error)
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     if (this.profiles.length === 0)
       return html`<p class="empty">No profiles yet — finish setup first.</p>`;
 

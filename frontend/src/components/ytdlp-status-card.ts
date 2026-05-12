@@ -12,6 +12,9 @@ import { customElement, state } from "lit/decorators.js";
 
 import { api } from "../services/api.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+
 interface YtdlpStatus {
   current_version: string | null;
   latest_known_version: string | null;
@@ -107,9 +110,12 @@ export class YtdlpStatusCard extends LitElement {
 
   override render() {
     if (this.error) {
-      return html`<p role="alert">${this.error}</p>`;
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
-    if (!this.status) return html`<p>Loading…</p>`;
+    if (!this.status)
+      return html`<hometube-loading-spinner
+        label="Loading yt-dlp status…"
+      ></hometube-loading-spinner>`;
     return html`
       <article>
         <dl>

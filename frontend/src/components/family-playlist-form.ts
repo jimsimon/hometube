@@ -16,6 +16,8 @@ import { customElement, query, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { AccountSummary, FamilyPlaylistDetail } from "../types/index.js";
 
+import "./error-banner.js";
+
 @customElement("hometube-family-playlist-form")
 export class FamilyPlaylistForm extends LitElement {
   @state() private existing: FamilyPlaylistDetail | null = null;
@@ -201,7 +203,9 @@ export class FamilyPlaylistForm extends LitElement {
                   `,
                 )}
           </fieldset>
-          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+          ${this.error
+            ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+            : nothing}
           <div class="actions">
             <button type="button" @click=${() => this.dialog?.hide?.()} ?disabled=${this.saving}>
               Cancel

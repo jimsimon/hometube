@@ -12,6 +12,8 @@ import { customElement, query, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { PlaylistSummary } from "../types/index.js";
 
+import "./error-banner.js";
+
 @customElement("hometube-create-playlist-dialog")
 export class CreatePlaylistDialog extends LitElement {
   @state() private titleValue = "";
@@ -136,7 +138,9 @@ export class CreatePlaylistDialog extends LitElement {
               @input=${(e: Event) => (this.description = (e.target as HTMLTextAreaElement).value)}
             ></textarea>
           </label>
-          ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : null}
+          ${this.error
+            ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+            : null}
           <div class="actions">
             <button type="button" class="secondary" ?disabled=${this.busy} @click=${this.close}>
               Cancel

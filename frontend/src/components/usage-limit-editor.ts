@@ -12,6 +12,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
 import type { UsageLimit } from "../types/index.js";
 
+import "./error-banner.js";
+
 const DAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function defaultLimit(day: number): UsageLimit {
@@ -199,7 +201,9 @@ export class UsageLimitEditor extends LitElement {
         ${this.saving ? "Saving…" : "Save"}
       </button>
       ${this.message ? html`<p class="ok" role="status">${this.message}</p>` : nothing}
-      ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+      ${this.error
+        ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+        : nothing}
     `;
   }
 }

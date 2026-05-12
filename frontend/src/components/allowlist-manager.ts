@@ -26,6 +26,8 @@ import {
 import "./preview-channel.js";
 import "./preview-playlist.js";
 import "./preview-video.js";
+import "./loading-spinner.js";
+import "./error-banner.js";
 
 type Kind = "channel" | "playlist" | "video";
 
@@ -273,7 +275,9 @@ export class AllowlistManager extends LitElement {
         </button>
       </div>
 
-      ${this.error ? html`<p class="error" role="alert">${this.error}</p>` : nothing}
+      ${this.error
+        ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+        : nothing}
       ${this.searchResults.length > 0
         ? html`
             <h3>Add a result</h3>

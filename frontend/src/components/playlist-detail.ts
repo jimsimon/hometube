@@ -18,6 +18,9 @@ import { customElement, property, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { PlaylistDetail, PlaylistVideo } from "../types/index.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+
 @customElement("hometube-playlist-detail")
 export class PlaylistDetailEl extends LitElement {
   @property({ type: Number, attribute: "playlist-id" })
@@ -220,8 +223,10 @@ export class PlaylistDetailEl extends LitElement {
   }
 
   override render() {
-    if (this.loading) return html`<p class="empty">Loading…</p>`;
-    if (this.error) return html`<p class="error" role="alert">${this.error}</p>`;
+    if (this.loading)
+      return html`<hometube-loading-spinner label="Loading playlist…"></hometube-loading-spinner>`;
+    if (this.error)
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     if (!this.detail) return null;
 
     const isPending = this.detail.sync_status.startsWith("pending");

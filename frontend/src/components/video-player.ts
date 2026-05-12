@@ -73,6 +73,7 @@ import "./bookmark-button.js";
 import "./sleep-timer.js";
 import "./like-button.js";
 import "./subscribe-button.js";
+import "./error-banner.js";
 
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
@@ -685,7 +686,7 @@ export class VideoPlayer extends LitElement {
 
   override render() {
     if (this.error) {
-      return html`<p class="error" role="alert">${this.error}</p>`;
+      return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
     const posterStyle =
       this.audioOnly && this.metadata?.thumbnail_url

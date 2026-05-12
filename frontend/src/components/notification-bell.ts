@@ -18,6 +18,9 @@ import { customElement, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import type { NotificationRow } from "../types/index.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+
 const POLL_INTERVAL_MS = 60_000;
 
 @customElement("hometube-notification-bell")
@@ -266,9 +269,13 @@ export class NotificationBell extends LitElement {
       ${this.open
         ? html`
             <div id="notification-panel" class="panel" role="dialog" aria-label="Notifications">
-              ${this.error ? html`<p class="error">${this.error}</p>` : nothing}
+              ${this.error
+                ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
+                : nothing}
               ${this.loading
-                ? html`<p class="empty">Loading…</p>`
+                ? html`<hometube-loading-spinner
+                    label="Loading notifications…"
+                  ></hometube-loading-spinner>`
                 : this.items.length === 0
                   ? html`<p class="empty">No notifications.</p>`
                   : html`
