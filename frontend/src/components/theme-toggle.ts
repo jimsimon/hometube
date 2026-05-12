@@ -9,14 +9,20 @@
 import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
+import { ApiError, api } from "../services/api.js";
 import {
   applyTheme,
   getThemePreference,
   resolveTheme,
+  setAccountScope,
   setThemePreference,
   watchSystemTheme,
   type ThemePreference,
 } from "../services/theme.js";
+
+interface AuthMe {
+  id: number;
+}
 
 @customElement("hometube-theme-toggle")
 export class ThemeToggle extends LitElement {
@@ -53,6 +59,24 @@ export class ThemeToggle extends LitElement {
     this.cleanupSystemListener = watchSystemTheme((theme) => {
       if (this.pref === "system") applyTheme(theme);
     });
+    // Per-profile theme persistence: ask the server who's signed in
+    // (best-effort; anonymous responses just leave us on the legacy
+    // global key).
+    void this.bindAccountScope();
+  }
+
+  private async bindAccountScope(): Promise<void> {
+    try {
+      const me = await api.get<AuthMe>("/api/auth/me");
+      // The user might have updated their preference in another tab
+      // since boot; re-applying via setAccountScope picks that up.
+      this.pref = setAccountScope(me.id);
+    } catch (err) {
+      // 401 from /api/auth/me is the expected anonymous case.
+      if (!(err instanceof ApiError) || err.status !== 401) {
+        // Network errors etc. — keep the legacy preference.
+      }
+    }
   }
 
   override disconnectedCallback(): void {
