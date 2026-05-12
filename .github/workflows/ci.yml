@@ -91,15 +91,14 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: frontend
 
-      # Coverage thresholds (50% on src/services/) live in vitest.config.ts.
+      # Coverage thresholds (80% lines/statements, 75% functions, 70% branches) live in vitest.config.ts.
       - name: Vitest (browser mode + coverage)
         run: npx vitest run --coverage
         working-directory: frontend
 
       # ----- Backend tests + coverage -----
-      # Coverage threshold lowered to 50% as a starting baseline; raise as the suite grows.
       - name: Cargo tests with coverage
-        run: cargo llvm-cov --fail-under-lines 50 --lcov --output-path lcov.info
+        run: cargo llvm-cov --fail-under-lines 80 --lcov --output-path lcov.info
 
       - name: Upload coverage reports
         if: always()

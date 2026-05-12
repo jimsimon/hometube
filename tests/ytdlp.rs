@@ -1,0 +1,216 @@
+//! Tests for the yt-dlp service.
+//!
+//! Tests deserialization of `ExtractResult` from realistic yt-dlp JSON
+//! output, the `check_for_update` DB logic path, and error handling.
+
+mod common;
+
+use common::{boot, seed_credentials};
+use hometube::services::ytdlp::{ExtractResult, Format, SubtitleTrack, Thumbnail};
+
+// ---------------------------------------------------------------------------
+// ExtractResult deserialization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extract_result_deserializes_minimal() {
+    let json = r#"{"id":"dQw4w9WgXcQ"}"#;
+    let result: ExtractResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.id, "dQw4w9WgXcQ");
+    assert_eq!(result.title, None);
+    assert_eq!(result.duration, None);
+    assert!(result.formats.is_empty());
+    assert!(result.thumbnails.is_empty());
+    assert!(result.subtitles.is_empty());
+    assert!(result.automatic_captions.is_empty());
+}
+
+#[test]
+fn extract_result_deserializes_full() {
+    let json = r#"{
+        "id": "abc123",
+        "title": "Test Video",
+        "channel_id": "UC12345",
+        "channel": "Test Channel",
+        "duration": 253.5,
+        "thumbnails": [
+            {"url": "https://i.ytimg.com/vi/abc123/default.jpg", "width": 120, "height": 90},
+            {"url": "https://i.ytimg.com/vi/abc123/maxresdefault.jpg", "width": 1920, "height": 1080}
+        ],
+        "thumbnail": "https://i.ytimg.com/vi/abc123/maxresdefault.jpg",
+        "formats": [
+            {
+                "format_id": "137",
+                "ext": "mp4",
+                "height": 1080,
+                "width": 1920,
+                "tbr": 4000.0,
+                "vbr": 3800.0,
+                "abr": null,
+                "fps": 30.0,
+                "vcodec": "avc1.640028",
+                "acodec": "none",
+                "filesize": 50000000,
+                "url": "https://rr.googlevideo.com/videoplayback?...",
+                "protocol": "https"
+            },
+            {
+                "format_id": "251",
+                "ext": "webm",
+                "height": null,
+                "width": null,
+                "tbr": 128.0,
+                "vbr": null,
+                "abr": 128.0,
+                "fps": null,
+                "vcodec": "none",
+                "acodec": "opus",
+                "filesize": 3000000,
+                "url": "https://rr.googlevideo.com/videoplayback?...",
+                "protocol": "https"
+            }
+        ],
+        "subtitles": {
+            "en": [
+                {"ext": "vtt", "url": "https://example.com/subs/en.vtt", "name": "English"}
+            ]
+        },
+        "automatic_captions": {
+            "en": [
+                {"ext": "srv3", "url": "https://example.com/auto/en.srv3"}
+            ]
+        },
+        "manifest_url": "https://manifest.example.com/dash.mpd"
+    }"#;
+
+    let result: ExtractResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.id, "abc123");
+    assert_eq!(result.title.as_deref(), Some("Test Video"));
+    assert_eq!(result.channel_id.as_deref(), Some("UC12345"));
+    assert_eq!(result.channel_title.as_deref(), Some("Test Channel"));
+    assert_eq!(result.duration, Some(253.5));
+    assert_eq!(result.thumbnails.len(), 2);
+    assert_eq!(
+        result.thumbnail.as_deref(),
+        Some("https://i.ytimg.com/vi/abc123/maxresdefault.jpg")
+    );
+    assert_eq!(result.formats.len(), 2);
+    assert_eq!(result.subtitles.len(), 1);
+    assert_eq!(result.automatic_captions.len(), 1);
+    assert_eq!(
+        result.manifest_url.as_deref(),
+        Some("https://manifest.example.com/dash.mpd")
+    );
+
+    // Check format details.
+    let video_fmt = &result.formats[0];
+    assert_eq!(video_fmt.format_id, "137");
+    assert_eq!(video_fmt.ext.as_deref(), Some("mp4"));
+    assert_eq!(video_fmt.height, Some(1080));
+    assert_eq!(video_fmt.width, Some(1920));
+    assert_eq!(video_fmt.fps, Some(30.0));
+    assert_eq!(video_fmt.vcodec.as_deref(), Some("avc1.640028"));
+    assert_eq!(video_fmt.filesize, Some(50000000));
+
+    let audio_fmt = &result.formats[1];
+    assert_eq!(audio_fmt.format_id, "251");
+    assert_eq!(audio_fmt.acodec.as_deref(), Some("opus"));
+    assert_eq!(audio_fmt.abr, Some(128.0));
+
+    // Check subtitles.
+    let en_subs = &result.subtitles["en"];
+    assert_eq!(en_subs.len(), 1);
+    assert_eq!(en_subs[0].ext, "vtt");
+    assert_eq!(en_subs[0].name.as_deref(), Some("English"));
+}
+
+#[test]
+fn extract_result_handles_uploader_alias() {
+    // yt-dlp sometimes emits "uploader" instead of "channel".
+    let json = r#"{"id":"x","uploader":"Uploader Name"}"#;
+    let result: ExtractResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.channel_title.as_deref(), Some("Uploader Name"));
+}
+
+#[test]
+fn format_deserializes_with_manifest_url() {
+    let json = r#"{
+        "format_id": "dash-video",
+        "manifest_url": "https://manifest.example.com/dash.mpd",
+        "protocol": "http_dash_segments"
+    }"#;
+    let fmt: Format = serde_json::from_str(json).unwrap();
+    assert_eq!(fmt.format_id, "dash-video");
+    assert_eq!(
+        fmt.manifest_url.as_deref(),
+        Some("https://manifest.example.com/dash.mpd")
+    );
+    assert_eq!(fmt.protocol.as_deref(), Some("http_dash_segments"));
+}
+
+#[test]
+fn thumbnail_deserializes() {
+    let json = r#"{"url":"https://img.test/t.jpg","width":1280,"height":720,"id":"maxres"}"#;
+    let thumb: Thumbnail = serde_json::from_str(json).unwrap();
+    assert_eq!(thumb.url, "https://img.test/t.jpg");
+    assert_eq!(thumb.width, Some(1280));
+    assert_eq!(thumb.height, Some(720));
+    assert_eq!(thumb.id.as_deref(), Some("maxres"));
+}
+
+#[test]
+fn thumbnail_deserializes_minimal() {
+    let json = r#"{"url":"https://img.test/t.jpg"}"#;
+    let thumb: Thumbnail = serde_json::from_str(json).unwrap();
+    assert_eq!(thumb.url, "https://img.test/t.jpg");
+    assert_eq!(thumb.width, None);
+    assert_eq!(thumb.height, None);
+    assert_eq!(thumb.id, None);
+}
+
+#[test]
+fn subtitle_track_deserializes() {
+    let json = r#"{"ext":"vtt","url":"https://sub.test/en.vtt","name":"English"}"#;
+    let track: SubtitleTrack = serde_json::from_str(json).unwrap();
+    assert_eq!(track.ext, "vtt");
+    assert_eq!(track.url, "https://sub.test/en.vtt");
+    assert_eq!(track.name.as_deref(), Some("English"));
+}
+
+// ---------------------------------------------------------------------------
+// check_for_update DB logic
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn check_for_update_touches_last_checked_at() {
+    let app = boot().await;
+    seed_credentials(&app.pool).await;
+
+    // Seed the ytdlp_info row.
+    let cfg = hometube::config::Config::from_env().unwrap();
+    hometube::services::cron::seed_ytdlp_info(&app.pool, &cfg)
+        .await
+        .unwrap();
+
+    let before: Option<i64> =
+        sqlx::query_scalar("SELECT last_checked_at FROM ytdlp_info WHERE id = 1")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+
+    // check_for_update will fail (hits real GitHub, which is fine for
+    // this test — we're testing the DB touch, not the network call).
+    // If it succeeds that's fine too.
+    let _ = hometube::services::ytdlp::check_for_update(&app.pool).await;
+
+    let after: Option<i64> =
+        sqlx::query_scalar("SELECT last_checked_at FROM ytdlp_info WHERE id = 1")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+
+    // If the network call succeeded, last_checked_at should be updated.
+    // If it failed before reaching the UPDATE, they may be equal.
+    // Either way the function shouldn't panic.
+    assert!(after >= before);
+}

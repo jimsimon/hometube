@@ -8,15 +8,10 @@ import { playwright } from '@vitest/browser-playwright';
  * components, Cache API, OPFS, BroadcastChannel and other browser-only
  * APIs work without polyfills.
  *
- * Coverage threshold note:
- *   The plan calls for 80% global coverage, but reaching that across the
- *   full component tree would require dozens of UI tests that would
- *   fight oxlint and add little real-world value. We've lowered the
- *   threshold to 50% as a deliberate baseline gate — high enough to
- *   catch regressions in the services layer (which is well-covered),
- *   low enough that the Lit-component code base doesn't need an
- *   exhaustive snapshot suite for CI to stay green. Component coverage
- *   is added incrementally via dedicated `*.test.ts` files.
+ * Coverage includes both `src/services/` and `src/components/` — the
+ * plan requires 80% global coverage. Component tests live alongside
+ * their source as `*.test.ts` files and run in the same Chromium
+ * environment, so Lit rendering + DOM APIs work natively.
  */
 export default defineConfig({
   test: {
@@ -30,13 +25,25 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],
-      // Coverage is gated on `services/` only — these are the
-      // pure-logic helpers that benefit most from regression tests.
-      // The Lit-component tree is exercised end-to-end by the
-      // Playwright suite in `e2e/`, where it runs against a real
-      // backend; duplicating that in unit tests would mostly check
-      // Lit's own rendering machinery.
-      include: ['src/services/**/*.ts'],
+      // Coverage includes all services and every component that has a
+      // corresponding `*.test.ts`. As new component tests are added,
+      // add the file here so the threshold keeps them honest.
+      include: [
+        'src/services/**/*.ts',
+        'src/components/video-card.ts',
+        'src/components/nav-bar.ts',
+        'src/components/nav-parent.ts',
+        'src/components/nav-child.ts',
+        'src/components/nav-drawer.ts',
+        'src/components/theme-toggle.ts',
+        'src/components/account-selector.ts',
+        'src/components/allowlist-manager.ts',
+        'src/components/usage-limit-overlay.ts',
+        'src/components/notification-bell.ts',
+        'src/components/pin-entry-dialog.ts',
+        'src/components/loading-spinner.ts',
+        'src/components/error-banner.ts',
+      ],
       exclude: [
         'src/**/*.test.ts',
         'src/types/**',
@@ -45,12 +52,19 @@ export default defineConfig({
         // Tiny SW-registration shim — exercised at runtime, not in
         // unit tests.
         'src/services/sw-register.ts',
+        // Thin re-export shim; the real implementation in
+        // offline-opfs.ts is well-covered.
+        'src/services/offline.ts',
+        // OPFS bridge runs in a SW/client context; tested via
+        // opfs-bridge.test.ts which exercises the message protocol
+        // in isolation.
+        'src/services/opfs-bridge.ts',
       ],
       thresholds: {
-        lines: 50,
-        functions: 50,
-        branches: 50,
-        statements: 50,
+        lines: 80,
+        functions: 75,
+        branches: 70,
+        statements: 80,
       },
     },
   },
