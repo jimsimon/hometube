@@ -413,12 +413,10 @@ pub async fn add_video(
     .fetch_one(&state.db)
     .await?;
 
-    sqlx::query(
-        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&state.db)
+        .await?;
 
     Ok(Json(row))
 }
@@ -445,12 +443,10 @@ pub async fn remove_video(
         return Err(AppError::NotFound);
     }
 
-    sqlx::query(
-        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&state.db)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -509,12 +505,10 @@ pub async fn reorder_videos(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query(
-        "UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?",
-    )
-    .bind(playlist_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("UPDATE child_playlists SET updated_at = unixepoch() WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     let videos: Vec<PlaylistVideo> = sqlx::query_as(
@@ -713,17 +707,7 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         .bind(playlist_id)
         .fetch_one(&state.db)
         .await?;
-    let (
-        id,
-        yt_id,
-        title,
-        description,
-        is_own,
-        video_count,
-        created_at,
-        updated_at,
-        visible,
-    ) = row;
+    let (id, yt_id, title, description, is_own, video_count, created_at, updated_at, visible) = row;
     Ok(PlaylistSummary {
         id,
         youtube_playlist_id: yt_id,
@@ -736,5 +720,3 @@ async fn fetch_summary(state: &AppState, playlist_id: i64) -> AppResult<Playlist
         visible: visible != 0,
     })
 }
-
-

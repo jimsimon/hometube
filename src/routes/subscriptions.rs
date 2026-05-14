@@ -43,14 +43,7 @@ pub struct SubscriptionRow {
 /// Columns in order:
 /// `id, channel_id, channel_title, channel_thumbnail_url,
 ///  subscribed_at, visible`.
-type SubscriptionRowTuple = (
-    i64,
-    String,
-    String,
-    Option<String>,
-    i64,
-    i64,
-);
+type SubscriptionRowTuple = (i64, String, String, Option<String>, i64, i64);
 
 /// `GET /api/subscriptions`.
 pub async fn list(
@@ -74,20 +67,15 @@ pub async fn list(
     let out = rows
         .into_iter()
         .map(
-            |(
-                id,
-                channel_id,
-                channel_title,
-                channel_thumbnail_url,
-                subscribed_at,
-                visible,
-            )| SubscriptionRow {
-                id,
-                channel_id,
-                channel_title,
-                channel_thumbnail_url,
-                subscribed_at,
-                visible: visible != 0,
+            |(id, channel_id, channel_title, channel_thumbnail_url, subscribed_at, visible)| {
+                SubscriptionRow {
+                    id,
+                    channel_id,
+                    channel_title,
+                    channel_thumbnail_url,
+                    subscribed_at,
+                    visible: visible != 0,
+                }
             },
         )
         .collect();
@@ -169,14 +157,7 @@ async fn fetch_one(
     child_id: i64,
     channel_id: &str,
 ) -> AppResult<SubscriptionRow> {
-    let row: (
-        i64,
-        String,
-        String,
-        Option<String>,
-        i64,
-        i64,
-    ) = sqlx::query_as(
+    let row: (i64, String, String, Option<String>, i64, i64) = sqlx::query_as(
         "SELECT s.id, s.channel_id, s.channel_title, s.channel_thumbnail_url, \
                 s.subscribed_at, \
                 CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
@@ -189,14 +170,7 @@ async fn fetch_one(
     .bind(channel_id)
     .fetch_one(&state.db)
     .await?;
-    let (
-        id,
-        channel_id,
-        channel_title,
-        channel_thumbnail_url,
-        subscribed_at,
-        visible,
-    ) = row;
+    let (id, channel_id, channel_title, channel_thumbnail_url, subscribed_at, visible) = row;
     Ok(SubscriptionRow {
         id,
         channel_id,

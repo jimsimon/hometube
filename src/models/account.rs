@@ -253,8 +253,6 @@ pub async fn insert_local_child(
     Ok(row.0)
 }
 
-
-
 /// Bag of fields that change on every successful OAuth callback. Kept
 /// as a struct (rather than a positional argument list) to satisfy
 /// clippy's `too_many_arguments` lint and to make call sites readable.

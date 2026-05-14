@@ -121,8 +121,8 @@ pub struct PotServerStatus {
 
 /// `GET /api/system/pot-server` — check PO token server health.
 pub async fn get_pot_server_status() -> Json<PotServerStatus> {
-    let pot_url = std::env::var("POT_SERVER_URL")
-        .unwrap_or_else(|_| "http://pot-server:4416".to_string());
+    let pot_url =
+        std::env::var("POT_SERVER_URL").unwrap_or_else(|_| "http://pot-server:4416".to_string());
 
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
         .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());

@@ -207,13 +207,12 @@ async fn subscriptions_unsubscribe_soft_deletes() {
     let res = app.server.delete("/api/subscriptions/chan-1").await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 
-    let deleted: i64 = sqlx::query_scalar(
-        "SELECT is_deleted FROM child_subscriptions WHERE channel_id = ?",
-    )
-    .bind("chan-1")
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let deleted: i64 =
+        sqlx::query_scalar("SELECT is_deleted FROM child_subscriptions WHERE channel_id = ?")
+            .bind("chan-1")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(deleted, 1);
 }
 

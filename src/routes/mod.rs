@@ -150,10 +150,7 @@ pub fn router(state: AppState) -> Router {
         // System / yt-dlp
         .route("/api/system/ytdlp", get(system::get_ytdlp))
         .route("/api/system/ytdlp/update", post(system::update_ytdlp))
-        .route(
-            "/api/system/pot-server",
-            get(system::get_pot_server_status),
-        )
+        .route("/api/system/pot-server", get(system::get_pot_server_status))
         // Family management (Phase 13)
         .route(
             "/api/family/members",
@@ -167,7 +164,6 @@ pub fn router(state: AppState) -> Router {
             "/api/family/members/{id}/reauth",
             post(family::reauth_member),
         )
-
         // Cache management
         .route("/api/cache/stats", get(cache::stats))
         .route(
