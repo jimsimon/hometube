@@ -3,8 +3,8 @@
 {% block title %}Video unavailable — HomeTube{% endblock %}
 
 {% block content %}
-<section class="video-unavailable" aria-label="Video unavailable">
-  <div class="card">
+<section class="page-content video-unavailable" aria-label="Video unavailable">
+  <div class="page-section" style="max-width: 32rem; margin: 2rem auto; text-align: center;">
     <h1>This video isn't available</h1>
     <p>
       {% if let Some(msg) = message %}
@@ -21,7 +21,7 @@
   </div>
 
   {% if !videos.is_empty() %}
-  <div class="suggestions">
+  <div class="suggestions" style="max-width: 56rem; margin: 2rem auto;">
     <h2>Try one of these</h2>
     {% include "partials/video-grid.html" %}
   </div>
@@ -31,18 +31,13 @@
 
 {% block head %}
 <style>
-  .video-unavailable {
-    max-width: 32rem;
-    margin: 4rem auto;
-    padding: 1.5rem;
-    border: 1px solid var(--wa-color-surface-border);
-    border-radius: 0.75rem;
-    background: var(--wa-color-surface-default);
-    text-align: center;
+  .video-unavailable h1 {
+    margin-top: 0;
   }
   .back-link {
     color: var(--wa-color-brand-on-quiet);
     text-decoration: none;
+    margin: 0 0.5rem;
   }
 </style>
 {% endblock %}

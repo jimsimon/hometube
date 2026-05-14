@@ -49,11 +49,30 @@ export class PreviewVideo extends LitElement {
       background: var(--wa-color-surface-border);
       border-radius: 0.5rem;
       overflow: hidden;
+      cursor: pointer;
+    }
+    .thumb-wrap:hover {
+      opacity: 0.9;
     }
     .thumb-wrap img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+    }
+    .thumb-wrap .play-icon {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.3);
+      opacity: 0;
+      transition: opacity 0.15s;
+      font-size: 2.5rem;
+      color: white;
+    }
+    .thumb-wrap:hover .play-icon {
+      opacity: 1;
     }
     h2 {
       margin: 0;
@@ -116,13 +135,15 @@ export class PreviewVideo extends LitElement {
         ? `${minutes}:${String(seconds).padStart(2, "0")}`
         : null;
 
+    const previewHref = `/parent/preview/video/${encodeURIComponent(this.videoId)}`;
     return html`
       <article aria-label=${`Preview of ${meta.title ?? meta.id}`}>
-        <div class="thumb-wrap">
+        <a href=${previewHref} class="thumb-wrap" title="Watch full preview">
           ${meta.thumbnail_url
             ? html`<img src=${meta.thumbnail_url} alt="" loading="lazy" />`
             : nothing}
-        </div>
+          <div class="play-icon" aria-hidden="true">▶</div>
+        </a>
         <div>
           <h2>${meta.title ?? meta.id}</h2>
           ${meta.channel_title ? html`<div class="channel">${meta.channel_title}</div>` : nothing}

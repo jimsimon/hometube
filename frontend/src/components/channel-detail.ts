@@ -17,6 +17,7 @@ import type { ChannelInfo, ChannelVideosPage } from "../types/index.js";
 import "./subscribe-button.js";
 import "./video-card.js";
 import "./error-banner.js";
+import "./loading-spinner.js";
 
 @customElement("hometube-channel-detail")
 export class ChannelDetail extends LitElement {
@@ -78,7 +79,7 @@ export class ChannelDetail extends LitElement {
     .grid {
       display: grid;
       gap: 1rem;
-      grid-template-columns: repeat(auto-fill, minmax(min(16rem, 100%), 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
       padding: 1rem;
     }
     .empty {
@@ -185,7 +186,7 @@ export class ChannelDetail extends LitElement {
       </div>
 
       ${this.loading
-        ? html`<p class="empty">Loading videos…</p>`
+        ? html`<hometube-loading-spinner label="Loading videos…"></hometube-loading-spinner>`
         : this.videos.length === 0
           ? html`<p class="empty">No videos available.</p>`
           : html`

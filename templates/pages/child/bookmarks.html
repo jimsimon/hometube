@@ -3,7 +3,7 @@
 {% block title %}Bookmarks — HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-bookmarks" aria-label="Bookmarks">
+<section class="page-content" aria-label="Bookmarks" style="max-width: 56rem;">
   <header class="page-header">
     <h1>Your bookmarks</h1>
     <p class="subtitle">Tap a bookmark to jump back to that moment in the video.</p>
@@ -11,21 +11,8 @@
 
   <hometube-bookmarks-list></hometube-bookmarks-list>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
-{% endblock %}
-
-{% block head %}
-<style>
-  .child-bookmarks {
-    padding: 1rem;
-    max-width: 56rem;
-    margin: 0 auto;
-  }
-</style>
 {% endblock %}
 
 {% block page_scripts %}
 <script type="module" src="/assets/components/bookmarks-list.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

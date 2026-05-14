@@ -159,6 +159,7 @@ export class VideoPlayer extends LitElement {
       width: 100%;
       max-width: 64rem;
       margin: 0 auto;
+      view-transition-name: video-hero;
     }
     media-player {
       width: 100%;
@@ -212,6 +213,7 @@ export class VideoPlayer extends LitElement {
     .continue-prompt {
       position: absolute;
       inset: 0;
+      z-index: 500;
       background: rgba(0, 0, 0, 0.65);
       color: white;
       display: flex;

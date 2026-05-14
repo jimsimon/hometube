@@ -5,7 +5,7 @@
 {% block content %}
 {% if unavailable %}
 <section class="video-unavailable" aria-label="Video unavailable">
-  <div class="card">
+  <div class="page-section">
     <h1>This video isn't available</h1>
     <p>
       Ask a parent if you'd like to watch it. They can add it to your
@@ -48,12 +48,11 @@
 <style>
   .child-video {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(20rem, 1fr);
+    grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr);
     gap: 1.5rem;
-    padding: 1rem;
     align-items: start;
   }
-  @media (max-width: 60rem) {
+  @media (max-width: 65rem) {
     .child-video {
       grid-template-columns: 1fr;
     }
@@ -65,13 +64,14 @@
     position: sticky;
     top: 1rem;
   }
+  @media (max-width: 65rem) {
+    .up-next-column {
+      position: static;
+    }
+  }
   .video-unavailable {
     max-width: 32rem;
     margin: 4rem auto;
-    padding: 1.5rem;
-    border: 1px solid var(--wa-color-surface-border);
-    border-radius: 0.75rem;
-    background: var(--wa-color-surface-default);
     text-align: center;
   }
   .video-unavailable h1 {
@@ -93,5 +93,4 @@
 <script type="module" src="/assets/components/bookmark-button.js"></script>
 <script type="module" src="/assets/components/sleep-timer.js"></script>
 <script type="module" src="/assets/components/wind-down-overlay.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

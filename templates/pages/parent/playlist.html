@@ -3,23 +3,20 @@
 {% block title %}Family playlist — HomeTube{% endblock %}
 
 {% block content %}
-<section class="parent-playlist" aria-label="Family playlist">
+<section class="page-content" aria-label="Family playlist" style="max-width: 64rem;">
   <p>
     <a href="/parent/playlists" class="back-link">← Back to playlists</a>
   </p>
-  <hometube-family-playlist-detail
-    playlist-id="{{ playlist_id }}"
-  ></hometube-family-playlist-detail>
+  <div class="page-section">
+    <hometube-family-playlist-detail
+      playlist-id="{{ playlist_id }}"
+    ></hometube-family-playlist-detail>
+  </div>
 </section>
 {% endblock %}
 
 {% block head %}
 <style>
-  .parent-playlist {
-    padding: 1rem;
-    max-width: 64rem;
-    margin: 0 auto;
-  }
   .back-link {
     color: var(--wa-color-brand-on-quiet);
     text-decoration: none;

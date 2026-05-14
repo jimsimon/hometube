@@ -28,6 +28,7 @@ import "./preview-playlist.js";
 import "./preview-video.js";
 import "./loading-spinner.js";
 import "./error-banner.js";
+import "./content-card.js";
 
 type Kind = "channel" | "playlist" | "video";
 
@@ -98,7 +99,7 @@ export class AllowlistManager extends LitElement {
     .grid {
       display: grid;
       gap: 0.75rem;
-      grid-template-columns: repeat(auto-fill, minmax(min(14rem, 100%), 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
     }
     .card {
       display: flex;
@@ -112,6 +113,13 @@ export class AllowlistManager extends LitElement {
       width: 6rem;
       height: 4rem;
       object-fit: cover;
+      border-radius: 0.25rem;
+      flex-shrink: 0;
+      background: var(--wa-color-surface-border);
+    }
+    .thumb-placeholder {
+      width: 6rem;
+      height: 4rem;
       border-radius: 0.25rem;
       flex-shrink: 0;
       background: var(--wa-color-surface-border);
@@ -270,9 +278,14 @@ export class AllowlistManager extends LitElement {
             if (e.key === "Enter") void this.runSearch();
           }}
         />
-        <button @click=${() => void this.runSearch()} ?disabled=${this.searching}>
-          ${this.searching ? "Searching…" : "Search"}
-        </button>
+        <wa-button
+          variant="brand"
+          @click=${() => void this.runSearch()}
+          ?disabled=${this.searching}
+          ?loading=${this.searching}
+        >
+          Search
+        </wa-button>
       </div>
 
       ${this.error
@@ -284,30 +297,30 @@ export class AllowlistManager extends LitElement {
             <div class="grid">
               ${this.searchResults.map(
                 (item) => html`
-                  <div class="card">
-                    <img src=${pickThumbnail(item.thumbnails) ?? ""} alt="" loading="lazy" />
-                    <div class="meta">
-                      <strong>${item.title}</strong>
-                      <span class="empty">${item.channel_title ?? ""}</span>
-                      <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
-                        <button
-                          type="button"
-                          class="secondary"
-                          aria-label=${`Preview ${item.title}`}
-                          @click=${() => this.openPreview(item)}
-                        >
-                          Preview
-                        </button>
-                        <button
-                          type="button"
-                          class="secondary"
-                          @click=${() => void this.addItem(item)}
-                        >
-                          Add to allowlist
-                        </button>
-                      </div>
+                  <hometube-content-card
+                    variant="compact"
+                    title=${item.title}
+                    .thumbnailUrl=${pickThumbnail(item.thumbnails)}
+                    .channelTitle=${item.channel_title}
+                  >
+                    <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
+                      <wa-button
+                        size="small"
+                        variant="default"
+                        aria-label=${`Preview ${item.title}`}
+                        @click=${() => this.openPreview(item)}
+                      >
+                        Preview
+                      </wa-button>
+                      <wa-button
+                        size="small"
+                        variant="default"
+                        @click=${() => void this.addItem(item)}
+                      >
+                        Add to allowlist
+                      </wa-button>
                     </div>
-                  </div>
+                  </hometube-content-card>
                 `,
               )}
             </div>
@@ -327,6 +340,7 @@ export class AllowlistManager extends LitElement {
         class="preview-dialog"
         label=${dialogLabel}
         aria-label=${dialogLabel}
+        style="--wa-dialog-width: min(56rem, 90vw)"
         @wa-after-hide=${this.closePreview}
       >
         ${item
@@ -334,27 +348,36 @@ export class AllowlistManager extends LitElement {
             ? html`<hometube-preview-channel channel-id=${item.id}></hometube-preview-channel>`
             : this.previewKind === "playlist"
               ? html`<hometube-preview-playlist playlist-id=${item.id}></hometube-preview-playlist>`
-              : html`<hometube-preview-video video-id=${item.id}></hometube-preview-video>`
+              : html`
+                  <hometube-preview-video video-id=${item.id}></hometube-preview-video>
+                  <p style="margin-top: 0.75rem;">
+                    <a
+                      href="/parent/preview/video/${encodeURIComponent(item.id)}"
+                      style="color: var(--wa-color-brand-on-quiet);"
+                    >
+                      Watch full preview →
+                    </a>
+                  </p>
+                `
           : nothing}
         <div
-          style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem;"
+          style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; margin-top: 1rem;"
           slot="footer"
         >
-          <button
-            type="button"
-            class="secondary"
+          <wa-button
+            variant="default"
             @click=${this.closePreview}
             ?disabled=${this.addingFromPreview}
           >
             Close
-          </button>
-          <button
-            type="button"
+          </wa-button>
+          <wa-button
+            variant="brand"
             @click=${() => void this.addFromPreview()}
             ?disabled=${this.addingFromPreview}
           >
             ${this.addingFromPreview ? "Adding…" : "Add to allowlist"}
-          </button>
+          </wa-button>
         </div>
       </wa-dialog>
     `;
@@ -367,19 +390,19 @@ export class AllowlistManager extends LitElement {
         <div class="grid">
           ${this.channels.map(
             (c) => html`
-              <div class="card">
-                <img src=${c.channel_thumbnail_url ?? ""} alt="" loading="lazy" />
-                <div class="meta">
-                  <strong>${c.channel_title}</strong>
-                  <button
-                    type="button"
-                    class="secondary"
-                    @click=${() => void this.removeItem(c.channel_id)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
+              <hometube-content-card
+                variant="compact"
+                title=${c.channel_title}
+                .thumbnailUrl=${c.channel_thumbnail_url}
+              >
+                <wa-button
+                  size="small"
+                  variant="default"
+                  @click=${() => void this.removeItem(c.channel_id)}
+                >
+                  Remove
+                </wa-button>
+              </hometube-content-card>
             `,
           )}
         </div>
@@ -391,19 +414,19 @@ export class AllowlistManager extends LitElement {
         <div class="grid">
           ${this.playlists.map(
             (p) => html`
-              <div class="card">
-                <img src=${p.playlist_thumbnail_url ?? ""} alt="" loading="lazy" />
-                <div class="meta">
-                  <strong>${p.playlist_title}</strong>
-                  <button
-                    type="button"
-                    class="secondary"
-                    @click=${() => void this.removeItem(p.playlist_id)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
+              <hometube-content-card
+                variant="compact"
+                title=${p.playlist_title}
+                .thumbnailUrl=${p.playlist_thumbnail_url}
+              >
+                <wa-button
+                  size="small"
+                  variant="default"
+                  @click=${() => void this.removeItem(p.playlist_id)}
+                >
+                  Remove
+                </wa-button>
+              </hometube-content-card>
             `,
           )}
         </div>
@@ -414,20 +437,20 @@ export class AllowlistManager extends LitElement {
       <div class="grid">
         ${this.videos.map(
           (v) => html`
-            <div class="card">
-              <img src=${v.video_thumbnail_url ?? ""} alt="" loading="lazy" />
-              <div class="meta">
-                <strong>${v.video_title}</strong>
-                <span class="empty">${v.channel_title ?? ""}</span>
-                <button
-                  type="button"
-                  class="secondary"
-                  @click=${() => void this.removeItem(v.video_id)}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
+            <hometube-content-card
+              variant="compact"
+              title=${v.video_title}
+              .thumbnailUrl=${v.video_thumbnail_url}
+              .channelTitle=${v.channel_title}
+            >
+              <wa-button
+                size="small"
+                variant="default"
+                @click=${() => void this.removeItem(v.video_id)}
+              >
+                Remove
+              </wa-button>
+            </hometube-content-card>
           `,
         )}
       </div>

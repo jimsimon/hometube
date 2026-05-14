@@ -3,7 +3,7 @@
 {% block title %}HomeTube — System{% endblock %}
 
 {% block content %}
-<section class="parent-system" aria-label="System management">
+<section class="page-content" aria-label="System management">
   <header class="page-header">
     <h1>System</h1>
     <p class="subtitle">
@@ -12,21 +12,21 @@
     </p>
   </header>
 
-  <section aria-labelledby="ytdlp-heading">
+  <div class="page-section" aria-labelledby="ytdlp-heading">
     <h2 id="ytdlp-heading">yt-dlp</h2>
     <hometube-ytdlp-status-card></hometube-ytdlp-status-card>
-  </section>
+  </div>
 
-  <section aria-labelledby="cron-heading">
+  <div class="page-section" aria-labelledby="cron-heading">
     <h2 id="cron-heading">Scheduled jobs</h2>
     <div role="status" aria-live="polite" id="cron-live"></div>
-    <div id="cron-jobs">Loading…</div>
-  </section>
+    <div id="cron-jobs"><hometube-loading-spinner label="Loading jobs…"></hometube-loading-spinner></div>
+  </div>
 
-  <section aria-labelledby="cache-heading">
+  <div class="page-section" aria-labelledby="cache-heading">
     <h2 id="cache-heading">Segment cache</h2>
     <hometube-cache-manager></hometube-cache-manager>
-  </section>
+  </div>
 </section>
 {% endblock %}
 
@@ -34,6 +34,7 @@
 <script type="module" src="/assets/components/cron-job-card.js"></script>
 <script type="module" src="/assets/components/ytdlp-status-card.js"></script>
 <script type="module" src="/assets/components/cache-manager.js"></script>
+<script type="module" src="/assets/components/loading-spinner.js"></script>
 <script type="module">
   import { api } from '/assets/services/api.js';
 

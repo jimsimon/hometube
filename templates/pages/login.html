@@ -2,25 +2,29 @@
 
 {% block title %}HomeTube — Sign in{% endblock %}
 
-{% block content %}
-<section class="login-page" aria-labelledby="login-heading" style="
-  max-width: 28rem;
-  margin: 4rem auto;
-  display: grid;
-  gap: 1.25rem;
-  text-align: center;
-">
-  <header>
-    <h1 id="login-heading" style="margin: 0 0 0.25rem; font-size: 1.75rem;">
-      HomeTube
-    </h1>
-    <p class="subtitle" style="color: var(--wa-color-text-quiet); margin: 0;">
-      A safe, family-friendly YouTube experience.
-    </p>
-  </header>
-
-  {% if let Some(message) = error_message %}
-  <div role="alert" style="
+{% block head %}
+<style>
+  .auth-card {
+    max-width: 28rem;
+    margin: 4rem auto;
+    display: grid;
+    gap: 1.25rem;
+    text-align: center;
+    padding: 2rem;
+    background: var(--wa-color-surface-default);
+    border: 1px solid var(--wa-color-surface-border);
+    border-radius: var(--wa-border-radius-l, 0.75rem);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .auth-card h1 {
+    margin: 0 0 0.25rem;
+    font-size: 1.75rem;
+  }
+  .auth-card .subtitle {
+    color: var(--wa-color-text-quiet);
+    margin: 0;
+  }
+  .auth-card .error-alert {
     padding: 0.75rem 1rem;
     border: 1px solid var(--wa-color-danger-fill, #b91c1c);
     border-radius: 0.5rem;
@@ -28,31 +32,39 @@
     color: var(--wa-color-danger-text, #7f1d1d);
     text-align: left;
     font-size: 0.95rem;
-  ">
-    {{ message }}
-  </div>
+  }
+  .auth-card .primary-action {
+    display: inline-block;
+    padding: 0.75rem 1.25rem;
+    border-radius: 0.5rem;
+    background: var(--wa-color-brand-fill, #2563eb);
+    color: white;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 1rem;
+  }
+  .auth-card .primary-action:hover {
+    opacity: 0.9;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="auth-card" aria-labelledby="login-heading">
+  <header>
+    <h1 id="login-heading">HomeTube</h1>
+    <p class="subtitle">A safe, family-friendly YouTube experience.</p>
+  </header>
+
+  {% if let Some(message) = error_message %}
+  <div role="alert" class="error-alert">{{ message }}</div>
   {% endif %}
 
-  <a
-    class="primary-action"
-    href="{{ login_href }}"
-    style="
-      display: inline-block;
-      padding: 0.75rem 1.25rem;
-      border-radius: 0.5rem;
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      font-weight: 600;
-      text-decoration: none;
-      font-size: 1rem;
-    "
-  >
-    Sign in with Google
-  </a>
+  <a class="primary-action" href="{{ login_href }}">Sign in with Google</a>
 
   {% if has_existing_accounts %}
   <p style="margin: 0;">
-    <a href="/profiles" style="color: var(--wa-color-link, #2563eb);">Switch profile</a>
+    <a href="/profiles">Switch profile</a>
   </p>
   {% endif %}
 </section>

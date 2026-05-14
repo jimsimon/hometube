@@ -3,46 +3,42 @@
 {% block title %}Preview — HomeTube{% endblock %}
 
 {% block content %}
-<section class="parent-preview" aria-label="Preview content">
+<section class="page-content" aria-label="Preview content" style="max-width: 64rem;">
   <header class="page-header">
     <h1>Preview</h1>
     <p class="subtitle">
       Watch this content as a parent before adding it to a child's allowlist.
     </p>
-    <p>
+    <p style="margin-top: var(--wa-space-s);">
       <a href="/parent/home" class="back-link">← Back to allowlist</a>
     </p>
   </header>
 
   {% if kind == "video" %}
-  <div class="player-column">
+  <div class="page-section">
     <hometube-video-player
       video-id="{{ resource_id }}"
       preview
     ></hometube-video-player>
   </div>
   {% else if kind == "channel" %}
-  <hometube-preview-channel
-    channel-id="{{ resource_id }}"
-  ></hometube-preview-channel>
+  <div class="page-section">
+    <hometube-preview-channel
+      channel-id="{{ resource_id }}"
+    ></hometube-preview-channel>
+  </div>
   {% else if kind == "playlist" %}
-  <hometube-preview-playlist
-    playlist-id="{{ resource_id }}"
-  ></hometube-preview-playlist>
+  <div class="page-section">
+    <hometube-preview-playlist
+      playlist-id="{{ resource_id }}"
+    ></hometube-preview-playlist>
+  </div>
   {% endif %}
 </section>
 {% endblock %}
 
 {% block head %}
 <style>
-  .parent-preview {
-    padding: 1rem;
-    max-width: 64rem;
-    margin: 0 auto;
-  }
-  .player-column {
-    margin-top: 1rem;
-  }
   .back-link {
     color: var(--wa-color-brand-on-quiet);
     text-decoration: none;

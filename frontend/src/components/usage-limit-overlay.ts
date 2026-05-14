@@ -4,16 +4,15 @@
  * Listens for the `hometube:usage-limit` CustomEvent dispatched by the
  * video player whenever the heartbeat returns a 403. Renders a
  * full-screen friendly message — "all done for today" or "outside
- * allowed hours" — and traps focus while open.
+ * allowed hours" — using a <wa-dialog> for proper focus trapping and
+ * accessibility.
  *
  * For `outside_window` we show the next allowed start time pulled from
  * the heartbeat response (`allowed_window`), so the message reads
  * "You can watch again at 8:00 AM".
- *
- * Closing the overlay simply hides it; the player has already paused.
  */
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
 interface AllowedWindow {
@@ -37,24 +36,8 @@ export class UsageLimitOverlay extends LitElement {
     :host {
       display: contents;
     }
-    .backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.65);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 1000;
-    }
-    .dialog {
-      max-width: 28rem;
-      width: calc(100% - 2rem);
-      padding: 2rem;
-      border-radius: 0.75rem;
-      background: var(--wa-color-surface-default);
-      color: var(--wa-color-text-normal);
+    .body {
       text-align: center;
-      box-shadow: 0 1.5rem 3rem rgba(0, 0, 0, 0.3);
     }
     h2 {
       margin: 0 0 1rem;
@@ -64,14 +47,11 @@ export class UsageLimitOverlay extends LitElement {
       margin: 0 0 1.5rem;
       line-height: 1.5;
     }
-    button {
-      padding: 0.5rem 1.5rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      font: inherit;
-      cursor: pointer;
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
+      flex-wrap: wrap;
     }
   `;
 
@@ -90,11 +70,6 @@ export class UsageLimitOverlay extends LitElement {
     this.reason = detail?.reason ?? "limit_exceeded";
     this.allowedWindow = detail?.allowed_window ?? null;
     this.open = true;
-    // Move focus into the dialog after the next render.
-    queueMicrotask(() => {
-      const root = this.renderRoot as ShadowRoot;
-      (root.querySelector("button") as HTMLButtonElement | null)?.focus();
-    });
   };
 
   private close = (): void => {
@@ -112,7 +87,7 @@ export class UsageLimitOverlay extends LitElement {
   }
 
   override render() {
-    if (!this.open) return null;
+    if (!this.open) return nothing;
     const heading =
       this.reason === "outside_window" ? "It's outside your viewing hours" : "All done for today!";
     let body: string;
@@ -126,13 +101,15 @@ export class UsageLimitOverlay extends LitElement {
       body = "You've used up your time for today. See you tomorrow!";
     }
     return html`
-      <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="usage-overlay-title">
-        <div class="dialog">
-          <h2 id="usage-overlay-title">${heading}</h2>
+      <wa-dialog open label=${heading} @wa-hide=${(e: Event) => e.preventDefault()}>
+        <div class="body">
           <p>${body}</p>
-          <button type="button" @click=${this.close}>OK</button>
+          <div class="actions">
+            <wa-button variant="default" href="/child/home">Back to home</wa-button>
+            <wa-button variant="brand" @click=${this.close}>OK</wa-button>
+          </div>
         </div>
-      </div>
+      </wa-dialog>
     `;
   }
 }

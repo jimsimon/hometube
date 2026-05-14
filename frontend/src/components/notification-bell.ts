@@ -71,8 +71,7 @@ export class NotificationBell extends LitElement {
       position: absolute;
       top: calc(100% + 0.5rem);
       right: 0;
-      min-width: 22rem;
-      max-width: min(28rem, 90vw);
+      width: min(28rem, calc(100vw - 2rem));
       max-height: 70vh;
       overflow-y: auto;
       padding: 0.5rem;
@@ -81,7 +80,7 @@ export class NotificationBell extends LitElement {
       background: var(--wa-color-surface-default);
       color: var(--wa-color-text-normal);
       box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.15);
-      z-index: 1000;
+      z-index: 200;
     }
     .empty {
       padding: 1rem;

@@ -103,7 +103,7 @@ describe("<hometube-allowlist-manager>", () => {
     expect(input).not.toBeNull();
     expect(input.placeholder).toContain("Search channels");
 
-    const searchBtn = el.shadowRoot!.querySelector("button:not([role])");
+    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
     expect(searchBtn).not.toBeNull();
   });
 
@@ -157,11 +157,9 @@ describe("<hometube-allowlist-manager>", () => {
     });
     const el = await mount(1);
 
-    const cards = el.shadowRoot!.querySelectorAll(".card");
+    const cards = el.shadowRoot!.querySelectorAll("hometube-content-card");
     expect(cards.length).toBe(2);
-    const strong = cards[0].querySelector("strong");
-    expect(strong).not.toBeNull();
-    expect(strong!.textContent).toBe("Test Channel");
+    expect(cards[0].getAttribute("title")).toBe("Test Channel");
   });
 
   it("shows empty message when no channels exist", async () => {
@@ -203,13 +201,10 @@ describe("<hometube-allowlist-manager>", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await el.updateComplete;
 
-    // Click search button (find the non-tab button)
-    const buttons = el.shadowRoot!.querySelectorAll("button");
-    const searchBtn = Array.from(buttons).find(
-      (b) => b.textContent!.trim() === "Search" && !b.hasAttribute("role"),
-    );
+    // Click search button (the wa-button with variant="brand")
+    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
     expect(searchBtn).not.toBeNull();
-    searchBtn!.click();
+    (searchBtn as HTMLElement).click();
     await new Promise((r) => setTimeout(r, 20));
     await el.updateComplete;
 
@@ -253,11 +248,8 @@ describe("<hometube-allowlist-manager>", () => {
     const callsBefore = fetchSpy.mock.calls.length;
 
     // Try to search with empty query
-    const buttons = el.shadowRoot!.querySelectorAll("button");
-    const searchBtn = Array.from(buttons).find(
-      (b) => b.textContent!.trim() === "Search" && !b.hasAttribute("role"),
-    );
-    searchBtn!.click();
+    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
+    (searchBtn as HTMLElement).click();
     await new Promise((r) => setTimeout(r, 20));
     await el.updateComplete;
 
@@ -303,7 +295,9 @@ describe("<hometube-allowlist-manager>", () => {
     });
     const el = await mount(1);
 
-    const removeBtn = el.shadowRoot!.querySelector(".card button.secondary");
+    const card = el.shadowRoot!.querySelector("hometube-content-card");
+    expect(card).not.toBeNull();
+    const removeBtn = card!.querySelector("wa-button");
     expect(removeBtn).not.toBeNull();
     expect(removeBtn!.textContent).toContain("Remove");
   });
@@ -318,7 +312,8 @@ describe("<hometube-allowlist-manager>", () => {
     });
     const el = await mount(1);
 
-    const removeBtn = el.shadowRoot!.querySelector(".card button.secondary")! as HTMLButtonElement;
+    const card = el.shadowRoot!.querySelector("hometube-content-card");
+    const removeBtn = card!.querySelector("wa-button")! as HTMLElement;
     removeBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     await el.updateComplete;

@@ -78,9 +78,12 @@ export class SearchBar extends LitElement {
   @state() private suggestions: Suggestion[] = [];
   @state() private suggestionsOpen = false;
   @state() private highlighted = -1;
+  @state() private compact = false;
+  @state() private expanded = false;
 
   private debounceTimer: number | null = null;
   private lastFetchToken = 0;
+  private mql: MediaQueryList | null = null;
 
   static styles = css`
     :host {
@@ -168,6 +171,46 @@ export class SearchBar extends LitElement {
       color: var(--wa-color-text-quiet);
       font-size: 0.85rem;
     }
+    .search-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      background: transparent;
+      color: var(--wa-color-text-normal);
+      cursor: pointer;
+      font-size: 1rem;
+    }
+    .search-icon-btn:hover {
+      background: var(--wa-color-surface-raised);
+    }
+    .expanded-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 300;
+      background: var(--wa-color-surface-default);
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .expanded-overlay .close-btn {
+      align-self: flex-end;
+      background: transparent;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+      color: var(--wa-color-text-normal);
+      padding: 0.25rem;
+    }
+    @media (max-width: 48rem) {
+      select {
+        display: none;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -175,15 +218,24 @@ export class SearchBar extends LitElement {
     this.query = this.initialQ ?? "";
     this.kind = (this.initialType ?? "all") as SearchKind;
     document.addEventListener("click", this.onDocumentClick);
+    this.mql = window.matchMedia("(max-width: 48rem)");
+    this.compact = this.mql.matches;
+    this.mql.addEventListener("change", this.onMediaChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener("click", this.onDocumentClick);
+    this.mql?.removeEventListener("change", this.onMediaChange);
     if (this.debounceTimer != null) {
       window.clearTimeout(this.debounceTimer);
     }
   }
+
+  private onMediaChange = (e: MediaQueryListEvent): void => {
+    this.compact = e.matches;
+    if (!e.matches) this.expanded = false;
+  };
 
   private onDocumentClick = (event: MouseEvent): void => {
     if (!this.suggestionsOpen) return;
@@ -296,8 +348,36 @@ export class SearchBar extends LitElement {
     window.location.href = s.href;
   };
 
+  private openExpanded = (): void => {
+    this.expanded = true;
+    // Focus the input after render
+    requestAnimationFrame(() => {
+      const input = this.renderRoot.querySelector<HTMLInputElement>("#search-input");
+      input?.focus();
+    });
+  };
+
+  private closeExpanded = (): void => {
+    this.expanded = false;
+  };
+
   override render() {
-    return html`
+    // Compact mode: show only a search icon button
+    if (this.compact && !this.expanded) {
+      return html`
+        <button
+          type="button"
+          class="search-icon-btn"
+          aria-label="Open search"
+          @click=${this.openExpanded}
+        >
+          🔍
+        </button>
+      `;
+    }
+
+    // Expanded overlay on mobile or always-visible on desktop
+    const form = html`
       <form role="search" @submit=${this.onSubmit} @keydown=${this.onKeydown}>
         <div class="input-wrapper">
           <label for="search-input">Search</label>
@@ -359,6 +439,30 @@ export class SearchBar extends LitElement {
         <button type="submit">Search</button>
       </form>
     `;
+
+    // On mobile expanded mode, wrap the form in a fullscreen overlay
+    if (this.compact && this.expanded) {
+      return html`
+        <div
+          class="expanded-overlay"
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === "Escape") this.closeExpanded();
+          }}
+        >
+          <button
+            type="button"
+            class="close-btn"
+            aria-label="Close search"
+            @click=${this.closeExpanded}
+          >
+            ✕
+          </button>
+          ${form}
+        </div>
+      `;
+    }
+
+    return form;
   }
 }
 

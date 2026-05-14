@@ -3,7 +3,7 @@
 {% block title %}HomeTube — Parent dashboard{% endblock %}
 
 {% block content %}
-<section class="parent-dashboard" aria-label="Parent dashboard">
+<section class="page-content" aria-label="Parent dashboard">
   <header class="page-header">
     <h1>Content control</h1>
     <p class="subtitle">
@@ -18,28 +18,30 @@
     empty-message="No children yet"
   ></hometube-account-selector>
 
-  <wa-tab-group id="parent-sections" placement="top">
-    <wa-tab slot="nav" panel="allowlist">Allowlist</wa-tab>
-    <wa-tab slot="nav" panel="blocked">Blocked</wa-tab>
-    <wa-tab slot="nav" panel="limits">Time limits</wa-tab>
-    <wa-tab slot="nav" panel="settings">Player settings</wa-tab>
+  <div class="page-section">
+    <wa-tab-group id="parent-sections" placement="top">
+      <wa-tab slot="nav" panel="allowlist">Allowlist</wa-tab>
+      <wa-tab slot="nav" panel="blocked">Blocked</wa-tab>
+      <wa-tab slot="nav" panel="limits">Time limits</wa-tab>
+      <wa-tab slot="nav" panel="settings">Player settings</wa-tab>
 
-    <wa-tab-panel name="allowlist">
-      <hometube-allowlist-manager></hometube-allowlist-manager>
-    </wa-tab-panel>
+      <wa-tab-panel name="allowlist">
+        <hometube-allowlist-manager></hometube-allowlist-manager>
+      </wa-tab-panel>
 
-    <wa-tab-panel name="blocked">
-      <hometube-blocklist-manager></hometube-blocklist-manager>
-    </wa-tab-panel>
+      <wa-tab-panel name="blocked">
+        <hometube-blocklist-manager></hometube-blocklist-manager>
+      </wa-tab-panel>
 
-    <wa-tab-panel name="limits">
-      <hometube-usage-limit-editor></hometube-usage-limit-editor>
-    </wa-tab-panel>
+      <wa-tab-panel name="limits">
+        <hometube-usage-limit-editor></hometube-usage-limit-editor>
+      </wa-tab-panel>
 
-    <wa-tab-panel name="settings">
-      <hometube-child-settings-form></hometube-child-settings-form>
-    </wa-tab-panel>
-  </wa-tab-group>
+      <wa-tab-panel name="settings">
+        <hometube-child-settings-form></hometube-child-settings-form>
+      </wa-tab-panel>
+    </wa-tab-group>
+  </div>
 </section>
 {% endblock %}
 

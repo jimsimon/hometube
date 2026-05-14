@@ -3,11 +3,11 @@
  *
  * Shown when the sleep timer expires (event:
  * `hometube:sleep-timer-expired`). Renders a calm, child-friendly
- * "time to stop" message with a "Back to home" button. Traps focus
- * inside the dialog while open.
+ * "time to stop" message with a "Back to home" button using
+ * <wa-dialog> for proper focus trapping and accessibility.
  */
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
 @customElement("hometube-wind-down-overlay")
@@ -18,28 +18,8 @@ export class WindDownOverlay extends LitElement {
     :host {
       display: contents;
     }
-    .backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.7);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 1100;
-    }
-    .dialog {
-      max-width: 28rem;
-      width: calc(100% - 2rem);
-      padding: 2rem;
-      border-radius: 0.75rem;
-      background: var(--wa-color-surface-default);
-      color: var(--wa-color-text-normal);
+    .body {
       text-align: center;
-      box-shadow: 0 1.5rem 3rem rgba(0, 0, 0, 0.4);
-    }
-    h2 {
-      margin: 0 0 1rem;
-      font-size: 1.5rem;
     }
     p {
       line-height: 1.5;
@@ -49,19 +29,6 @@ export class WindDownOverlay extends LitElement {
       display: flex;
       gap: 0.5rem;
       justify-content: center;
-    }
-    button,
-    a.button {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.55rem 1.4rem;
-      border-radius: 0.5rem;
-      border: 1px solid var(--wa-color-surface-border);
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      font: inherit;
-      text-decoration: none;
-      cursor: pointer;
     }
   `;
 
@@ -77,24 +44,19 @@ export class WindDownOverlay extends LitElement {
 
   private onExpired = (): void => {
     this.open = true;
-    queueMicrotask(() => {
-      const root = this.renderRoot as ShadowRoot;
-      (root.querySelector("a.button") as HTMLAnchorElement | null)?.focus();
-    });
   };
 
   override render() {
-    if (!this.open) return null;
+    if (!this.open) return nothing;
     return html`
-      <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="wind-down-title">
-        <div class="dialog">
-          <h2 id="wind-down-title">Time to stop</h2>
+      <wa-dialog open label="Time to stop" @wa-hide=${(e: Event) => e.preventDefault()}>
+        <div class="body">
           <p>Your sleep timer is up. Great work watching!</p>
           <div class="actions">
-            <a class="button" href="/child/home">Back to home</a>
+            <wa-button variant="brand" href="/child/home">Back to home</wa-button>
           </div>
         </div>
-      </div>
+      </wa-dialog>
     `;
   }
 }

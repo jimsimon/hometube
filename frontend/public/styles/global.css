@@ -4,6 +4,14 @@
  * <wa-page>. We only add minimal layout primitives here.
  */
 
+/* ─── View Transitions (MPA cross-document) ──────────────────── */
+
+@view-transition {
+  navigation: auto;
+}
+
+/* ─── Reset ──────────────────────────────────────────────────── */
+
 *,
 *::before,
 *::after {
@@ -28,6 +36,44 @@ a {
   color: var(--wa-color-brand-on-quiet);
 }
 
+/* ─── Section contrast / surface hierarchy ───────────────────── */
+
+header[slot="header"] {
+  background: var(--wa-color-surface-raised);
+  border-bottom: 1px solid var(--wa-color-surface-border);
+}
+
+nav[slot="navigation"] {
+  border-right: 1px solid var(--wa-color-surface-border);
+}
+
+main {
+  background: color-mix(in srgb, var(--wa-color-surface-default) 96%, black);
+  padding: var(--wa-space-l);
+}
+
+.wa-dark main {
+  background: color-mix(in srgb, var(--wa-color-surface-default) 94%, white);
+}
+
+footer[slot="footer"] {
+  padding: var(--wa-space-m) var(--wa-space-l);
+  text-align: center;
+  border-top: 1px solid var(--wa-color-surface-border);
+}
+
+.page-section {
+  background: var(--wa-color-surface-default);
+  border: 1px solid var(--wa-color-surface-border);
+  border-radius: var(--wa-border-radius-l, 0.75rem);
+  padding: var(--wa-space-l);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.page-section + .page-section {
+  margin-top: var(--wa-space-l);
+}
+
 /* ─── Header ─────────────────────────────────────────────────── */
 
 .brand {
@@ -35,6 +81,7 @@ a {
   font-size: 1.25rem;
   text-decoration: none;
   color: inherit;
+  view-transition-name: brand;
 }
 
 .header-actions {
@@ -44,13 +91,6 @@ a {
   flex-wrap: wrap;
 }
 
-/* ─── Footer ─────────────────────────────────────────────────── */
-
-footer[slot="footer"] {
-  padding: var(--wa-space-m) var(--wa-space-l);
-  text-align: center;
-}
-
 /* ─── Navigation drawer link list ────────────────────────────── */
 
 .nav-list {
@@ -58,7 +98,7 @@ footer[slot="footer"] {
   padding: 0;
   margin: 0;
   display: grid;
-  gap: 0.25rem;
+  gap: 0.5rem;
 }
 
 .nav-list a {
@@ -76,9 +116,23 @@ footer[slot="footer"] {
   outline: none;
 }
 
+.nav-list a[aria-current="page"] {
+  background: var(--wa-color-brand-quiet, rgba(37, 99, 235, 0.08));
+  border-left: 3px solid var(--wa-color-brand-fill, #2563eb);
+  color: var(--wa-color-brand-on-quiet, #2563eb);
+  font-weight: 600;
+}
+
 /* ─── Page content ───────────────────────────────────────────── */
 
+.page-content {
+  max-width: 80rem;
+  margin: 0 auto;
+}
+
 .page-header {
+  padding-bottom: var(--wa-space-m);
+  border-bottom: 1px solid var(--wa-color-surface-border);
   margin-bottom: var(--wa-space-l);
 }
 
@@ -110,7 +164,82 @@ footer[slot="footer"] {
 .card-grid {
   display: grid;
   gap: var(--wa-space-m);
-  grid-template-columns: repeat(auto-fill, minmax(min(16rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
+  max-width: 80rem;
 }
 
+/* ─── View transition named elements ─────────────────────────── */
 
+header[slot="header"] {
+  view-transition-name: main-header;
+}
+
+nav[slot="navigation"] {
+  view-transition-name: main-nav;
+}
+
+main {
+  view-transition-name: page-content;
+}
+
+/* ─── View transition animations ─────────────────────────────── */
+
+@keyframes slide-from-right {
+  from { transform: translateX(30px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes slide-to-left {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(-30px); opacity: 0; }
+}
+@keyframes slide-from-left {
+  from { transform: translateX(-30px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes slide-to-right {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(30px); opacity: 0; }
+}
+
+:root:active-view-transition-type(forward) {
+  &::view-transition-old(page-content) {
+    animation: slide-to-left 0.25s ease-out;
+  }
+  &::view-transition-new(page-content) {
+    animation: slide-from-right 0.25s ease-out;
+  }
+}
+
+:root:active-view-transition-type(backward) {
+  &::view-transition-old(page-content) {
+    animation: slide-to-right 0.25s ease-out;
+  }
+  &::view-transition-new(page-content) {
+    animation: slide-from-left 0.25s ease-out;
+  }
+}
+
+::view-transition-group(video-hero) {
+  animation-duration: 0.3s;
+  animation-timing-function: ease-in-out;
+}
+
+/* ─── Utilities ──────────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 48rem) {
+  .hide-on-mobile {
+    display: none !important;
+  }
+}

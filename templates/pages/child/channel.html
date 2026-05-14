@@ -3,13 +3,11 @@
 {% block title %}Channel — HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-channel" aria-label="Channel videos">
+<section class="page-content" aria-label="Channel videos">
   <hometube-channel-detail
     channel-id="{{ channel_id }}"
   ></hometube-channel-detail>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
@@ -17,5 +15,4 @@
 <script type="module" src="/assets/components/channel-card.js"></script>
 <script type="module" src="/assets/components/subscribe-button.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

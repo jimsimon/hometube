@@ -80,6 +80,8 @@ export default defineConfig({
         ...discoverComponentEntries(),
         // SW registration shim served from `<base>` template.
         'services/sw-register': resolve(__dirname, 'src/services/sw-register.ts'),
+        // MPA View Transitions (directional animation support).
+        'services/view-transitions': resolve(__dirname, 'src/services/view-transitions.ts'),
       },
       output: {
         // Stable filenames so the askama templates can reference them
