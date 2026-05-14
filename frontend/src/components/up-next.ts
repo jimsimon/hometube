@@ -13,6 +13,10 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api } from "../services/api.js";
 import type { ChildSettings, UpNextItem } from "../types/index.js";
 
+import "./loading-spinner.js";
+import "./error-banner.js";
+import "./content-card.js";
+
 @customElement("hometube-up-next")
 export class UpNext extends LitElement {
   @property({ type: String, attribute: "video-id" })
@@ -23,6 +27,7 @@ export class UpNext extends LitElement {
 
   @state() private items: UpNextItem[] = [];
   @state() private settings: ChildSettings | null = null;
+  @state() private loading = false;
   @state() private error = "";
 
   static styles = css`
@@ -104,6 +109,8 @@ export class UpNext extends LitElement {
 
   private async load(): Promise<void> {
     if (!this.videoId) return;
+    this.loading = true;
+    this.error = "";
     const params = new URLSearchParams();
     if (this.from) params.set("from", this.from);
     params.set("current_video", this.videoId);
@@ -117,6 +124,8 @@ export class UpNext extends LitElement {
       this.settings = settings;
     } catch (err) {
       this.error = (err as Error).message;
+    } finally {
+      this.loading = false;
     }
   }
 
@@ -153,8 +162,17 @@ export class UpNext extends LitElement {
   };
 
   override render() {
+    if (this.loading && this.items.length === 0) {
+      return html`
+        <h2>Up next</h2>
+        <hometube-loading-spinner></hometube-loading-spinner>
+      `;
+    }
     if (this.error) {
-      return html`<p class="empty" role="alert">${this.error}</p>`;
+      return html`
+        <h2>Up next</h2>
+        <hometube-error-banner .message=${this.error}></hometube-error-banner>
+      `;
     }
     return html`
       <h2>Up next</h2>
@@ -165,21 +183,15 @@ export class UpNext extends LitElement {
               ${this.items.map(
                 (it) => html`
                   <li>
-                    <a
+                    <hometube-content-card
+                      variant="compact"
+                      title=${it.title}
+                      .thumbnailUrl=${it.thumbnail_url}
+                      .channelTitle=${it.channel_title}
                       href="/child/video/${encodeURIComponent(it.video_id)}${this.from
                         ? `?from=${encodeURIComponent(this.from)}`
                         : ""}"
-                    >
-                      ${it.thumbnail_url
-                        ? html`<img src=${it.thumbnail_url} alt="" />`
-                        : html`<div class="placeholder"></div>`}
-                      <div>
-                        <div class="row-title">${it.title}</div>
-                        ${it.channel_title
-                          ? html`<div class="row-channel">${it.channel_title}</div>`
-                          : null}
-                      </div>
-                    </a>
+                    ></hometube-content-card>
                   </li>
                 `,
               )}

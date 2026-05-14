@@ -3,7 +3,7 @@
 {% block title %}Playlists — HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-playlists" aria-label="Playlists">
+<section class="page-content" aria-label="Playlists">
   <header class="page-header">
     <h1>Playlists</h1>
     <p class="subtitle">Your playlists, synced with YouTube.</p>
@@ -11,13 +11,10 @@
 
   <hometube-playlist-list></hometube-playlist-list>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
 <script type="module" src="/assets/components/playlist-card.js"></script>
 <script type="module" src="/assets/components/playlist-list.js"></script>
 <script type="module" src="/assets/components/create-playlist-dialog.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

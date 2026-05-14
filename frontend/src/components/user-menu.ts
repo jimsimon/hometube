@@ -1,10 +1,9 @@
 /**
  * <hometube-user-menu>
  *
- * Header-bar component showing the signed-in user's name, a "Switch
- * profile" link, and a "Log out" button. Extracted from the old
- * <hometube-nav-bar> so these controls can live directly in the
- * <wa-page> header slot.
+ * Header-bar component rendered as an avatar/initials button that opens
+ * a dropdown menu with the user's name, profile switch, and logout.
+ * Uses <wa-dropdown> + <wa-menu> for proper positioning and a11y.
  */
 
 import { LitElement, html, css, nothing } from "lit";
@@ -30,33 +29,42 @@ export class UserMenu extends LitElement {
     :host {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
     }
-    .who {
-      color: var(--wa-color-text-quiet);
-      font-size: 0.85rem;
-    }
-    button.logout {
-      padding: 0.25rem 0.75rem;
-      border-radius: 0.375rem;
+    .trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
       border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: transparent;
-      color: var(--wa-color-text-normal);
-      font: inherit;
+      background: var(--wa-color-brand-quiet, rgba(37, 99, 235, 0.08));
+      color: var(--wa-color-brand-on-quiet, #2563eb);
+      font-weight: 700;
+      font-size: 0.8rem;
       cursor: pointer;
+      text-transform: uppercase;
+      line-height: 1;
     }
-    button.logout:hover {
-      background: var(--wa-color-surface-raised);
+    .trigger:hover {
+      background: var(--wa-color-brand-fill, #2563eb);
+      color: white;
     }
-    a.profile {
-      color: inherit;
-      text-decoration: none;
+    .name-item {
       font-size: 0.85rem;
-    }
-    a.profile:hover {
-      text-decoration: underline;
+      color: var(--wa-color-text-quiet);
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--wa-color-surface-border);
+      margin-bottom: 0.25rem;
     }
   `;
+
+  private get initials(): string {
+    if (!this.displayName) return "?";
+    const parts = this.displayName.trim().split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return this.displayName.substring(0, 2).toUpperCase();
+  }
 
   private onLogout = async (): Promise<void> => {
     try {
@@ -68,13 +76,32 @@ export class UserMenu extends LitElement {
 
   override render() {
     return html`
-      ${this.displayName
-        ? html`<span class="who">Signed in as ${this.displayName}</span>`
-        : nothing}
-      ${!this.hideProfile ? html`<a class="profile" href="/profiles">Switch profile</a>` : nothing}
-      ${!this.hideLogout
-        ? html`<button type="button" class="logout" @click=${this.onLogout}>Log out</button>`
-        : nothing}
+      <wa-dropdown>
+        <button
+          slot="trigger"
+          class="trigger"
+          aria-label="User menu for ${this.displayName || "account"}"
+          title=${this.displayName || "Account"}
+        >
+          ${this.initials}
+        </button>
+        <wa-menu>
+          ${this.displayName ? html`<div class="name-item">${this.displayName}</div>` : nothing}
+          ${!this.hideProfile
+            ? html`<wa-menu-item
+                value="profile"
+                @click=${() => {
+                  window.location.href = "/profiles";
+                }}
+              >
+                Switch profile
+              </wa-menu-item>`
+            : nothing}
+          ${!this.hideLogout
+            ? html`<wa-menu-item value="logout" @click=${this.onLogout}> Log out </wa-menu-item>`
+            : nothing}
+        </wa-menu>
+      </wa-dropdown>
     `;
   }
 }

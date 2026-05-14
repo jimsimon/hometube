@@ -3,6 +3,7 @@
    - Header actions: search bar, theme toggle, user menu
    - Navigation drawer: child content links
    - Script imports for shared child components
+   - Usage-limit overlay (shared across all child pages)
 #}
 {% extends "base.html" %}
 
@@ -33,5 +34,19 @@
 {% block scripts %}
 <script type="module" src="/assets/components/search-bar.js"></script>
 <script type="module" src="/assets/components/user-menu.js"></script>
+<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+<script>
+  // Mark the active nav link based on the current URL path.
+  (function() {
+    var path = location.pathname;
+    var links = document.querySelectorAll('nav[slot="navigation"] .nav-list a');
+    for (var i = 0; i < links.length; i++) {
+      var href = links[i].getAttribute('href');
+      if (path === href || (href !== '/child/home' && path.startsWith(href))) {
+        links[i].setAttribute('aria-current', 'page');
+      }
+    }
+  })();
+</script>
 {% block page_scripts %}{% endblock %}
 {% endblock %}

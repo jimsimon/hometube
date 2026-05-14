@@ -46,15 +46,24 @@ export class PlaylistCard extends LitElement {
       outline: none;
     }
     .thumb {
+      position: relative;
       aspect-ratio: 16 / 9;
       background: var(--wa-color-surface-border);
       border-radius: 0.375rem;
       overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     .thumb img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+    }
+    .thumb .placeholder-icon {
+      font-size: 1.5rem;
+      color: var(--wa-color-text-quiet);
+      opacity: 0.5;
     }
     .row {
       display: flex;
@@ -82,7 +91,6 @@ export class PlaylistCard extends LitElement {
       background: var(--wa-color-brand-quiet, rgba(37, 99, 235, 0.15));
       color: var(--wa-color-brand-on-quiet);
     }
-
   `;
 
   override render() {
@@ -90,14 +98,14 @@ export class PlaylistCard extends LitElement {
     return html`
       <a href=${href} aria-label=${this.title}>
         <div class="thumb">
-          ${this.thumbnailUrl ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />` : null}
+          ${this.thumbnailUrl
+            ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
+            : html`<span class="placeholder-icon" aria-hidden="true">♫</span>`}
         </div>
         <div class="title">${this.title}</div>
         <div class="row">
           <span class="meta">${this.videoCount} videos</span>
-          <span class="badge ${this.isOwn ? "own" : ""}"
-            >${this.isOwn ? "Yours" : "Library"}</span
-          >
+          <span class="badge ${this.isOwn ? "own" : ""}">${this.isOwn ? "Yours" : "Library"}</span>
         </div>
       </a>
     `;

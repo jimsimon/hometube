@@ -125,9 +125,9 @@ export class VideoRow extends LitElement {
                         role="listitem"
                         video-id=${c.videoId}
                         title=${c.title}
-                        thumbnail-url=${c.thumbnailUrl ?? ""}
-                        channel-title=${c.channelTitle ?? ""}
-                        duration=${c.durationSeconds ?? 0}
+                        .thumbnailUrl=${c.thumbnailUrl}
+                        .channelTitle=${c.channelTitle}
+                        .duration=${c.durationSeconds}
                         progress=${c.progress}
                       ></hometube-video-card>
                     `,

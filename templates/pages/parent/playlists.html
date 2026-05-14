@@ -3,7 +3,7 @@
 {% block title %}Family playlists — HomeTube{% endblock %}
 
 {% block content %}
-<section class="parent-playlists" aria-label="Family playlists">
+<section class="page-content" aria-label="Family playlists" style="max-width: 64rem;">
   <header class="page-header">
     <h1>Family playlists</h1>
     <p class="subtitle">
@@ -11,18 +11,10 @@
     </p>
   </header>
 
-  <hometube-family-playlist-manager></hometube-family-playlist-manager>
+  <div class="page-section">
+    <hometube-family-playlist-manager></hometube-family-playlist-manager>
+  </div>
 </section>
-{% endblock %}
-
-{% block head %}
-<style>
-  .parent-playlists {
-    padding: 1rem;
-    max-width: 64rem;
-    margin: 0 auto;
-  }
-</style>
 {% endblock %}
 
 {% block page_scripts %}

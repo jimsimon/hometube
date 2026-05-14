@@ -241,8 +241,8 @@ fn append_youtube_args(cmd: &mut Command) {
     }
 
     // PO token server URL for the bgutil plugin.
-    let pot_url = std::env::var("POT_SERVER_URL")
-        .unwrap_or_else(|_| "http://pot-server:4416".to_string());
+    let pot_url =
+        std::env::var("POT_SERVER_URL").unwrap_or_else(|_| "http://pot-server:4416".to_string());
     if !pot_url.is_empty() {
         cmd.arg("--extractor-args")
             .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));

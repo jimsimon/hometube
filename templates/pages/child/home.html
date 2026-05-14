@@ -3,7 +3,7 @@
 {% block title %}HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-home" aria-label="Home">
+<section class="child-home page-content" aria-label="Home">
   <hometube-video-row
     feed="continue-watching"
     heading="Continue watching"
@@ -19,12 +19,9 @@
     {% include "partials/video-grid.html" %}
   </noscript>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
 <script type="module" src="/assets/components/video-row.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

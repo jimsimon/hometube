@@ -3,7 +3,7 @@
 {% block title %}HomeTube — Search{% endblock %}
 
 {% block content %}
-<section class="child-search" aria-label="Search results">
+<section class="page-content" aria-label="Search results">
   <header class="page-header">
     <h1>Search</h1>
     <p class="subtitle">
@@ -14,8 +14,6 @@
 
   <hometube-search-results q="{{ q }}" type="{{ kind }}"></hometube-search-results>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
@@ -23,5 +21,4 @@
 <script type="module" src="/assets/components/video-card.js"></script>
 <script type="module" src="/assets/components/channel-card.js"></script>
 <script type="module" src="/assets/components/playlist-card.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

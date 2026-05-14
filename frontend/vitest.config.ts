@@ -52,6 +52,10 @@ export default defineConfig({
         // Tiny SW-registration shim — exercised at runtime, not in
         // unit tests.
         'src/services/sw-register.ts',
+        // View Transitions uses cross-document navigation APIs
+        // (PageSwapEvent, PageRevealEvent) that only fire during
+        // actual page navigations — untestable in unit tests.
+        'src/services/view-transitions.ts',
         // Thin re-export shim; the real implementation in
         // offline-opfs.ts is well-covered.
         'src/services/offline.ts',

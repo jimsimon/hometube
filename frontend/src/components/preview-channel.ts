@@ -57,7 +57,7 @@ export class PreviewChannel extends LitElement {
       margin-top: 1rem;
       display: grid;
       gap: 0.75rem;
-      grid-template-columns: repeat(auto-fill, minmax(min(14rem, 100%), 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
     }
     .card {
       display: grid;
@@ -137,18 +137,29 @@ export class PreviewChannel extends LitElement {
         </div>
       </header>
 
-      <div class="grid">
-        ${this.data.videos.map(
-          (v) => html`
-            <a class="card" href="/parent/preview/video/${encodeURIComponent(v.video_id)}">
-              ${pickThumbnail(v.thumbnails)
-                ? html`<img src=${pickThumbnail(v.thumbnails)!} alt="" />`
-                : nothing}
-              <div class="title">${v.title}</div>
-            </a>
-          `,
-        )}
-      </div>
+      ${this.data.videos.length > 0
+        ? html`
+            <h2 style="font-size: 1rem; margin: 1rem 0 0.5rem;">
+              Recent uploads (${this.data.videos.length})
+            </h2>
+            <div class="grid">
+              ${this.data.videos.map(
+                (v) => html`
+                  <a class="card" href="/parent/preview/video/${encodeURIComponent(v.video_id)}">
+                    ${pickThumbnail(v.thumbnails)
+                      ? html`<img src=${pickThumbnail(v.thumbnails)!} alt="" />`
+                      : html`<div
+                          style="width:100%;aspect-ratio:16/9;background:var(--wa-color-surface-border);border-radius:0.375rem;"
+                        ></div>`}
+                    <div class="title">${v.title}</div>
+                  </a>
+                `,
+              )}
+            </div>
+          `
+        : html`<p style="color:var(--wa-color-text-quiet);font-style:italic;padding:1rem 0;">
+            No videos found for this channel.
+          </p>`}
     `;
   }
 }

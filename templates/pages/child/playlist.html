@@ -3,7 +3,7 @@
 {% block title %}Playlist — HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-playlist" aria-label="Playlist videos">
+<section class="page-content" aria-label="Playlist videos">
   {% if playlist_kind == "family" %}
   <hometube-family-playlist-view
     playlist-id="{{ playlist_id }}"
@@ -14,13 +14,10 @@
   ></hometube-playlist-detail>
   {% endif %}
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
 <script type="module" src="/assets/components/playlist-detail.js"></script>
 <script type="module" src="/assets/components/family-playlist-view.js"></script>
 <script type="module" src="/assets/components/video-card.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}

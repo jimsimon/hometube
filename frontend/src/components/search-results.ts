@@ -33,6 +33,7 @@ import "./search-bar.js";
 import "./channel-card.js";
 import "./playlist-card.js";
 import "./video-card.js";
+import "./loading-spinner.js";
 
 const PLAYLIST_BADGE_LABELS: Record<ChildSearchPlaylistSource, string> = {
   allowlist: "Allowed",
@@ -65,7 +66,7 @@ export class SearchResults extends LitElement {
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
       gap: 1rem;
     }
     .empty {
@@ -186,12 +187,9 @@ export class SearchResults extends LitElement {
   };
 
   override render() {
-    const empty =
-      !this.loading &&
-      !this.error &&
-      this.channels.length === 0 &&
-      this.playlists.length === 0 &&
-      this.videos.length === 0;
+    const hasResults =
+      this.channels.length > 0 || this.playlists.length > 0 || this.videos.length > 0;
+    const empty = !this.loading && !this.error && !hasResults;
 
     return html`
       <div class="bar">
@@ -206,6 +204,9 @@ export class SearchResults extends LitElement {
             : `Found ${this.channels.length} channels, ${this.playlists.length} playlists, ${this.videos.length} videos.`}
       </div>
 
+      ${this.loading && !hasResults
+        ? html`<hometube-loading-spinner label="Searching…"></hometube-loading-spinner>`
+        : nothing}
       ${empty
         ? html`<p class="empty">
             No results yet. Try a different word, or ask a parent to add what you're looking for.
@@ -252,11 +253,11 @@ export class SearchResults extends LitElement {
                 }
                 return html`<div class="playlist-result">
                   ${badge}
-                  <a
-                    class="external-link"
-                    href="/child/playlist/${encodeURIComponent(p.playlist_id)}"
-                    >${p.playlist_title}</a
-                  >
+                  <hometube-playlist-card
+                    playlist-id=${p.playlist_id}
+                    title=${p.playlist_title}
+                    .thumbnailUrl=${p.playlist_thumbnail_url}
+                  ></hometube-playlist-card>
                 </div>`;
               })}
             </div>

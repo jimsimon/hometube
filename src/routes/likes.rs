@@ -28,14 +28,7 @@ pub struct LikeRow {
     pub visible: bool,
 }
 
-type LikeRowTuple = (
-    i64,
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-    i64,
-);
+type LikeRowTuple = (i64, String, Option<String>, Option<String>, i64, i64);
 
 /// `GET /api/likes`.
 ///
@@ -63,14 +56,7 @@ pub async fn list(
     let out = rows
         .into_iter()
         .map(
-            |(
-                id,
-                video_id,
-                video_title,
-                video_thumbnail_url,
-                liked_at,
-                visible,
-            )| LikeRow {
+            |(id, video_id, video_title, video_thumbnail_url, liked_at, visible)| LikeRow {
                 id,
                 video_id,
                 video_title,

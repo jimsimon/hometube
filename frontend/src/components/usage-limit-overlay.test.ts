@@ -34,8 +34,8 @@ function fireUsageLimit(
 describe("<hometube-usage-limit-overlay>", () => {
   it("renders nothing initially (not open)", async () => {
     const el = await mount();
-    const backdrop = el.shadowRoot!.querySelector(".backdrop");
-    expect(backdrop).toBeNull();
+    const dialog = el.shadowRoot!.querySelector("wa-dialog");
+    expect(dialog).toBeNull();
   });
 
   it("shows the overlay on limit_exceeded event", async () => {
@@ -43,10 +43,9 @@ describe("<hometube-usage-limit-overlay>", () => {
     fireUsageLimit("limit_exceeded");
     await el.updateComplete;
 
-    const backdrop = el.shadowRoot!.querySelector(".backdrop");
-    expect(backdrop).not.toBeNull();
-    const heading = el.shadowRoot!.querySelector("h2");
-    expect(heading!.textContent).toBe("All done for today!");
+    const dialog = el.shadowRoot!.querySelector("wa-dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog!.getAttribute("label")).toBe("All done for today!");
     const body = el.shadowRoot!.querySelector("p");
     expect(body!.textContent).toContain("used up your time");
   });
@@ -56,8 +55,8 @@ describe("<hometube-usage-limit-overlay>", () => {
     fireUsageLimit("outside_window", { start: "08:00", end: "20:00" });
     await el.updateComplete;
 
-    const heading = el.shadowRoot!.querySelector("h2");
-    expect(heading!.textContent).toContain("outside your viewing hours");
+    const dialog = el.shadowRoot!.querySelector("wa-dialog");
+    expect(dialog!.getAttribute("label")).toContain("outside your viewing hours");
     const body = el.shadowRoot!.querySelector("p");
     expect(body!.textContent).toContain("8:00 AM");
   });
@@ -76,24 +75,24 @@ describe("<hometube-usage-limit-overlay>", () => {
     fireUsageLimit("limit_exceeded");
     await el.updateComplete;
 
-    const btn = el.shadowRoot!.querySelector("button");
+    const btn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
     expect(btn).not.toBeNull();
-    btn!.click();
+    (btn as HTMLElement).click();
     await el.updateComplete;
 
-    const backdrop = el.shadowRoot!.querySelector(".backdrop");
-    expect(backdrop).toBeNull();
+    const dialog = el.shadowRoot!.querySelector("wa-dialog");
+    expect(dialog).toBeNull();
   });
 
-  it("has proper ARIA attributes for the dialog", async () => {
+  it("has wa-dialog with label for accessibility", async () => {
     const el = await mount();
     fireUsageLimit("limit_exceeded");
     await el.updateComplete;
 
-    const dialog = el.shadowRoot!.querySelector('[role="dialog"]');
+    const dialog = el.shadowRoot!.querySelector("wa-dialog");
     expect(dialog).not.toBeNull();
-    expect(dialog!.getAttribute("aria-modal")).toBe("true");
-    expect(dialog!.getAttribute("aria-labelledby")).toBe("usage-overlay-title");
+    expect(dialog!.getAttribute("label")).toBe("All done for today!");
+    expect(dialog!.hasAttribute("open")).toBe(true);
   });
 
   it("formats PM times correctly", async () => {

@@ -3,7 +3,7 @@
 {% block title %}Channels — HomeTube{% endblock %}
 
 {% block content %}
-<section class="child-channels" aria-label="Subscribed channels">
+<section class="page-content" aria-label="Subscribed channels">
   <header class="page-header">
     <h1>Channels</h1>
     <p class="subtitle">Channels you've subscribed to.</p>
@@ -11,12 +11,9 @@
 
   <hometube-channel-list></hometube-channel-list>
 </section>
-
-<hometube-usage-limit-overlay></hometube-usage-limit-overlay>
 {% endblock %}
 
 {% block page_scripts %}
 <script type="module" src="/assets/components/channel-card.js"></script>
 <script type="module" src="/assets/components/channel-list.js"></script>
-<script type="module" src="/assets/components/usage-limit-overlay.js"></script>
 {% endblock %}
