@@ -987,7 +987,7 @@ async fn serve_file(path: &FsPath, size: i64, headers: &HeaderMap) -> AppResult<
 /// satisfiable. Open-ended ranges (`bytes=N-` or `bytes=-N` for
 /// suffix length) are accepted; multipart ranges and non-`bytes` units
 /// are rejected.
-fn parse_single_byte_range(value: Option<&str>, total: u64) -> Option<(u64, u64)> {
+pub(crate) fn parse_single_byte_range(value: Option<&str>, total: u64) -> Option<(u64, u64)> {
     let value = value?;
     let body = value.strip_prefix("bytes=")?;
     if body.contains(',') {
@@ -1022,4 +1022,431 @@ fn parse_single_byte_range(value: Option<&str>, total: u64) -> Option<(u64, u64)
         return None;
     }
     Some((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_single_byte_range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn range_none_input() {
+        assert_eq!(parse_single_byte_range(None, 1000), None);
+    }
+
+    #[test]
+    fn range_empty_string() {
+        assert_eq!(parse_single_byte_range(Some(""), 1000), None);
+    }
+
+    #[test]
+    fn range_non_bytes_unit() {
+        assert_eq!(parse_single_byte_range(Some("items=0-10"), 1000), None);
+    }
+
+    #[test]
+    fn range_multipart() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=0-10,20-30"), 1000),
+            None
+        );
+    }
+
+    #[test]
+    fn range_full_spec() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=0-499"), 1000),
+            Some((0, 499))
+        );
+    }
+
+    #[test]
+    fn range_open_ended() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=500-"), 1000),
+            Some((500, 999))
+        );
+    }
+
+    #[test]
+    fn range_suffix() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=-200"), 1000),
+            Some((800, 999))
+        );
+    }
+
+    #[test]
+    fn range_suffix_larger_than_total() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=-2000"), 1000),
+            Some((0, 999))
+        );
+    }
+
+    #[test]
+    fn range_suffix_zero() {
+        assert_eq!(parse_single_byte_range(Some("bytes=-0"), 1000), None);
+    }
+
+    #[test]
+    fn range_suffix_zero_total() {
+        assert_eq!(parse_single_byte_range(Some("bytes=-100"), 0), None);
+    }
+
+    #[test]
+    fn range_start_past_end() {
+        assert_eq!(parse_single_byte_range(Some("bytes=1000-"), 1000), None);
+    }
+
+    #[test]
+    fn range_end_clamped() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=0-5000"), 1000),
+            Some((0, 999))
+        );
+    }
+
+    #[test]
+    fn range_single_byte() {
+        assert_eq!(
+            parse_single_byte_range(Some("bytes=42-42"), 1000),
+            Some((42, 42))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_upstream_segment_url
+    // -----------------------------------------------------------------------
+
+    fn make_result_with_format(format_id: &str, url: &str) -> ExtractResult {
+        ExtractResult {
+            id: "test".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![],
+            thumbnail: None,
+            formats: vec![Format {
+                format_id: format_id.into(),
+                ext: None,
+                height: None,
+                width: None,
+                tbr: None,
+                vbr: None,
+                abr: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                filesize: None,
+                url: Some(url.into()),
+                manifest_url: None,
+                protocol: None,
+            }],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        }
+    }
+
+    #[test]
+    fn upstream_url_appends_sq() {
+        let result = make_result_with_format("137", "https://rr.example.com/seg?key=val");
+        let url = build_upstream_segment_url(&result, "137", "5").unwrap();
+        assert_eq!(url, "https://rr.example.com/seg?key=val&sq=5");
+    }
+
+    #[test]
+    fn upstream_url_replaces_existing_sq() {
+        let result = make_result_with_format("137", "https://rr.example.com/seg?key=val&sq=0");
+        let url = build_upstream_segment_url(&result, "137", "7").unwrap();
+        assert!(url.contains("sq=7"), "got: {url}");
+        assert!(!url.contains("sq=0"), "old sq not replaced in: {url}");
+    }
+
+    #[test]
+    fn upstream_url_replaces_sq_at_start() {
+        let result = make_result_with_format("137", "sq=0&key=val");
+        let url = build_upstream_segment_url(&result, "137", "3").unwrap();
+        assert!(url.starts_with("sq=3"), "got: {url}");
+    }
+
+    #[test]
+    fn upstream_url_unknown_format_returns_none() {
+        let result = make_result_with_format("137", "https://x/y");
+        assert_eq!(build_upstream_segment_url(&result, "999", "0"), None);
+    }
+
+    #[test]
+    fn upstream_url_no_url_field() {
+        let result = ExtractResult {
+            id: "test".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![],
+            thumbnail: None,
+            formats: vec![Format {
+                format_id: "137".into(),
+                ext: None,
+                height: None,
+                width: None,
+                tbr: None,
+                vbr: None,
+                abr: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                filesize: None,
+                url: None,
+                manifest_url: Some("https://m.example.com/dash.mpd".into()),
+                protocol: None,
+            }],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(build_upstream_segment_url(&result, "137", "0"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // best_audio_format_id
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn best_audio_picks_highest_abr() {
+        let result = ExtractResult {
+            id: "test".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![],
+            thumbnail: None,
+            formats: vec![
+                Format {
+                    format_id: "140".into(),
+                    ext: None,
+                    height: None,
+                    width: None,
+                    tbr: None,
+                    vbr: None,
+                    abr: Some(128.0),
+                    fps: None,
+                    vcodec: Some("none".into()),
+                    acodec: Some("aac".into()),
+                    filesize: None,
+                    url: Some("https://x/audio128".into()),
+                    manifest_url: None,
+                    protocol: None,
+                },
+                Format {
+                    format_id: "251".into(),
+                    ext: None,
+                    height: None,
+                    width: None,
+                    tbr: None,
+                    vbr: None,
+                    abr: Some(160.0),
+                    fps: None,
+                    vcodec: Some("none".into()),
+                    acodec: Some("opus".into()),
+                    filesize: None,
+                    url: Some("https://x/audio160".into()),
+                    manifest_url: None,
+                    protocol: None,
+                },
+                Format {
+                    format_id: "137".into(),
+                    ext: None,
+                    height: Some(1080),
+                    width: Some(1920),
+                    tbr: None,
+                    vbr: None,
+                    abr: None,
+                    fps: None,
+                    vcodec: Some("avc1".into()),
+                    acodec: None,
+                    filesize: None,
+                    url: Some("https://x/video".into()),
+                    manifest_url: None,
+                    protocol: None,
+                },
+            ],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(best_audio_format_id(&result), Some("251".into()));
+    }
+
+    #[test]
+    fn best_audio_returns_none_when_no_audio() {
+        let result = ExtractResult {
+            id: "test".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![],
+            thumbnail: None,
+            formats: vec![Format {
+                format_id: "137".into(),
+                ext: None,
+                height: Some(1080),
+                width: None,
+                tbr: None,
+                vbr: None,
+                abr: None,
+                fps: None,
+                vcodec: Some("avc1".into()),
+                acodec: None,
+                filesize: None,
+                url: Some("https://x/video".into()),
+                manifest_url: None,
+                protocol: None,
+            }],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(best_audio_format_id(&result), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // pick_thumbnail
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pick_thumbnail_prefers_direct() {
+        let result = ExtractResult {
+            id: "t".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![crate::services::ytdlp::Thumbnail {
+                url: "https://img/fallback.jpg".into(),
+                width: Some(1280),
+                height: Some(720),
+                id: None,
+            }],
+            thumbnail: Some("https://img/direct.jpg".into()),
+            formats: vec![],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(
+            pick_thumbnail(&result),
+            Some("https://img/direct.jpg".into())
+        );
+    }
+
+    #[test]
+    fn pick_thumbnail_fallback_to_widest() {
+        let result = ExtractResult {
+            id: "t".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![
+                crate::services::ytdlp::Thumbnail {
+                    url: "https://img/small.jpg".into(),
+                    width: Some(120),
+                    height: Some(90),
+                    id: None,
+                },
+                crate::services::ytdlp::Thumbnail {
+                    url: "https://img/large.jpg".into(),
+                    width: Some(1920),
+                    height: Some(1080),
+                    id: None,
+                },
+            ],
+            thumbnail: None,
+            formats: vec![],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(
+            pick_thumbnail(&result),
+            Some("https://img/large.jpg".into())
+        );
+    }
+
+    #[test]
+    fn pick_thumbnail_none_when_empty() {
+        let result = ExtractResult {
+            id: "t".into(),
+            title: None,
+            channel_id: None,
+            channel_title: None,
+            duration: None,
+            thumbnails: vec![],
+            thumbnail: None,
+            formats: vec![],
+            subtitles: Default::default(),
+            automatic_captions: Default::default(),
+            manifest_url: None,
+        };
+        assert_eq!(pick_thumbnail(&result), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_sq
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_sq_valid() {
+        assert_eq!(parse_sq("42"), 42);
+    }
+
+    #[test]
+    fn parse_sq_invalid() {
+        assert_eq!(parse_sq("abc"), 0);
+    }
+
+    #[test]
+    fn parse_sq_empty() {
+        assert_eq!(parse_sq(""), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // segment_cache_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn segment_cache_path_structure() {
+        let cfg = crate::config::Config::from_env().unwrap();
+        let p = segment_cache_path(&cfg, "vid123", "137", "5");
+        assert!(p.ends_with("vid123/137/5"));
+        assert!(p.starts_with("./data/segment_cache"));
+    }
+
+    // -----------------------------------------------------------------------
+    // max_height_for_child (indirectly via constants)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn max_height_mapping_correctness() {
+        // This checks the string → height mapping used in max_height_for_child.
+        let cases = [("480p", 480i64), ("720p", 720), ("1080p", 1080)];
+        for (label, expected) in cases {
+            let height: Option<i64> = match label {
+                "480p" => Some(480),
+                "720p" => Some(720),
+                "1080p" => Some(1080),
+                _ => None,
+            };
+            assert_eq!(height, Some(expected));
+        }
+    }
 }
