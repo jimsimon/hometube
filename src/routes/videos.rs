@@ -580,10 +580,26 @@ pub async fn get_hls_proxy(
 
     match kind {
         HlsProxyKind::Playlist => {
-            // Rewrite each segment URL inside the media playlist before
-            // returning it so the browser stays inside our proxy.
-            let body = res.text().await.map_err(AppError::Http)?;
-            let rewritten = hls::rewrite_playlist(&secret, &q.video_id, &body, HlsProxyKind::Segment);
+            // Only attempt URL rewriting on a successful response — an
+            // error body (HTML 404 page, JSON error, etc.) is *not* a
+            // valid m3u8 and feeding it through `rewrite_playlist`
+            // would mangle whatever debugging info upstream sent. On
+            // non-2xx pass the body through verbatim with the upstream
+            // status so callers can see what went wrong.
+            let body = res.bytes().await.map_err(AppError::Http)?;
+            if !status.is_success() {
+                let mut response = Response::new(Body::from(body));
+                *response.status_mut() = status;
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
+                return Ok(response);
+            }
+            let body_str = std::str::from_utf8(&body).map_err(|e| {
+                AppError::Other(anyhow::anyhow!("upstream playlist not UTF-8: {e}"))
+            })?;
+            let rewritten =
+                hls::rewrite_playlist(&secret, &q.video_id, body_str, HlsProxyKind::Segment);
             let mut response = Response::new(Body::from(rewritten));
             *response.status_mut() = status;
             response.headers_mut().insert(
@@ -597,7 +613,9 @@ pub async fn get_hls_proxy(
         }
         HlsProxyKind::Segment => {
             // Stream the segment bytes through unchanged. Range
-            // requests are honoured (passed through above).
+            // requests are honoured (passed through above). Non-2xx
+            // bodies are also passed through so the browser sees the
+            // upstream status.
             let stream = res.bytes_stream().map_err(std::io::Error::other);
             let body = Body::from_stream(stream);
             let mut response = Response::new(body);
