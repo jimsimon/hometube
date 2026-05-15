@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::{extract::State, Json};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::services::cron::NAME_YTDLP_UPDATE;
-use crate::services::ytdlp;
+use crate::services::{setup, ytdlp};
 use crate::state::AppState;
 
 /// Cached "latest known" version + timestamp. Populated lazily on first
@@ -148,4 +148,81 @@ pub async fn get_pot_server_status() -> Json<PotServerStatus> {
         error,
         plugin_installed,
     })
+}
+
+// -----------------------------------------------------------------------
+// yt-dlp cookies management
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct CookiesStatus {
+    /// Whether a cookies file is currently configured.
+    pub configured: bool,
+    /// Number of lines in the stored cookie content (gives feedback
+    /// without exposing raw content).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
+}
+
+/// `GET /api/system/ytdlp/cookies` — check whether cookies are configured.
+pub async fn get_cookies(State(state): State<AppState>) -> AppResult<Json<CookiesStatus>> {
+    let content = setup::get_config_value(&state.db, setup::KEY_YTDLP_COOKIES).await?;
+    let (configured, line_count) = match content {
+        Some(ref c) if !c.trim().is_empty() => (true, Some(c.lines().count())),
+        _ => (false, None),
+    };
+    Ok(Json(CookiesStatus {
+        configured,
+        line_count,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetCookiesRequest {
+    pub content: String,
+}
+
+/// `PUT /api/system/ytdlp/cookies` — store cookie content and sync to disk.
+pub async fn set_cookies(
+    State(state): State<AppState>,
+    Json(body): Json<SetCookiesRequest>,
+) -> AppResult<Json<CookiesStatus>> {
+    let content = body.content.trim_start().to_string();
+    if content.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "Cookie content cannot be empty".into(),
+        ));
+    }
+
+    setup::set_config_value(&state.db, setup::KEY_YTDLP_COOKIES, &content).await?;
+
+    let to_write = content.clone();
+    tokio::task::spawn_blocking(move || ytdlp::sync_cookies_to_disk(Some(&to_write)))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to write cookies file: {e}")))?;
+
+    let line_count = content.lines().count();
+    Ok(Json(CookiesStatus {
+        configured: true,
+        line_count: Some(line_count),
+    }))
+}
+
+/// `DELETE /api/system/ytdlp/cookies` — remove stored cookies from DB and disk.
+pub async fn delete_cookies(State(state): State<AppState>) -> AppResult<Json<CookiesStatus>> {
+    sqlx::query("DELETE FROM app_config WHERE key = ?")
+        .bind(setup::KEY_YTDLP_COOKIES)
+        .execute(&state.db)
+        .await?;
+
+    tokio::task::spawn_blocking(|| ytdlp::sync_cookies_to_disk(None))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to remove cookies file: {e}")))?;
+
+    Ok(Json(CookiesStatus {
+        configured: false,
+        line_count: None,
+    }))
 }

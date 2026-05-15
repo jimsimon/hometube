@@ -150,6 +150,12 @@ pub fn router(state: AppState) -> Router {
         // System / yt-dlp
         .route("/api/system/ytdlp", get(system::get_ytdlp))
         .route("/api/system/ytdlp/update", post(system::update_ytdlp))
+        .route(
+            "/api/system/ytdlp/cookies",
+            get(system::get_cookies)
+                .put(system::set_cookies)
+                .delete(system::delete_cookies),
+        )
         .route("/api/system/pot-server", get(system::get_pot_server_status))
         // Family management (Phase 13)
         .route(

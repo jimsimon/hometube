@@ -7,7 +7,7 @@
   <header class="page-header">
     <h1>System</h1>
     <p class="subtitle">
-      Manage scheduled jobs, the yt-dlp binary, and the on-disk
+      Manage scheduled jobs, the yt-dlp binary, cookies, and the on-disk
       segment cache.
     </p>
   </header>
@@ -15,6 +15,11 @@
   <div class="page-section" aria-labelledby="ytdlp-heading">
     <h2 id="ytdlp-heading">yt-dlp</h2>
     <hometube-ytdlp-status-card></hometube-ytdlp-status-card>
+  </div>
+
+  <div class="page-section" aria-labelledby="cookies-heading">
+    <h2 id="cookies-heading">yt-dlp Cookies</h2>
+    <hometube-ytdlp-cookies-card></hometube-ytdlp-cookies-card>
   </div>
 
   <div class="page-section" aria-labelledby="cron-heading">
@@ -33,6 +38,7 @@
 {% block page_scripts %}
 <script type="module" src="/assets/components/cron-job-card.js"></script>
 <script type="module" src="/assets/components/ytdlp-status-card.js"></script>
+<script type="module" src="/assets/components/ytdlp-cookies-card.js"></script>
 <script type="module" src="/assets/components/cache-manager.js"></script>
 <script type="module" src="/assets/components/loading-spinner.js"></script>
 <script type="module">
