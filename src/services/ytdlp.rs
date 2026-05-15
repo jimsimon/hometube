@@ -80,37 +80,94 @@ pub struct SubtitleTrack {
 }
 
 /// Top-level parsed `--dump-json` output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `channel_title` is populated from whichever of yt-dlp's three
+/// channel-name keys is present, in priority order:
+/// `channel_title` → `channel` → `uploader`. Modern yt-dlp emits both
+/// `channel` and `uploader` simultaneously (usually identical), so we
+/// can't use serde's `alias` mechanism — it errors on duplicate keys.
+/// Instead we deserialize via [`ExtractResultRaw`] and fold the three
+/// keys together in [`From`].
+#[derive(Debug, Clone, Serialize)]
 pub struct ExtractResult {
     pub id: String,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub channel_id: Option<String>,
-    // yt-dlp emits `channel` and `uploader` (usually identical) plus
-    // sometimes `channel_title`. Serde rejects multiple aliases for the
-    // same field when more than one is present, so we only alias
-    // `channel` (the canonical modern key) and ignore `uploader`.
-    #[serde(default, alias = "channel")]
     pub channel_title: Option<String>,
-    #[serde(default)]
     pub duration: Option<f64>,
-    #[serde(default)]
     pub thumbnails: Vec<Thumbnail>,
-    #[serde(default)]
     pub thumbnail: Option<String>,
-    #[serde(default)]
     pub formats: Vec<Format>,
     /// User-uploaded subtitles, keyed by language code.
-    #[serde(default)]
     pub subtitles: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     /// Auto-generated captions, keyed by language code.
-    #[serde(default)]
     pub automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     /// Some formats expose a single DASH manifest URL alongside the
     /// per-format URLs; yt-dlp also exposes it at top level.
-    #[serde(default)]
     pub manifest_url: Option<String>,
+}
+
+/// Raw shape of yt-dlp's `--dump-json` output. Used purely as a
+/// deserialization target; consumers see the canonicalised
+/// [`ExtractResult`].
+#[derive(Debug, Deserialize)]
+struct ExtractResultRaw {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    channel_title: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    thumbnails: Vec<Thumbnail>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    formats: Vec<Format>,
+    #[serde(default)]
+    subtitles: std::collections::HashMap<String, Vec<SubtitleTrack>>,
+    #[serde(default)]
+    automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
+    #[serde(default)]
+    manifest_url: Option<String>,
+}
+
+impl From<ExtractResultRaw> for ExtractResult {
+    fn from(raw: ExtractResultRaw) -> Self {
+        // Prefer the most canonical key. `channel_title` is the only
+        // one that's guaranteed unambiguous when present; `channel` is
+        // the modern default; `uploader` is the legacy fallback.
+        let channel_title = raw
+            .channel_title
+            .or(raw.channel)
+            .or(raw.uploader);
+        ExtractResult {
+            id: raw.id,
+            title: raw.title,
+            channel_id: raw.channel_id,
+            channel_title,
+            duration: raw.duration,
+            thumbnails: raw.thumbnails,
+            thumbnail: raw.thumbnail,
+            formats: raw.formats,
+            subtitles: raw.subtitles,
+            automatic_captions: raw.automatic_captions,
+            manifest_url: raw.manifest_url,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtractResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ExtractResultRaw::deserialize(deserializer).map(Into::into)
+    }
 }
 
 /// Run `yt-dlp --dump-json --no-playlist <video_url>` and parse the
