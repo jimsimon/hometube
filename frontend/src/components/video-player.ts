@@ -33,23 +33,45 @@
  *     to pipe the response into the Cache API.
  */
 
-import { LitElement, html, css, nothing } from "lit";
+import { LitElement, html, css, unsafeCSS, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
-// dashjs is dynamically imported by vidstack when it sees a DASH source,
-// but we pull the type-only import in so vidstack's elements.d.ts can
-// resolve. We side-effect-import it in `connectedCallback` to ensure
-// it's bundled.
+// dashjs and hls.js are dynamically resolved by vidstack when it sees a
+// DASH or HLS source respectively. We side-effect-import them here so
+// they end up in this component's bundle (otherwise Vite would tree-
+// shake them out and the dynamic resolution would 404).
 import "dashjs";
+import "hls.js";
 
-// vidstack styles + element registration. We rely on the default
-// layout rather than authoring our own; HomeTube only needs to add a
-// chrome strip below the player.
-import "vidstack/player/styles/default/theme.css";
-import "vidstack/player/styles/default/layouts/video.css";
+// vidstack styles + element registration. The component renders inside
+// a Lit shadow root, so the styles must be adopted into that shadow
+// root (see `static styles` below). However, vidstack *also* portals
+// menu popups (`<media-menu-items>`) out to the light DOM to escape
+// stacking-context traps, and those portaled menus are not reachable
+// from the shadow root's adopted stylesheets. We therefore also
+// inject the same CSS into `document.head` once per page.
+import vidstackTheme from "vidstack/player/styles/default/theme.css?inline";
+import vidstackVideoLayout from "vidstack/player/styles/default/layouts/video.css?inline";
 import "vidstack/player";
 import "vidstack/player/layouts";
 import "vidstack/player/ui";
+
+/**
+ * Idempotently inject the vidstack stylesheets into `document.head` so
+ * vidstack's portaled menu popups (which live outside the player's
+ * shadow root) are styled correctly.
+ */
+function ensureVidstackDocumentStyles(): void {
+  const MARKER = "data-hometube-vidstack-styles";
+  if (document.head.querySelector(`style[${MARKER}]`)) return;
+  const style = document.createElement("style");
+  style.setAttribute(MARKER, "");
+  // Concatenated theme + video-layout stylesheets. Selectors match
+  // vidstack's own attribute/class hooks (`[data-media-player]`,
+  // `.vds-menu-items`, etc.) so the same rules work in both contexts.
+  style.textContent = `${vidstackTheme}\n${vidstackVideoLayout}`;
+  document.head.appendChild(style);
+}
 
 import { ApiError, api } from "../services/api.js";
 import {
@@ -150,7 +172,10 @@ export class VideoPlayer extends LitElement {
   /** Last currentTime we saw — used to compute heartbeat deltas. */
   private lastSeenTime = 0;
 
-  static styles = css`
+  static styles = [
+    unsafeCSS(vidstackTheme),
+    unsafeCSS(vidstackVideoLayout),
+    css`
     :host {
       display: block;
     }
@@ -266,10 +291,13 @@ export class VideoPlayer extends LitElement {
       opacity: 0.7;
       cursor: progress;
     }
-  `;
+  `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Style vidstack's portaled menu popups (rendered in light DOM).
+    ensureVidstackDocumentStyles();
     if (this.videoId) void this.load();
     document.addEventListener("hometube:sleep-timer-expired", this.onSleepExpired as EventListener);
     document.addEventListener("hometube:bookmarks-loaded", this.onBookmarksLoaded as EventListener);
@@ -345,12 +373,17 @@ export class VideoPlayer extends LitElement {
         this.playerEl.src = { src: audioUrl, type: "audio/mp4" };
       }
     } else {
-      // Vidstack + dash.js plays the rewritten DASH manifest directly.
-      // The backend now exposes the manifest as XML (not blob:) at
-      // `/api/videos/:id/stream/manifest.mpd`.
+      // Pick the right MIME type so vidstack routes to dash.js or
+      // hls.js. The `/stream` JSON tells us which flavour the backend
+      // produced; default to DASH for legacy callers.
+      const manifestType = this.stream?.manifest_type;
+      const type =
+        manifestType === "hls"
+          ? "application/vnd.apple.mpegurl"
+          : "application/dash+xml";
       this.playerEl.src = {
         src: `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`,
-        type: "application/dash+xml",
+        type,
       };
     }
 
