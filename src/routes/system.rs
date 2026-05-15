@@ -187,7 +187,7 @@ pub async fn set_cookies(
     State(state): State<AppState>,
     Json(body): Json<SetCookiesRequest>,
 ) -> AppResult<Json<CookiesStatus>> {
-    let content = body.content.trim_start().to_string();
+    let content = body.content.trim().to_string();
     if content.trim().is_empty() {
         return Err(AppError::BadRequest(
             "Cookie content cannot be empty".into(),
