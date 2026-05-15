@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: frontend assets
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app/frontend
 
 # Copy package manifests first so Docker can cache the npm install layer.
