@@ -16,7 +16,7 @@ tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace",
 tower-cookies = { version = "0.11", features = ["signed"] }
 
 # Templates
-askama = "0.13"
+askama = "0.16"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
@@ -37,9 +37,9 @@ tokio-cron-scheduler = "0.15"
 
 # Crypto / Security
 argon2 = "0.5"
-hmac = "0.12"
-sha2 = "0.10"
-rand = "0.8"
+hmac = "0.13"
+sha2 = "0.11"
+rand = "0.10"
 base64 = "0.22"
 
 # Logging / Tracing
@@ -54,13 +54,13 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # XML Parsing (DASH manifest rewriting)
-quick-xml = "0.37"
+quick-xml = "0.40"
 
 # Utilities
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
-cron = "0.12"
+cron = "0.16"
 
 [features]
 # `test-login` exposes a small set of unauthenticated HTTP routes that

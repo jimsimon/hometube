@@ -6,8 +6,8 @@
 //! invalidation (logout, account deletion) trivial — just drop the row.
 
 use chrono::{Duration, Utc};
-use rand::distributions::Alphanumeric;
-use rand::Rng;
+use rand::distr::Alphanumeric;
+use rand::RngExt;
 use sqlx::SqlitePool;
 
 use crate::error::AppResult;
@@ -37,7 +37,7 @@ pub const DEFAULT_SESSION_DAYS: i64 = 7;
 
 /// Generate a random opaque session ID (32 alphanumeric characters).
 pub fn new_session_id() -> String {
-    rand::thread_rng()
+    rand::rng()
         .sample_iter(Alphanumeric)
         .take(32)
         .map(char::from)

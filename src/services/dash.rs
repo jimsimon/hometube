@@ -17,11 +17,11 @@
 use std::io::Cursor;
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use sqlx::SqlitePool;
 use tracing::warn;
@@ -48,7 +48,7 @@ pub async fn ensure_proxy_secret(pool: &SqlitePool) -> AppResult<Vec<u8>> {
         warn!("existing proxy_hmac_secret invalid; regenerating");
     }
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let encoded = engine.encode(bytes);
     set_config_value(pool, KEY_PROXY_HMAC_SECRET, &encoded).await?;
     Ok(bytes.to_vec())
