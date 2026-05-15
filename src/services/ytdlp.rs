@@ -148,7 +148,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // Fold any rotated session cookies (e.g. `__Secure-1PSIDTS`) back
     // into the canonical cookie file, but only if every original cookie
     // name still survived yt-dlp's cookiejar rewrite.
-    yt_args_guard.persist_cookies_if_safe();
+    yt_args_guard.persist_cookies_if_safe().await;
     Ok(result)
 }
 
@@ -233,7 +233,7 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
     let _ = tokio::fs::remove_dir_all(&tmp).await;
     // Fold any rotated session cookies back into the canonical file
     // (gated on the survivor check inside the guard).
-    yt_args_guard.persist_cookies_if_safe();
+    yt_args_guard.persist_cookies_if_safe().await;
     Ok(body)
 }
 
@@ -281,8 +281,9 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
 /// original instead of letting yt-dlp's cookiejar pruning erode auth.
 pub struct YoutubeArgsGuard {
     cookies_tempfile: Option<std::path::PathBuf>,
-    /// Snapshot of cookie names present in the canonical file at the
-    /// time we copied it. Used as the survivor list for persistence.
+    /// Snapshot of cookie names present in the file we passed to
+    /// yt-dlp (i.e. read from the tempfile copy itself, not the
+    /// canonical source). Used as the survivor list for persistence.
     original_cookie_names: std::collections::HashSet<String>,
     /// Path of the canonical cookies file (where we'd persist back to).
     canonical_cookies_path: std::path::PathBuf,
@@ -296,13 +297,17 @@ impl YoutubeArgsGuard {
     /// (`__Secure-1PSIDTS`, `SIDCC`, etc.) while skipping rewrites that
     /// would drop auth cookies.
     ///
+    /// Each invocation writes to its own per-call staging filename
+    /// (`cookies.txt.new.<nonce>`) so concurrent extractions cannot
+    /// stomp on each other's staged content before the atomic rename.
+    ///
     /// Errors and "auth cookie missing" cases are logged at WARN and
     /// the canonical file is left untouched.
-    pub fn persist_cookies_if_safe(&self) {
+    pub async fn persist_cookies_if_safe(&self) {
         let Some(temp) = self.cookies_tempfile.as_ref() else {
             return;
         };
-        let new_content = match std::fs::read_to_string(temp) {
+        let new_content = match tokio::fs::read_to_string(temp).await {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "failed to read rewritten cookies tempfile");
@@ -324,22 +329,28 @@ impl YoutubeArgsGuard {
             return;
         }
         // All original cookie names survived; persist the refreshed
-        // jar. Use a temp-rename to make the swap atomic.
+        // jar. Stage to a unique-per-invocation filename so concurrent
+        // runs cannot overwrite each other's staged content, then
+        // atomically rename onto the canonical path.
         let dest = &self.canonical_cookies_path;
-        let staging = dest.with_extension("txt.new");
-        if let Err(e) = std::fs::write(&staging, &new_content) {
+        let nonce: u64 = rand::random();
+        let staging = dest.with_extension(format!("txt.new.{nonce:x}"));
+        if let Err(e) = tokio::fs::write(&staging, &new_content).await {
             warn!(error = %e, "failed to write staged cookies file");
             return;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
+            let _ = tokio::fs::set_permissions(
+                &staging,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .await;
         }
-        if let Err(e) = std::fs::rename(&staging, dest) {
+        if let Err(e) = tokio::fs::rename(&staging, dest).await {
             warn!(error = %e, "failed to atomically replace canonical cookies file");
-            let _ = std::fs::remove_file(&staging);
+            let _ = tokio::fs::remove_file(&staging).await;
             return;
         }
         debug!("persisted refreshed cookies from yt-dlp run");
@@ -350,7 +361,10 @@ impl Drop for YoutubeArgsGuard {
     fn drop(&mut self) {
         if let Some(p) = self.cookies_tempfile.take() {
             // Best-effort cleanup; ignore errors (file may already be
-            // gone if yt-dlp deleted it, or we're shutting down).
+            // gone if yt-dlp deleted it, or we're shutting down). This
+            // runs in `drop` which can't be async, so a sync remove is
+            // unavoidable here — the file is small (<10 KB) and on the
+            // tempdir's filesystem, so the call is effectively free.
             let _ = std::fs::remove_file(p);
         }
     }
@@ -406,15 +420,17 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
     }
 
     // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
-    // doesn't erode the canonical jar. Snapshot the cookie names so we
-    // can decide later whether the rewrite is safe to persist back.
+    // doesn't erode the canonical jar. Snapshot the cookie names from
+    // the *tempfile we just wrote* (not the canonical source) so the
+    // survivor-check is consistent with what yt-dlp will actually see,
+    // even if the canonical file is mutated concurrently.
     let mut cookies_tempfile: Option<std::path::PathBuf> = None;
     let mut original_cookie_names = std::collections::HashSet::new();
     let cookies_path = cookies_file_path();
     if cookies_path.exists() {
         match copy_cookies_to_tempfile(&cookies_path) {
             Ok(temp) => {
-                if let Ok(body) = std::fs::read_to_string(&cookies_path) {
+                if let Ok(body) = std::fs::read_to_string(&temp) {
                     original_cookie_names = parse_cookie_names(&body);
                 }
                 cmd.arg("--cookies").arg(&temp);
