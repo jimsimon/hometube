@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sqlx::SqlitePool;
 use tower_cookies::Key;
 use tracing::{info, warn};
@@ -119,7 +119,7 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
 
     // tower-cookies's `Key` requires at least 64 bytes of input.
     let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let encoded = engine.encode(bytes);
     set_config_value(pool, KEY_COOKIE_SECRET, &encoded).await?;
     info!("generated new cookie signing key");

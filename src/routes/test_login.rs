@@ -173,9 +173,9 @@ pub async fn reset(State(state): State<AppState>) -> AppResult<StatusCode> {
 }
 
 async fn mint_session(state: &AppState, account_id: i64) -> AppResult<String> {
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
-    let session_id: String = rand::thread_rng()
+    use rand::distr::Alphanumeric;
+    use rand::RngExt;
+    let session_id: String = rand::rng()
         .sample_iter(Alphanumeric)
         .take(32)
         .map(char::from)

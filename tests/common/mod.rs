@@ -241,10 +241,10 @@ pub async fn insert_account(
 /// representing it. The cookie is signed with the same `Key` the app
 /// was built with so the server's cookie middleware will verify it.
 pub async fn mint_session_cookie(app: &TestApp, account_id: i64) -> AuthCookie {
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
+    use rand::distr::Alphanumeric;
+    use rand::RngExt;
 
-    let session_id: String = rand::thread_rng()
+    let session_id: String = rand::rng()
         .sample_iter(Alphanumeric)
         .take(32)
         .map(char::from)
