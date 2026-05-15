@@ -17,8 +17,11 @@ use hometube::{config, db, state};
 
 use hometube::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
 use hometube::services::dash;
-use hometube::services::setup::{get_config_value, set_config_value, KEY_COOKIE_SECRET};
+use hometube::services::setup::{
+    get_config_value, set_config_value, KEY_COOKIE_SECRET, KEY_YTDLP_COOKIES,
+};
 use hometube::services::video_cache::{DEFAULT_TTL_HOURS, KEY_METADATA_CACHE_TTL_HOURS};
+use hometube::services::ytdlp;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -46,6 +49,20 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(err) = seed_ytdlp_info(&pool, &cfg).await {
         warn!(%err, "failed to seed ytdlp_info");
+    }
+
+    // Sync yt-dlp cookies file from DB to disk on startup so the file
+    // is present after container restarts.
+    match get_config_value(&pool, KEY_YTDLP_COOKIES).await {
+        Ok(Some(ref cookies)) if !cookies.trim().is_empty() => {
+            if let Err(e) = ytdlp::sync_cookies_to_disk(Some(cookies)) {
+                warn!(error = %e, "failed to sync cookies file to disk on startup");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(error = %e, "failed to read ytdlp_cookies from app_config");
+        }
     }
 
     // Build the cron scheduler. Failures here are logged + skipped —

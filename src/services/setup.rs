@@ -19,6 +19,7 @@ pub const KEY_GOOGLE_CLIENT_SECRET: &str = "google_client_secret";
 pub const KEY_GOOGLE_REDIRECT_URI: &str = "google_redirect_uri";
 pub const KEY_YOUTUBE_API_KEY: &str = "youtube_api_key";
 pub const KEY_COOKIE_SECRET: &str = "cookie_secret";
+pub const KEY_YTDLP_COOKIES: &str = "ytdlp_cookies";
 
 /// Look up a single value from `app_config`. Returns [`None`] if the key
 /// is not set.

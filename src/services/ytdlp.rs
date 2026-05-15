@@ -226,12 +226,45 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
     Ok(body)
 }
 
+/// Returns the path where the yt-dlp cookies file is stored on disk.
+/// Configurable via `YTDLP_COOKIES_PATH` env var (default: `/data/cookies.txt`).
+pub fn cookies_file_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("YTDLP_COOKIES_PATH").unwrap_or_else(|_| "/data/cookies.txt".to_string()),
+    )
+}
+
+/// Write cookie content to the deterministic cookies file path.
+/// If `content` is `None` or empty, removes the file instead.
+pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
+    let path = cookies_file_path();
+    match content {
+        Some(c) if !c.trim().is_empty() => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, c)?;
+            // Restrict permissions to owner-only on Unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        _ => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
 /// 2. `--extractor-args youtube-bgutilhttp:base_url=<url>` — PO token
 ///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
 ///    Compose sidecar at `http://pot-server:4416`).
+/// 3. `--cookies <path>` — if a cookies file exists on disk.
 fn append_youtube_args(cmd: &mut Command) {
     // PO token plugin directory.
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
@@ -246,6 +279,12 @@ fn append_youtube_args(cmd: &mut Command) {
     if !pot_url.is_empty() {
         cmd.arg("--extractor-args")
             .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
+    }
+
+    // Cookies file for authenticated YouTube access.
+    let cookies_path = cookies_file_path();
+    if cookies_path.exists() {
+        cmd.arg("--cookies").arg(&cookies_path);
     }
 }
 

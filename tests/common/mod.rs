@@ -95,6 +95,10 @@ pub async fn boot() -> TestApp {
     cfg.database_url = "sqlite::memory:".to_string();
     cfg.static_dir = "./frontend/dist".to_string();
 
+    // Point yt-dlp cookies to a writable temp location so tests that
+    // exercise the cookies API don't fail on missing `/data/`.
+    ensure_writable_cookies_path();
+
     // Also seed the proxy HMAC secret — code paths that look it up
     // shouldn't have to mutate state during a read-only test.
     seed_proxy_secret(&pool).await;
@@ -343,6 +347,18 @@ pub async fn seed_proxy_secret(pool: &SqlitePool) {
     set_config_value(pool, "proxy_hmac_secret", &encoded)
         .await
         .expect("seed proxy secret");
+}
+
+/// Ensure `YTDLP_COOKIES_PATH` points to a writable temp location.
+/// Called once per `boot()` invocation; the env var is process-wide and
+/// idempotent across parallel tests within the same test binary.
+fn ensure_writable_cookies_path() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let path = std::env::temp_dir().join("hometube-test-cookies.txt");
+        unsafe { std::env::set_var("YTDLP_COOKIES_PATH", path.to_str().unwrap()) };
+    });
 }
 
 /// Convenience: insert a usage limit row for a child for a single

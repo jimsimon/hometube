@@ -178,6 +178,48 @@ fn subtitle_track_deserializes() {
 }
 
 // ---------------------------------------------------------------------------
+// sync_cookies_to_disk
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_cookies_to_disk_writes_and_removes() {
+    // Use a unique temp path scoped to this test to avoid conflicts.
+    let dir =
+        std::env::temp_dir().join(format!("hometube-cookie-test-sync-{}", std::process::id()));
+    let cookie_path = dir.join("cookies.txt");
+
+    // Temporarily override the env var for this test only. Note: this
+    // test should not run in parallel with other tests that depend on
+    // YTDLP_COOKIES_PATH, but since it's a unit test in its own binary
+    // that's acceptable.
+    let prev = std::env::var("YTDLP_COOKIES_PATH").ok();
+    unsafe { std::env::set_var("YTDLP_COOKIES_PATH", cookie_path.to_str().unwrap()) };
+
+    // Write content.
+    let content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tA\tB\n";
+    hometube::services::ytdlp::sync_cookies_to_disk(Some(content)).unwrap();
+    assert!(cookie_path.exists());
+    assert_eq!(std::fs::read_to_string(&cookie_path).unwrap(), content);
+
+    // Remove content.
+    hometube::services::ytdlp::sync_cookies_to_disk(None).unwrap();
+    assert!(!cookie_path.exists());
+
+    // Empty/whitespace content also removes.
+    hometube::services::ytdlp::sync_cookies_to_disk(Some(content)).unwrap();
+    assert!(cookie_path.exists());
+    hometube::services::ytdlp::sync_cookies_to_disk(Some("   ")).unwrap();
+    assert!(!cookie_path.exists());
+
+    // Cleanup.
+    let _ = std::fs::remove_dir_all(&dir);
+    match prev {
+        Some(v) => unsafe { std::env::set_var("YTDLP_COOKIES_PATH", v) },
+        None => unsafe { std::env::remove_var("YTDLP_COOKIES_PATH") },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // check_for_update DB logic
 // ---------------------------------------------------------------------------
 
