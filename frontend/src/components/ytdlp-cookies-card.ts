@@ -221,16 +221,17 @@ export class YtdlpCookiesCard extends LitElement {
       return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
     if (!this.status) {
-      return html`<hometube-loading-spinner label="Loading cookie status…"></hometube-loading-spinner>`;
+      return html`<hometube-loading-spinner
+        label="Loading cookie status…"
+      ></hometube-loading-spinner>`;
     }
 
     const statusHtml = this.status.configured
       ? html`<span class="status-configured">Configured (${this.status.line_count} lines)</span>`
       : html`<span class="status-not-set">Not configured</span>`;
 
-    const messageClass = this.messageType === "error"
-      ? "message message--error"
-      : "message message--success";
+    const messageClass =
+      this.messageType === "error" ? "message message--error" : "message message--success";
 
     return html`
       <article>
@@ -289,9 +290,9 @@ export class YtdlpCookiesCard extends LitElement {
         ${this.message ? html`<p class="${messageClass}">${this.message}</p>` : nothing}
 
         <p class="hint">
-          Export cookies from your browser using an extension like
-          &ldquo;Get cookies.txt LOCALLY&rdquo; and upload the exported file above.
-          Cookies enable yt-dlp to access age-restricted or member-only content.
+          Export cookies from your browser using an extension like &ldquo;Get cookies.txt
+          LOCALLY&rdquo; and upload the exported file above. Cookies enable yt-dlp to access
+          age-restricted or member-only content.
         </p>
       </article>
     `;
