@@ -3,7 +3,7 @@
  *
  * Header-bar component rendered as an avatar/initials button that opens
  * a dropdown menu with the user's name, profile switch, and logout.
- * Uses <wa-dropdown> + <wa-menu> for proper positioning and a11y.
+ * Uses <wa-dropdown> + <wa-dropdown-item> for proper positioning and a11y.
  */
 
 import { LitElement, html, css, nothing } from "lit";
@@ -85,22 +85,20 @@ export class UserMenu extends LitElement {
         >
           ${this.initials}
         </button>
-        <wa-menu>
           ${this.displayName ? html`<div class="name-item">${this.displayName}</div>` : nothing}
           ${!this.hideProfile
-            ? html`<wa-menu-item
+            ? html`<wa-dropdown-item
                 value="profile"
                 @click=${() => {
                   window.location.href = "/profiles";
                 }}
               >
                 Switch profile
-              </wa-menu-item>`
+              </wa-dropdown-item>`
             : nothing}
           ${!this.hideLogout
-            ? html`<wa-menu-item value="logout" @click=${this.onLogout}> Log out </wa-menu-item>`
+            ? html`<wa-dropdown-item value="logout" @click=${this.onLogout}> Log out </wa-dropdown-item>`
             : nothing}
-        </wa-menu>
       </wa-dropdown>
     `;
   }
