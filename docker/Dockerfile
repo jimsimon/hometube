@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.24
 #
 # HomeTube — multi-stage Dockerfile.
 #
@@ -25,7 +25,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 2: Rust backend
 # ---------------------------------------------------------------------------
-FROM rust:1.84-slim AS backend
+FROM rust:1.95-slim AS backend
 WORKDIR /app
 
 # Build dependencies for sqlx + reqwest.
