@@ -40,15 +40,18 @@ const ALLOWED_PREFIXES: &[&str] = &[
     // pages themselves redirect to /setup when no parent exists.
     "/profiles",
     "/login",
-    // E2E test-login routes must be reachable before setup is complete
-    // so the Playwright fixture can seed accounts and mark setup done.
-    // These routes only exist when the `test-login` feature is enabled
-    // (never in production builds).
-    "/api/test",
 ];
 
 fn is_allowed(uri: &Uri) -> bool {
     let path = uri.path();
+
+    // E2E test-login routes must be reachable before setup is complete
+    // so the Playwright fixture can seed accounts and mark setup done.
+    #[cfg(feature = "test-login")]
+    if path == "/api/test" || path.starts_with("/api/test/") {
+        return true;
+    }
+
     ALLOWED_PREFIXES
         .iter()
         .any(|p| path == *p || path.starts_with(&format!("{p}/")))
