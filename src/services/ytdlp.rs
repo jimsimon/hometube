@@ -87,7 +87,11 @@ pub struct ExtractResult {
     pub title: Option<String>,
     #[serde(default)]
     pub channel_id: Option<String>,
-    #[serde(default, alias = "channel", alias = "uploader")]
+    // yt-dlp emits `channel` and `uploader` (usually identical) plus
+    // sometimes `channel_title`. Serde rejects multiple aliases for the
+    // same field when more than one is present, so we only alias
+    // `channel` (the canonical modern key) and ignore `uploader`.
+    #[serde(default, alias = "channel")]
     pub channel_title: Option<String>,
     #[serde(default)]
     pub duration: Option<f64>,
@@ -118,7 +122,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         .arg("--no-playlist")
         .arg("--no-warnings")
         .arg("--skip-download");
-    append_youtube_args(&mut cmd);
+    let yt_args_guard = append_youtube_args(&mut cmd);
     cmd.arg(&url);
     debug!(?cmd, %video_id, "running yt-dlp");
 
@@ -141,6 +145,10 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         .map_err(|e| AppError::Other(anyhow::anyhow!("yt-dlp stdout not UTF-8: {e}")))?;
     let result: ExtractResult = serde_json::from_str(&stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("parsing yt-dlp JSON: {e}")))?;
+    // Fold any rotated session cookies (e.g. `__Secure-1PSIDTS`) back
+    // into the canonical cookie file, but only if every original cookie
+    // name still survived yt-dlp's cookiejar rewrite.
+    yt_args_guard.persist_cookies_if_safe();
     Ok(result)
 }
 
@@ -171,7 +179,7 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
         .arg("--no-warnings")
         .arg("-o")
         .arg(&template);
-    append_youtube_args(&mut cmd);
+    let yt_args_guard = append_youtube_args(&mut cmd);
     cmd.arg(&url);
     debug!(?cmd, %video_id, %lang, "running yt-dlp for subtitles");
 
@@ -223,6 +231,9 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
     };
 
     let _ = tokio::fs::remove_dir_all(&tmp).await;
+    // Fold any rotated session cookies back into the canonical file
+    // (gated on the survivor check inside the guard).
+    yt_args_guard.persist_cookies_if_safe();
     Ok(body)
 }
 
@@ -258,14 +269,127 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Guard returned by [`append_youtube_args`] that owns any per-invocation
+/// temp files (currently just the throwaway cookies copy). Drop it
+/// *after* `cmd.output().await` so yt-dlp can finish reading the file.
+///
+/// On a successful run, call [`Self::persist_cookies_if_safe`] before
+/// dropping to fold yt-dlp's refreshed session cookies (e.g.
+/// `__Secure-1PSIDTS`, `SIDCC`) back into the canonical cookies file.
+/// The persist step is gated on a survivor check — if any of the cookies
+/// captured at startup are missing from the rewritten jar, we keep the
+/// original instead of letting yt-dlp's cookiejar pruning erode auth.
+pub struct YoutubeArgsGuard {
+    cookies_tempfile: Option<std::path::PathBuf>,
+    /// Snapshot of cookie names present in the canonical file at the
+    /// time we copied it. Used as the survivor list for persistence.
+    original_cookie_names: std::collections::HashSet<String>,
+    /// Path of the canonical cookies file (where we'd persist back to).
+    canonical_cookies_path: std::path::PathBuf,
+}
+
+impl YoutubeArgsGuard {
+    /// Read yt-dlp's rewritten cookies tempfile and, if every cookie
+    /// name we started with is still present, write the rewritten
+    /// content back to the canonical cookies file. This captures the
+    /// freshness benefit of yt-dlp's auto-rotation of session cookies
+    /// (`__Secure-1PSIDTS`, `SIDCC`, etc.) while skipping rewrites that
+    /// would drop auth cookies.
+    ///
+    /// Errors and "auth cookie missing" cases are logged at WARN and
+    /// the canonical file is left untouched.
+    pub fn persist_cookies_if_safe(&self) {
+        let Some(temp) = self.cookies_tempfile.as_ref() else {
+            return;
+        };
+        let new_content = match std::fs::read_to_string(temp) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to read rewritten cookies tempfile");
+                return;
+            }
+        };
+        let new_names = parse_cookie_names(&new_content);
+        let missing: Vec<&str> = self
+            .original_cookie_names
+            .iter()
+            .filter(|n| !new_names.contains(n.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+        if !missing.is_empty() {
+            warn!(
+                missing = ?missing,
+                "yt-dlp dropped cookies during rewrite; keeping canonical file unchanged"
+            );
+            return;
+        }
+        // All original cookie names survived; persist the refreshed
+        // jar. Use a temp-rename to make the swap atomic.
+        let dest = &self.canonical_cookies_path;
+        let staging = dest.with_extension("txt.new");
+        if let Err(e) = std::fs::write(&staging, &new_content) {
+            warn!(error = %e, "failed to write staged cookies file");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
+        }
+        if let Err(e) = std::fs::rename(&staging, dest) {
+            warn!(error = %e, "failed to atomically replace canonical cookies file");
+            let _ = std::fs::remove_file(&staging);
+            return;
+        }
+        debug!("persisted refreshed cookies from yt-dlp run");
+    }
+}
+
+impl Drop for YoutubeArgsGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.cookies_tempfile.take() {
+            // Best-effort cleanup; ignore errors (file may already be
+            // gone if yt-dlp deleted it, or we're shutting down).
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Extract cookie names from a Netscape/Mozilla cookies.txt body. Each
+/// non-comment, non-blank line has 7 tab-separated fields, with the
+/// cookie name in the 6th column.
+fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for line in body.lines() {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() >= 7 {
+            names.insert(fields[5].to_string());
+        }
+    }
+    names
+}
+
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
 /// 2. `--extractor-args youtube-bgutilhttp:base_url=<url>` — PO token
 ///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
 ///    Compose sidecar at `http://pot-server:4416`).
-/// 3. `--cookies <path>` — if a cookies file exists on disk.
-fn append_youtube_args(cmd: &mut Command) {
+/// 3. `--cookies <path>` — if a cookies file exists on disk. The file
+///    is *copied* to a tempfile first because yt-dlp rewrites the
+///    cookie jar in place after each run, only persisting the cookies
+///    it actually used. That gradually erodes the canonical cookie
+///    set (auth cookies disappear after a few invocations) and breaks
+///    authentication. The tempfile is owned by the returned guard.
+/// 4. `--js-runtimes node` — yt-dlp needs a JS runtime to decode
+///    YouTube's signature cipher; configurable via the
+///    `YTDLP_JS_RUNTIME` env var (defaults to `node`).
+fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
     // PO token plugin directory.
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
         .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());
@@ -281,11 +405,55 @@ fn append_youtube_args(cmd: &mut Command) {
             .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
     }
 
-    // Cookies file for authenticated YouTube access.
+    // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
+    // doesn't erode the canonical jar. Snapshot the cookie names so we
+    // can decide later whether the rewrite is safe to persist back.
+    let mut cookies_tempfile: Option<std::path::PathBuf> = None;
+    let mut original_cookie_names = std::collections::HashSet::new();
     let cookies_path = cookies_file_path();
     if cookies_path.exists() {
-        cmd.arg("--cookies").arg(&cookies_path);
+        match copy_cookies_to_tempfile(&cookies_path) {
+            Ok(temp) => {
+                if let Ok(body) = std::fs::read_to_string(&cookies_path) {
+                    original_cookie_names = parse_cookie_names(&body);
+                }
+                cmd.arg("--cookies").arg(&temp);
+                cookies_tempfile = Some(temp);
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to copy cookies to tempfile; running without --cookies");
+            }
+        }
     }
+
+    // JS runtime for YouTube signature cipher decoding. yt-dlp's default
+    // (`deno`) is broken on some systems, and YouTube extraction without
+    // a JS runtime has been deprecated upstream.
+    let js_runtime = std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "node".to_string());
+    if !js_runtime.is_empty() {
+        cmd.arg("--js-runtimes").arg(&js_runtime);
+    }
+
+    YoutubeArgsGuard {
+        cookies_tempfile,
+        original_cookie_names,
+        canonical_cookies_path: cookies_path,
+    }
+}
+
+/// Copy the canonical cookies file to a unique tempfile and return the
+/// new path. Permissions are restricted to the current user on Unix.
+fn copy_cookies_to_tempfile(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let nonce: u64 = rand::random();
+    let mut tmp = std::env::temp_dir();
+    tmp.push(format!("hometube-ytdlp-cookies-{nonce:x}.txt"));
+    std::fs::copy(src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(tmp)
 }
 
 fn tempdir_for_video(video_id: &str) -> std::path::PathBuf {
