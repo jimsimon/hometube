@@ -33,6 +33,10 @@ use crate::error::{AppError, AppResult};
 use crate::services::setup::{get_config_value, KEY_YOUTUBE_API_KEY};
 use sqlx::SqlitePool;
 
+/// `app_config` key that, when set, overrides the YouTube API base URL.
+/// Used by integration tests to redirect traffic to a wiremock server.
+const KEY_YOUTUBE_API_BASE_URL: &str = "youtube_api_base_url";
+
 /// Base URL for the YouTube Data API v3.
 const API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 
@@ -165,19 +169,44 @@ pub struct YoutubeClient {
     api_key: String,
     http: Client,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    /// Base URL for the YouTube Data API. Defaults to [`API_BASE`] but
+    /// can be overridden for testing (e.g. to point at a wiremock server).
+    base_url: String,
 }
 
 impl YoutubeClient {
     /// Construct a client from the API key stored in `app_config`.
+    ///
+    /// If `youtube_api_base_url` is set in `app_config`, use that
+    /// instead of the default Google endpoint. This allows integration
+    /// tests to redirect traffic to a mock server.
     pub async fn from_db(pool: &SqlitePool) -> AppResult<Self> {
         let api_key = get_config_value(pool, KEY_YOUTUBE_API_KEY)
             .await?
             .ok_or_else(|| AppError::BadRequest("YouTube API key not configured".into()))?;
+        let base_url = get_config_value(pool, KEY_YOUTUBE_API_BASE_URL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| API_BASE.to_string());
         Ok(Self {
             api_key,
             http: Client::new(),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            base_url,
         })
+    }
+
+    /// Construct a client with a custom base URL (for testing with
+    /// mock HTTP servers like wiremock).
+    #[doc(hidden)]
+    pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+            http: Client::new(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            base_url: base_url.to_string(),
+        }
     }
 
     /// Issue a GET to `path` with `query` (already including `key`),
@@ -190,7 +219,7 @@ impl YoutubeClient {
     ) -> AppResult<serde_json::Value> {
         let mut full_query = query;
         full_query.push(("key", self.api_key.clone()));
-        let url = build_canonical_url(&format!("{API_BASE}{path}"), &full_query);
+        let url = build_canonical_url(&format!("{}{path}", self.base_url), &full_query);
 
         // Try the cache first.
         {
@@ -670,4 +699,282 @@ pub(crate) fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // percent_encode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_unreserved_chars_unchanged() {
+        assert_eq!(percent_encode("abcXYZ0189-_.~"), "abcXYZ0189-_.~");
+    }
+
+    #[test]
+    fn encode_special_chars() {
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(percent_encode("/path"), "%2Fpath");
+    }
+
+    #[test]
+    fn encode_empty_string() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_canonical_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn canonical_url_sorted_params() {
+        let url = build_canonical_url(
+            "https://api.example.com/items",
+            &[("z", "1".into()), ("a", "2".into())],
+        );
+        // Keys should be sorted alphabetically.
+        assert!(url.contains("a=2&z=1"), "got: {url}");
+    }
+
+    #[test]
+    fn canonical_url_encodes_values() {
+        let url = build_canonical_url("https://api.example.com", &[("q", "hello world".into())]);
+        assert!(url.contains("q=hello%20world"), "got: {url}");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_thumbnails
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_thumbnails_from_json() {
+        let json = serde_json::json!({
+            "default": {"url": "https://img/d.jpg", "width": 120, "height": 90},
+            "high": {"url": "https://img/h.jpg", "width": 480, "height": 360}
+        });
+        let map = parse_thumbnails(&json);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["default"].url, "https://img/d.jpg");
+        assert_eq!(map["default"].width, Some(120));
+        assert_eq!(map["high"].url, "https://img/h.jpg");
+    }
+
+    #[test]
+    fn parse_thumbnails_empty_object() {
+        let json = serde_json::json!({});
+        let map = parse_thumbnails(&json);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_thumbnails_non_object() {
+        let json = serde_json::json!("not an object");
+        let map = parse_thumbnails(&json);
+        assert!(map.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_search_item
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_search_item_video() {
+        let json = serde_json::json!({
+            "id": {"kind": "youtube#video", "videoId": "abc123"},
+            "snippet": {
+                "title": "Test Video",
+                "description": "A test",
+                "channelId": "UCxyz",
+                "channelTitle": "Test Channel",
+                "thumbnails": {},
+                "publishedAt": "2024-01-01T00:00:00Z"
+            }
+        });
+        let item = parse_search_item(&json).unwrap();
+        assert_eq!(item.kind, "video");
+        assert_eq!(item.id, "abc123");
+        assert_eq!(item.title, "Test Video");
+        assert_eq!(item.channel_id, Some("UCxyz".into()));
+    }
+
+    #[test]
+    fn parse_search_item_channel() {
+        let json = serde_json::json!({
+            "id": {"kind": "youtube#channel", "channelId": "UCabc"},
+            "snippet": {
+                "title": "My Channel",
+                "description": "",
+                "thumbnails": {}
+            }
+        });
+        let item = parse_search_item(&json).unwrap();
+        assert_eq!(item.kind, "channel");
+        assert_eq!(item.id, "UCabc");
+    }
+
+    #[test]
+    fn parse_search_item_playlist() {
+        let json = serde_json::json!({
+            "id": {"kind": "youtube#playlist", "playlistId": "PLxyz"},
+            "snippet": {
+                "title": "My Playlist",
+                "description": "fun",
+                "thumbnails": {}
+            }
+        });
+        let item = parse_search_item(&json).unwrap();
+        assert_eq!(item.kind, "playlist");
+        assert_eq!(item.id, "PLxyz");
+    }
+
+    #[test]
+    fn parse_search_item_missing_id_returns_none() {
+        let json =
+            serde_json::json!({"snippet": {"title": "x", "description": "", "thumbnails": {}}});
+        assert!(parse_search_item(&json).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_channel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_channel_full() {
+        let json = serde_json::json!({
+            "id": "UCabc",
+            "snippet": {
+                "title": "Channel",
+                "description": "About",
+                "thumbnails": {"default": {"url": "http://t/d.jpg"}}
+            },
+            "statistics": {
+                "subscriberCount": "1000",
+                "videoCount": "50"
+            },
+            "contentDetails": {
+                "relatedPlaylists": {"uploads": "UUabc"}
+            }
+        });
+        let ch = parse_channel(&json).unwrap();
+        assert_eq!(ch.id, "UCabc");
+        assert_eq!(ch.title, "Channel");
+        assert_eq!(ch.subscriber_count, Some(1000));
+        assert_eq!(ch.video_count, Some(50));
+        assert_eq!(ch.uploads_playlist_id, Some("UUabc".into()));
+    }
+
+    #[test]
+    fn parse_channel_minimal() {
+        let json = serde_json::json!({
+            "id": "UCmin",
+            "snippet": {"title": "Min", "description": "", "thumbnails": {}}
+        });
+        let ch = parse_channel(&json).unwrap();
+        assert_eq!(ch.id, "UCmin");
+        assert_eq!(ch.subscriber_count, None);
+        assert_eq!(ch.uploads_playlist_id, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_playlist
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_playlist_full() {
+        let json = serde_json::json!({
+            "id": "PLabc",
+            "snippet": {
+                "title": "Playlist",
+                "description": "desc",
+                "channelId": "UCx",
+                "channelTitle": "ChX",
+                "thumbnails": {}
+            },
+            "contentDetails": {"itemCount": 42}
+        });
+        let pl = parse_playlist(&json).unwrap();
+        assert_eq!(pl.id, "PLabc");
+        assert_eq!(pl.title, "Playlist");
+        assert_eq!(pl.item_count, Some(42));
+        assert_eq!(pl.channel_id, Some("UCx".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_video
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_video_full() {
+        let json = serde_json::json!({
+            "id": "vidXYZ",
+            "snippet": {
+                "title": "Video Title",
+                "description": "desc",
+                "channelId": "UCx",
+                "channelTitle": "Ch",
+                "thumbnails": {},
+                "publishedAt": "2024-06-01T12:00:00Z"
+            },
+            "statistics": {"viewCount": "12345"},
+            "contentDetails": {"duration": "PT4M13S"}
+        });
+        let v = parse_video(&json).unwrap();
+        assert_eq!(v.id, "vidXYZ");
+        assert_eq!(v.title, "Video Title");
+        assert_eq!(v.duration, Some("PT4M13S".into()));
+        assert_eq!(v.view_count, Some(12345));
+        assert_eq!(v.published_at, Some("2024-06-01T12:00:00Z".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_playlist_item
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_playlist_item_with_content_details() {
+        let json = serde_json::json!({
+            "snippet": {
+                "title": "Item",
+                "videoOwnerChannelId": "UCowner",
+                "videoOwnerChannelTitle": "Owner",
+                "thumbnails": {},
+                "publishedAt": "2024-01-01T00:00:00Z",
+                "position": 3
+            },
+            "contentDetails": {"videoId": "vid123"}
+        });
+        let item = parse_playlist_item(&json).unwrap();
+        assert_eq!(item.video_id, "vid123");
+        assert_eq!(item.title, "Item");
+        assert_eq!(item.channel_id, Some("UCowner".into()));
+        assert_eq!(item.position, Some(3));
+    }
+
+    #[test]
+    fn parse_playlist_item_with_resource_id() {
+        let json = serde_json::json!({
+            "snippet": {
+                "title": "Item2",
+                "resourceId": {"videoId": "vid456"},
+                "thumbnails": {}
+            }
+        });
+        let item = parse_playlist_item(&json).unwrap();
+        assert_eq!(item.video_id, "vid456");
+    }
+
+    // -----------------------------------------------------------------------
+    // SearchType
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_type_as_str_round_trips() {
+        assert_eq!(SearchType::Channel.as_str(), "channel");
+        assert_eq!(SearchType::Playlist.as_str(), "playlist");
+        assert_eq!(SearchType::Video.as_str(), "video");
+    }
 }
