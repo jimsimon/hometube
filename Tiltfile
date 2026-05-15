@@ -15,6 +15,7 @@ local_resource(
     serve_cmd='cargo watch -w src -w templates -w migrations -x run',
     serve_env={
         'POT_SERVER_URL': 'http://127.0.0.1:4416',
+        'YTDLP_COOKIES_PATH': './data/cookies.txt',
     },
     deps=['src/', 'templates/', 'Cargo.toml', 'migrations/'],
     labels=['server'],

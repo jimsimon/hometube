@@ -54,8 +54,10 @@ FROM debian:bookworm-slim AS runtime
 #   - python3       : yt-dlp's runtime requirement (single-binary works
 #                     in many cases but a Python interpreter is the
 #                     supported fallback)
+#   - nodejs        : JS runtime for yt-dlp's YouTube signature cipher
+#                     decoding (passed via --js-runtimes node)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary and static assets.
@@ -89,6 +91,7 @@ VOLUME ["/app/data"]
 ENV STATIC_DIR=/app/static \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
+    YTDLP_COOKIES_PATH=/app/data/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
     DATABASE_PATH=/app/data/app.db
 
