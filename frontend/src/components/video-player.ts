@@ -176,122 +176,122 @@ export class VideoPlayer extends LitElement {
     unsafeCSS(vidstackTheme),
     unsafeCSS(vidstackVideoLayout),
     css`
-    :host {
-      display: block;
-    }
-    .player-shell {
-      position: relative;
-      width: 100%;
-      max-width: 64rem;
-      margin: 0 auto;
-      view-transition-name: video-hero;
-    }
-    media-player {
-      width: 100%;
-      aspect-ratio: 16 / 9;
-      background: black;
-      border-radius: 0.5rem;
-      overflow: hidden;
-    }
-    /* Audio-only mode: replace the player surface with the poster. */
-    :host([data-audio-only]) media-player {
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-    }
-    .error {
-      color: var(--wa-color-danger-fill, #b91c1c);
-      padding: 1rem;
-    }
-    .meta {
-      margin-top: 1rem;
-    }
-    .meta h1 {
-      margin: 0 0 0.25rem;
-      font-size: 1.25rem;
-    }
-    .meta .channel {
-      color: var(--wa-color-text-quiet);
-    }
-    .chrome {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-top: 1rem;
-      align-items: center;
-    }
-    .seek-overlay {
-      position: relative;
-      height: 0.5rem;
-      margin-top: -0.5rem;
-      pointer-events: none;
-    }
-    .bookmark-marker {
-      position: absolute;
-      top: 0;
-      width: 0.4rem;
-      height: 100%;
-      background: var(--wa-color-warning-fill, #d97706);
-      border-radius: 2px;
-      transform: translateX(-50%);
-    }
-    .continue-prompt {
-      position: absolute;
-      inset: 0;
-      z-index: 500;
-      background: rgba(0, 0, 0, 0.65);
-      color: white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-direction: column;
-      gap: 0.75rem;
-      padding: 1rem;
-      text-align: center;
-    }
-    .continue-prompt button {
-      padding: 0.5rem 1rem;
-      border-radius: 0.375rem;
-      border: 1px solid white;
-      background: white;
-      color: black;
-      font: inherit;
-      cursor: pointer;
-    }
-    .countdown {
-      margin: 0.5rem 0;
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.375rem;
-      background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
-      color: var(--wa-color-warning-on-quiet, #92400e);
-      font-size: 0.9rem;
-    }
-    .countdown.urgent {
-      background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
-      color: var(--wa-color-danger-on-quiet, #991b1b);
-      font-weight: 600;
-      font-size: 1rem;
-    }
-    .audio-toggle,
-    .download-button {
-      padding: 0.4rem 0.75rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: transparent;
-      color: var(--wa-color-text-normal);
-      font: inherit;
-      cursor: pointer;
-    }
-    .audio-toggle[aria-pressed="true"] {
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      border-color: transparent;
-    }
-    .download-button[disabled] {
-      opacity: 0.7;
-      cursor: progress;
-    }
-  `,
+      :host {
+        display: block;
+      }
+      .player-shell {
+        position: relative;
+        width: 100%;
+        max-width: 64rem;
+        margin: 0 auto;
+        view-transition-name: video-hero;
+      }
+      media-player {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: black;
+        border-radius: 0.5rem;
+        overflow: hidden;
+      }
+      /* Audio-only mode: replace the player surface with the poster. */
+      :host([data-audio-only]) media-player {
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+      .error {
+        color: var(--wa-color-danger-fill, #b91c1c);
+        padding: 1rem;
+      }
+      .meta {
+        margin-top: 1rem;
+      }
+      .meta h1 {
+        margin: 0 0 0.25rem;
+        font-size: 1.25rem;
+      }
+      .meta .channel {
+        color: var(--wa-color-text-quiet);
+      }
+      .chrome {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+        align-items: center;
+      }
+      .seek-overlay {
+        position: relative;
+        height: 0.5rem;
+        margin-top: -0.5rem;
+        pointer-events: none;
+      }
+      .bookmark-marker {
+        position: absolute;
+        top: 0;
+        width: 0.4rem;
+        height: 100%;
+        background: var(--wa-color-warning-fill, #d97706);
+        border-radius: 2px;
+        transform: translateX(-50%);
+      }
+      .continue-prompt {
+        position: absolute;
+        inset: 0;
+        z-index: 500;
+        background: rgba(0, 0, 0, 0.65);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 0.75rem;
+        padding: 1rem;
+        text-align: center;
+      }
+      .continue-prompt button {
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+        border: 1px solid white;
+        background: white;
+        color: black;
+        font: inherit;
+        cursor: pointer;
+      }
+      .countdown {
+        margin: 0.5rem 0;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.375rem;
+        background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
+        color: var(--wa-color-warning-on-quiet, #92400e);
+        font-size: 0.9rem;
+      }
+      .countdown.urgent {
+        background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
+        color: var(--wa-color-danger-on-quiet, #991b1b);
+        font-weight: 600;
+        font-size: 1rem;
+      }
+      .audio-toggle,
+      .download-button {
+        padding: 0.4rem 0.75rem;
+        border-radius: 0.375rem;
+        border: 1px solid var(--wa-color-surface-border, #ccc);
+        background: transparent;
+        color: var(--wa-color-text-normal);
+        font: inherit;
+        cursor: pointer;
+      }
+      .audio-toggle[aria-pressed="true"] {
+        background: var(--wa-color-brand-fill, #2563eb);
+        color: white;
+        border-color: transparent;
+      }
+      .download-button[disabled] {
+        opacity: 0.7;
+        cursor: progress;
+      }
+    `,
   ];
 
   override connectedCallback(): void {
@@ -378,9 +378,7 @@ export class VideoPlayer extends LitElement {
       // produced; default to DASH for legacy callers.
       const manifestType = this.stream?.manifest_type;
       const type =
-        manifestType === "hls"
-          ? "application/vnd.apple.mpegurl"
-          : "application/dash+xml";
+        manifestType === "hls" ? "application/vnd.apple.mpegurl" : "application/dash+xml";
       this.playerEl.src = {
         src: `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`,
         type,
