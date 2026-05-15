@@ -85,20 +85,22 @@ export class UserMenu extends LitElement {
         >
           ${this.initials}
         </button>
-          ${this.displayName ? html`<div class="name-item">${this.displayName}</div>` : nothing}
-          ${!this.hideProfile
-            ? html`<wa-dropdown-item
-                value="profile"
-                @click=${() => {
-                  window.location.href = "/profiles";
-                }}
-              >
-                Switch profile
-              </wa-dropdown-item>`
-            : nothing}
-          ${!this.hideLogout
-            ? html`<wa-dropdown-item value="logout" @click=${this.onLogout}> Log out </wa-dropdown-item>`
-            : nothing}
+        ${this.displayName ? html`<div class="name-item">${this.displayName}</div>` : nothing}
+        ${!this.hideProfile
+          ? html`<wa-dropdown-item
+              value="profile"
+              @click=${() => {
+                window.location.href = "/profiles";
+              }}
+            >
+              Switch profile
+            </wa-dropdown-item>`
+          : nothing}
+        ${!this.hideLogout
+          ? html`<wa-dropdown-item value="logout" @click=${this.onLogout}>
+              Log out
+            </wa-dropdown-item>`
+          : nothing}
       </wa-dropdown>
     `;
   }
