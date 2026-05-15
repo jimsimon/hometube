@@ -38,6 +38,7 @@ use crate::middleware::auth::CurrentAccount;
 use crate::models::account::AccountType;
 use crate::services::access::can_child_view;
 use crate::services::dash;
+use crate::services::hls::{self, HlsProxyKind};
 use crate::services::video_cache::VideoCache;
 use crate::services::ytdlp::{ExtractResult, Format};
 use crate::state::AppState;
@@ -56,12 +57,30 @@ pub struct VideoMetadata {
     pub thumbnail_url: Option<String>,
 }
 
+/// Wire-format string identifying the manifest flavour returned in
+/// [`StreamResponse::manifest`]. The frontend uses this to pick the
+/// right vidstack source `type` (and therefore which provider — dash.js
+/// or hls.js — handles playback).
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestType {
+    /// MPEG-DASH (`application/dash+xml`).
+    Dash,
+    /// HLS master playlist (`application/vnd.apple.mpegurl`).
+    Hls,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StreamResponse {
     pub video_id: String,
-    /// Rewritten DASH manifest text. The XML references segment URLs
-    /// pointing at our `/api/proxy/segment` endpoint.
+    /// Rewritten manifest text. For DASH this is the rewritten MPD XML;
+    /// for HLS it's the rewritten master playlist. Both reference our
+    /// proxy endpoints rather than `*.googlevideo.com` directly.
     pub manifest: Option<String>,
+    /// Which manifest flavour `manifest` is, when present. Only set
+    /// when `manifest` is `Some(_)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_type: Option<ManifestType>,
     /// Filtered list of progressive formats (max-quality cap applied).
     pub formats: Vec<Format>,
 }
@@ -137,35 +156,23 @@ pub async fn get_stream(
         .cloned()
         .collect();
 
-    // If there's a DASH manifest URL on the result, fetch + rewrite it.
-    let manifest_url = result
-        .manifest_url
-        .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
-    let manifest = match manifest_url {
-        Some(url) => {
-            let secret = dash::ensure_proxy_secret(&state.db).await?;
-            match reqwest::get(&url).await {
-                Ok(res) if res.status().is_success() => {
-                    let body = res.text().await.unwrap_or_default();
-                    Some(dash::rewrite_manifest(&secret, &video_id, &body)?)
-                }
-                Ok(res) => {
-                    warn!(%url, status = %res.status(), "failed to fetch DASH manifest");
-                    None
-                }
-                Err(err) => {
-                    warn!(%url, %err, "failed to fetch DASH manifest");
-                    None
-                }
-            }
+    // Fetch + rewrite the manifest (DASH or HLS, depending on what
+    // yt-dlp surfaced for this video).
+    let (manifest, manifest_type) = match fetch_and_rewrite_manifest(&state, &video_id, &result)
+        .await
+    {
+        Ok(Some((body, ty))) => (Some(body), Some(ty)),
+        Ok(None) => (None, None),
+        Err(err) => {
+            warn!(%video_id, %err, "failed to fetch upstream manifest");
+            (None, None)
         }
-        None => None,
     };
 
     Ok(Json(StreamResponse {
         video_id,
         manifest,
+        manifest_type,
         formats,
     }))
 }
@@ -175,9 +182,12 @@ pub async fn get_stream(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
-/// DASH XML body directly. vidstack's dash.js provider fetches this URL
-/// to bootstrap playback; we cannot reuse the JSON `/stream` endpoint
-/// because it returns the manifest as a string field inside JSON.
+/// manifest body directly. vidstack fetches this URL to bootstrap
+/// playback; we cannot reuse the JSON `/stream` endpoint because that
+/// embeds the manifest text inside a JSON envelope. The actual content
+/// type may be DASH XML *or* HLS m3u8 depending on what yt-dlp
+/// surfaced — the `Content-Type` response header tells the player which
+/// provider to engage.
 pub async fn get_stream_manifest(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -189,28 +199,52 @@ pub async fn get_stream_manifest(
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let manifest_url = result
+    let (body, ty) = fetch_and_rewrite_manifest(&state, &video_id, &result)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let content_type = match ty {
+        ManifestType::Dash => "application/dash+xml",
+        ManifestType::Hls => "application/vnd.apple.mpegurl",
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    Ok((StatusCode::OK, headers, body).into_response())
+}
+
+/// Fetch the upstream manifest URL surfaced by yt-dlp, sniff whether
+/// it's DASH or HLS, and return the rewritten body together with the
+/// flavour. `Ok(None)` means yt-dlp didn't expose any manifest at all
+/// for this video.
+async fn fetch_and_rewrite_manifest(
+    state: &AppState,
+    video_id: &str,
+    result: &ExtractResult,
+) -> AppResult<Option<(String, ManifestType)>> {
+    let Some(url) = result
         .manifest_url
         .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
-    let url = manifest_url.ok_or(AppError::NotFound)?;
+        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()))
+    else {
+        return Ok(None);
+    };
 
     let secret = dash::ensure_proxy_secret(&state.db).await?;
     let res = reqwest::get(&url).await?;
     if !res.status().is_success() {
-        warn!(%url, status = %res.status(), "non-2xx fetching DASH manifest");
-        return Err(AppError::NotFound);
+        warn!(%url, status = %res.status(), "non-2xx fetching upstream manifest");
+        return Ok(None);
     }
     let body = res.text().await?;
-    let rewritten = dash::rewrite_manifest(&secret, &video_id, &body)?;
 
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "application/dash+xml".parse().unwrap(),
-    );
-    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    Ok((StatusCode::OK, headers, rewritten).into_response())
+    if hls::is_hls_manifest(&body) {
+        let rewritten = hls::rewrite_playlist(&secret, video_id, &body, HlsProxyKind::Playlist);
+        Ok(Some((rewritten, ManifestType::Hls)))
+    } else {
+        let rewritten = dash::rewrite_manifest(&secret, video_id, &body)?;
+        Ok(Some((rewritten, ManifestType::Dash)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +516,92 @@ pub async fn get_segment(
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// /api/proxy/hls
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct HlsProxyQuery {
+    pub video_id: String,
+    pub kind: String,
+    pub url: String,
+    pub sig: String,
+}
+
+/// `GET /api/proxy/hls` — proxy an HLS playlist or segment URL signed
+/// by [`crate::services::hls::build_proxy_url`].
+///
+/// `kind=playlist` fetches a media playlist, rewrites every segment URL
+/// in it with another signed proxy URL (so the browser doesn't try to
+/// fetch googlevideo.com directly), and returns the rewritten playlist.
+///
+/// `kind=segment` fetches the upstream segment and streams it through
+/// to the client unchanged.
+pub async fn get_hls_proxy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HlsProxyQuery>,
+) -> AppResult<Response> {
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let kind = HlsProxyKind::from_str(&q.kind)
+        .ok_or_else(|| AppError::BadRequest(format!("invalid kind: {}", q.kind)))?;
+    if !hls::verify_proxy_params(&secret, &q.video_id, kind, &q.url, &q.sig) {
+        return Err(AppError::Forbidden);
+    }
+
+    let mut req = reqwest::Client::new().get(&q.url);
+    if matches!(kind, HlsProxyKind::Segment) {
+        if let Some(range) = headers.get(header::RANGE) {
+            if let Ok(s) = range.to_str() {
+                req = req.header(header::RANGE, s);
+            }
+        }
+    }
+    let res = req.send().await.map_err(AppError::Http)?;
+    let status = res.status();
+    if !status.is_success() {
+        warn!(url = %q.url, %status, "upstream HLS fetch returned non-2xx");
+    }
+
+    let upstream_content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    match kind {
+        HlsProxyKind::Playlist => {
+            // Rewrite each segment URL inside the media playlist before
+            // returning it so the browser stays inside our proxy.
+            let body = res.text().await.map_err(AppError::Http)?;
+            let rewritten = hls::rewrite_playlist(&secret, &q.video_id, &body, HlsProxyKind::Segment);
+            let mut response = Response::new(Body::from(rewritten));
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "application/vnd.apple.mpegurl".parse().unwrap(),
+            );
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+            Ok(response)
+        }
+        HlsProxyKind::Segment => {
+            // Stream the segment bytes through unchanged. Range
+            // requests are honoured (passed through above).
+            let stream = res.bytes_stream().map_err(std::io::Error::other);
+            let body = Body::from_stream(stream);
+            let mut response = Response::new(body);
+            *response.status_mut() = status;
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
+            Ok(response)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

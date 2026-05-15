@@ -175,6 +175,8 @@ export interface VideoMetadata {
 export interface StreamResponse {
   video_id: string;
   manifest: string | null;
+  /** Manifest flavour. Tells the player whether to engage dash.js or hls.js. */
+  manifest_type?: "dash" | "hls";
   formats: Array<{
     format_id: string;
     ext?: string | null;

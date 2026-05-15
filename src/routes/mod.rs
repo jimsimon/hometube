@@ -271,6 +271,7 @@ pub fn router(state: AppState) -> Router {
     // -----------------------------------------------------------------
     let proxy_routes = Router::new()
         .route("/api/proxy/segment", get(videos::get_segment))
+        .route("/api/proxy/hls", get(videos::get_hls_proxy))
         .route("/api/proxy/audio", get(videos::get_audio))
         .route(
             "/api/proxy/thumbnail/{video_id}",
