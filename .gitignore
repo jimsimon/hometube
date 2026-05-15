@@ -28,6 +28,9 @@ e2e/report/
 *.db-journal
 *.db-wal
 *.db-shm
+# Local install of the bgutil PO token plugin for yt-dlp; populated by
+# the Tiltfile's `ytdlp-pot-plugin` resource on first `tilt up`.
+/yt-dlp-plugins/
 
 # ---------- Editor / OS ----------
 .DS_Store

@@ -5,9 +5,46 @@
 #   - Vite in watch mode for the frontend
 #   - sqlx migrate when the migrations/ directory changes
 #   - a sanity check for yt-dlp on PATH
+#   - one-shot install of the bgutil PO token plugin for yt-dlp
 
 config.define_string_list("to-run", args=True)
 cfg = config.parse()
+
+# bgutil PO token plugin for yt-dlp. Without this plugin yt-dlp can't
+# fetch Proof-of-Origin tokens from the pot-server sidecar and YouTube
+# rejects player API requests with "Sign in to confirm you're not a
+# bot" — even when full auth cookies are supplied. The plugin is
+# installed automatically inside the production Docker image; in local
+# dev we mirror that here. The download is skipped when the marker
+# file already exists so subsequent `tilt up` invocations are no-ops.
+local_resource(
+    'ytdlp-pot-plugin',
+    cmd='''
+        set -e
+        DEST="./yt-dlp-plugins"
+        MARKER="$DEST/.installed"
+        if [ -f "$MARKER" ]; then
+            echo "bgutil plugin already installed at $DEST"
+            exit 0
+        fi
+        VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/latest" \\
+            | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"$/\\1/')
+        # yt-dlp expects plugins in <plugin-dir>/<package>/yt_dlp_plugins/...
+        # The release zip lays out the inner yt_dlp_plugins/ tree, so we
+        # extract under a package-wrapper subdir (`bgutil/`) — without
+        # this yt-dlp silently ignores the plugin and the verbose log
+        # shows "Plugin directories: none".
+        echo "Installing bgutil-ytdlp-pot-provider $VERSION into $DEST/bgutil"
+        rm -rf "$DEST/bgutil"
+        mkdir -p "$DEST/bgutil"
+        TMP=$(mktemp)
+        curl -fsSL "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/$VERSION/bgutil-ytdlp-pot-provider.zip" -o "$TMP"
+        unzip -o "$TMP" -d "$DEST/bgutil"
+        rm "$TMP"
+        echo "$VERSION" > "$MARKER"
+    ''',
+    labels=['deps'],
+)
 
 # Backend: rebuild and restart on Rust source or template changes.
 local_resource(
@@ -16,8 +53,14 @@ local_resource(
     serve_env={
         'POT_SERVER_URL': 'http://127.0.0.1:4416',
         'YTDLP_COOKIES_PATH': './data/cookies.txt',
+        # Point yt-dlp at the locally-installed bgutil plugin. The
+        # path matches the one created by the `ytdlp-pot-plugin`
+        # resource above, relative to the project root (which is
+        # cargo-watch's CWD).
+        'YTDLP_PLUGIN_DIR': './yt-dlp-plugins',
     },
     deps=['src/', 'templates/', 'Cargo.toml', 'migrations/'],
+    resource_deps=['ytdlp-pot-plugin'],
     labels=['server'],
     readiness_probe=probe(
         period_secs=2,

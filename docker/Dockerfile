@@ -78,13 +78,18 @@ RUN curl -fsSL \
 # Install the bgutil PO token provider plugin for yt-dlp. This plugin
 # automatically fetches Proof-of-Origin tokens from the pot-server
 # sidecar container to bypass YouTube's bot detection.
+#
+# yt-dlp's plugin loader scans `<plugin-dir>/<package>/yt_dlp_plugins/`
+# — without the package-wrapper subdirectory the loader silently
+# ignores the plugin. The release zip lays out the inner tree (`yt_dlp_plugins/`)
+# so we extract it under a `bgutil/` wrapper.
 RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/latest" \
-        | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4) \
+        | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/') \
     && curl -fsSL \
         "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${PLUGIN_VERSION}/bgutil-ytdlp-pot-provider.zip" \
         -o /tmp/pot-plugin.zip \
-    && mkdir -p /usr/local/share/yt-dlp-plugins \
-    && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/ \
+    && mkdir -p /usr/local/share/yt-dlp-plugins/bgutil \
+    && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/bgutil/ \
     && rm /tmp/pot-plugin.zip
 
 WORKDIR /app
