@@ -55,6 +55,22 @@ pub struct Format {
     /// `"https"`, `"http_dash_segments"`, etc.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// BCP-47 language tag for audio formats (e.g. `"en"`, `"es-MX"`).
+    /// Absent on video-only formats.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// yt-dlp's heuristic preference for this language. The "original"
+    /// audio for a video typically scores `10`, with auto-dubs ranking
+    /// lower. Used by [`crate::services::dash::rewrite_manifest`] to
+    /// pick the AdaptationSet to mark as `Role=main`.
+    #[serde(default)]
+    pub language_preference: Option<i64>,
+    /// Free-form note from yt-dlp (e.g. `"original (default), low"`).
+    /// Contains the substring `"original"` for the original-language
+    /// audio track on multi-audio videos — used as a fallback signal
+    /// when `language_preference` is absent.
+    #[serde(default)]
+    pub format_note: Option<String>,
 }
 
 /// One thumbnail variant.
@@ -144,10 +160,7 @@ impl From<ExtractResultRaw> for ExtractResult {
         // Prefer the most canonical key. `channel_title` is the only
         // one that's guaranteed unambiguous when present; `channel` is
         // the modern default; `uploader` is the legacy fallback.
-        let channel_title = raw
-            .channel_title
-            .or(raw.channel)
-            .or(raw.uploader);
+        let channel_title = raw.channel_title.or(raw.channel).or(raw.uploader);
         ExtractResult {
             id: raw.id,
             title: raw.title,
@@ -399,11 +412,8 @@ impl YoutubeArgsGuard {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(
-                &staging,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .await;
+            let _ =
+                tokio::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)).await;
         }
         if let Err(e) = tokio::fs::rename(&staging, dest).await {
             warn!(error = %e, "failed to atomically replace canonical cookies file");

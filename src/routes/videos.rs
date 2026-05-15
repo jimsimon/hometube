@@ -158,16 +158,15 @@ pub async fn get_stream(
 
     // Fetch + rewrite the manifest (DASH or HLS, depending on what
     // yt-dlp surfaced for this video).
-    let (manifest, manifest_type) = match fetch_and_rewrite_manifest(&state, &video_id, &result)
-        .await
-    {
-        Ok(Some((body, ty))) => (Some(body), Some(ty)),
-        Ok(None) => (None, None),
-        Err(err) => {
-            warn!(%video_id, %err, "failed to fetch upstream manifest");
-            (None, None)
-        }
-    };
+    let (manifest, manifest_type) =
+        match fetch_and_rewrite_manifest(&state, &video_id, &result).await {
+            Ok(Some((body, ty))) => (Some(body), Some(ty)),
+            Ok(None) => (None, None),
+            Err(err) => {
+                warn!(%video_id, %err, "failed to fetch upstream manifest");
+                (None, None)
+            }
+        };
 
     Ok(Json(StreamResponse {
         video_id,
@@ -242,7 +241,7 @@ async fn fetch_and_rewrite_manifest(
         let rewritten = hls::rewrite_playlist(&secret, video_id, &body, HlsProxyKind::Playlist);
         Ok(Some((rewritten, ManifestType::Hls)))
     } else {
-        let rewritten = dash::rewrite_manifest(&secret, video_id, &body)?;
+        let rewritten = dash::rewrite_manifest(&secret, video_id, &body, &result.formats)?;
         Ok(Some((rewritten, ManifestType::Dash)))
     }
 }
@@ -1342,6 +1341,9 @@ mod tests {
                 url: Some(url.into()),
                 manifest_url: None,
                 protocol: None,
+                language: None,
+                language_preference: None,
+                format_note: None,
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
@@ -1402,6 +1404,9 @@ mod tests {
                 url: None,
                 manifest_url: Some("https://m.example.com/dash.mpd".into()),
                 protocol: None,
+                language: None,
+                language_preference: None,
+                format_note: None,
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
@@ -1440,6 +1445,9 @@ mod tests {
                     url: Some("https://x/audio128".into()),
                     manifest_url: None,
                     protocol: None,
+                    language: None,
+                    language_preference: None,
+                    format_note: None,
                 },
                 Format {
                     format_id: "251".into(),
@@ -1456,6 +1464,9 @@ mod tests {
                     url: Some("https://x/audio160".into()),
                     manifest_url: None,
                     protocol: None,
+                    language: None,
+                    language_preference: None,
+                    format_note: None,
                 },
                 Format {
                     format_id: "137".into(),
@@ -1472,6 +1483,9 @@ mod tests {
                     url: Some("https://x/video".into()),
                     manifest_url: None,
                     protocol: None,
+                    language: None,
+                    language_preference: None,
+                    format_note: None,
                 },
             ],
             subtitles: Default::default(),
@@ -1506,6 +1520,9 @@ mod tests {
                 url: Some("https://x/video".into()),
                 manifest_url: None,
                 protocol: None,
+                language: None,
+                language_preference: None,
+                format_note: None,
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
