@@ -55,7 +55,10 @@ FROM debian:bookworm-slim AS runtime
 #                     in many cases but a Python interpreter is the
 #                     supported fallback)
 #   - nodejs        : JS runtime for yt-dlp's YouTube signature cipher
-#                     decoding (passed via --js-runtimes node)
+#                     decoding (passed via --js-runtimes node). Adds
+#                     roughly 60 MB to the runtime image; we use the
+#                     bookworm-packaged Node 18 (no npm) rather than a
+#                     NodeSource build to minimise the size hit.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs unzip \
     && rm -rf /var/lib/apt/lists/*

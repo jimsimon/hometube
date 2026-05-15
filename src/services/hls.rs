@@ -53,12 +53,29 @@ impl HlsProxyKind {
             HlsProxyKind::Segment => "segment",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Parsing error for [`HlsProxyKind`]. Kept as a unit struct so callers
+/// can use the standard `.parse::<HlsProxyKind>()` ergonomics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseHlsProxyKindError;
+
+impl std::fmt::Display for ParseHlsProxyKindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expected `playlist` or `segment`")
+    }
+}
+
+impl std::error::Error for ParseHlsProxyKindError {}
+
+impl std::str::FromStr for HlsProxyKind {
+    type Err = ParseHlsProxyKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "playlist" => Some(HlsProxyKind::Playlist),
-            "segment" => Some(HlsProxyKind::Segment),
-            _ => None,
+            "playlist" => Ok(HlsProxyKind::Playlist),
+            "segment" => Ok(HlsProxyKind::Segment),
+            _ => Err(ParseHlsProxyKindError),
         }
     }
 }

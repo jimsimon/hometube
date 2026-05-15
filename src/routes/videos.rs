@@ -545,9 +545,15 @@ pub async fn get_hls_proxy(
     Query(q): Query<HlsProxyQuery>,
 ) -> AppResult<Response> {
     let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let kind = HlsProxyKind::from_str(&q.kind)
-        .ok_or_else(|| AppError::BadRequest(format!("invalid kind: {}", q.kind)))?;
+    let kind: HlsProxyKind = q
+        .kind
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid kind: {}", q.kind)))?;
     if !hls::verify_proxy_params(&secret, &q.video_id, kind, &q.url, &q.sig) {
+        return Err(AppError::Forbidden);
+    }
+    if !is_allowed_hls_host(&q.url) {
+        warn!(url = %q.url, "rejecting HLS proxy fetch for non-allowlisted host");
         return Err(AppError::Forbidden);
     }
 
@@ -601,6 +607,58 @@ pub async fn get_hls_proxy(
                 .insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
             Ok(response)
         }
+    }
+}
+
+/// Defense-in-depth host allowlist for the HLS proxy. The HMAC signature
+/// alone already prevents an unauthenticated attacker from constructing
+/// proxy URLs to arbitrary upstreams, but if the proxy secret were ever
+/// leaked HomeTube would become a credentialed open proxy / SSRF tool.
+/// Refuse anything that doesn't look like a YouTube CDN host.
+///
+/// yt-dlp's HLS manifests for YouTube only ever emit URLs at
+/// `manifest.googlevideo.com` (master/media playlists) and
+/// `*.googlevideo.com` (segments). Legitimate traffic is unaffected.
+fn is_allowed_hls_host(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "googlevideo.com"
+        || host.ends_with(".googlevideo.com")
+        || host == "youtube.com"
+        || host.ends_with(".youtube.com")
+}
+
+#[cfg(test)]
+mod hls_host_tests {
+    use super::is_allowed_hls_host;
+
+    #[test]
+    fn accepts_googlevideo_subdomains() {
+        assert!(is_allowed_hls_host(
+            "https://manifest.googlevideo.com/api/manifest/hls_playlist/foo"
+        ));
+        assert!(is_allowed_hls_host(
+            "https://rr1---sn-bvvbaxivnuxq5uu-vgqz.googlevideo.com/videoplayback/seg.ts"
+        ));
+        assert!(is_allowed_hls_host("https://www.youtube.com/"));
+    }
+
+    #[test]
+    fn rejects_other_hosts() {
+        assert!(!is_allowed_hls_host("https://example.com/"));
+        assert!(!is_allowed_hls_host("https://googlevideo.com.evil.com/"));
+        assert!(!is_allowed_hls_host("https://evil.com/?googlevideo.com"));
+        assert!(!is_allowed_hls_host("http://manifest.googlevideo.com/"));
+        assert!(!is_allowed_hls_host("https://169.254.169.254/"));
+        assert!(!is_allowed_hls_host("not a url"));
     }
 }
 
