@@ -36,6 +36,10 @@ function discoverComponentEntries(): Record<string, string> {
 
 export default defineConfig({
   root: __dirname,
+  // The Rust server mounts the dist directory at `/assets/...`. Set the
+  // public base path so dynamic `import()` calls resolve `chunks/...` to
+  // `/assets/chunks/...` rather than `/chunks/...`.
+  base: '/assets/',
   plugins: [
     VitePWA({
       strategies: 'injectManifest',
