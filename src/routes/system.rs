@@ -182,13 +182,23 @@ pub struct SetCookiesRequest {
     pub content: String,
 }
 
+/// Maximum allowed size for cookie content (1 MB). Netscape cookie files
+/// are typically a few KB; anything larger is almost certainly a mistake.
+const MAX_COOKIES_SIZE: usize = 1_024 * 1_024;
+
 /// `PUT /api/system/ytdlp/cookies` — store cookie content and sync to disk.
 pub async fn set_cookies(
     State(state): State<AppState>,
     Json(body): Json<SetCookiesRequest>,
 ) -> AppResult<Json<CookiesStatus>> {
+    if body.content.len() > MAX_COOKIES_SIZE {
+        return Err(AppError::BadRequest(
+            "Cookie content exceeds maximum allowed size (1 MB)".into(),
+        ));
+    }
+
     let content = body.content.trim().to_string();
-    if content.trim().is_empty() {
+    if content.is_empty() {
         return Err(AppError::BadRequest(
             "Cookie content cannot be empty".into(),
         ));
