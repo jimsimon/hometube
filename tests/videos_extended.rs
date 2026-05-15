@@ -56,8 +56,14 @@ fn base_metadata(video_id: &str, channel_id: &str) -> serde_json::Value {
 // Captions
 // ---------------------------------------------------------------------------
 
+/// `list_captions` returns *only* user-uploaded subtitles. The
+/// auto-translated languages from yt-dlp's `automatic_captions` map are
+/// deliberately omitted: rendering them all as `<track>` elements
+/// causes the browser to eagerly fetch every variant in parallel, which
+/// instantly trips YouTube's caption rate limit (HTTP 429) and
+/// cascades into the bot-check wall on the yt-dlp fallback path.
 #[tokio::test]
-async fn list_captions_returns_both_manual_and_auto() {
+async fn list_captions_returns_only_manual_tracks() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
@@ -79,12 +85,12 @@ async fn list_captions_returns_both_manual_and_auto() {
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     let arr = body.as_array().unwrap();
-    // 2 manual (en, es) + 2 auto (fr, de) = 4 tracks
-    assert_eq!(arr.len(), 4);
+    // 2 manual (en, es); the 2 auto entries (fr, de) must be hidden.
+    assert_eq!(arr.len(), 2, "auto-captions must be filtered out: {body}");
     let auto_count = arr.iter().filter(|t| t["auto_generated"] == true).count();
     let manual_count = arr.iter().filter(|t| t["auto_generated"] == false).count();
     assert_eq!(manual_count, 2);
-    assert_eq!(auto_count, 2);
+    assert_eq!(auto_count, 0, "no auto tracks should be exposed: {body}");
 }
 
 // ---------------------------------------------------------------------------

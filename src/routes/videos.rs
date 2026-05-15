@@ -250,6 +250,19 @@ async fn fetch_and_rewrite_manifest(
 // /api/videos/:videoId/captions
 // ---------------------------------------------------------------------------
 
+/// `GET /api/videos/:videoId/captions` — list user-uploaded subtitle
+/// tracks.
+///
+/// **Auto-generated captions are deliberately *not* surfaced.** YouTube
+/// auto-translates user captions into ~100 target languages and returns
+/// every one in `automatic_captions`. If the frontend renders them all
+/// as `<track>` elements the browser eagerly fetches each, which
+/// instantly trips YouTube's `caption fetch returned non-2xx
+/// status=429` rate limit and cascades into the bot-check wall when
+/// the proxy falls back to spawning yt-dlp. The auto-translated
+/// captions are also low quality compared to the source. Users who
+/// genuinely need a translation can request it explicitly via the
+/// per-language endpoint.
 pub async fn list_captions(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -261,7 +274,7 @@ pub async fn list_captions(
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let mut tracks: Vec<CaptionTrack> = result
+    let tracks: Vec<CaptionTrack> = result
         .subtitles
         .keys()
         .map(|lang| CaptionTrack {
@@ -270,13 +283,6 @@ pub async fn list_captions(
             auto_generated: false,
         })
         .collect();
-    for lang in result.automatic_captions.keys() {
-        tracks.push(CaptionTrack {
-            lang: lang.clone(),
-            name: None,
-            auto_generated: true,
-        });
-    }
     Ok(Json(tracks))
 }
 
@@ -288,7 +294,12 @@ pub async fn list_captions(
 /// 1. In-memory `(video_id, lang)` cache (1 hour TTL).
 /// 2. yt-dlp metadata: if we already have a `.vtt` URL, fetch it.
 /// 3. Re-invoke yt-dlp with `--convert-subs vtt` so any non-VTT source
-///    (SRV1/SRV3/TTML) gets converted on the server.
+///    (SRV1/SRV3/TTML) gets converted on the server. Only used when
+///    step 2 had no URL at all — *not* when the upstream returned a
+///    transient error like 429. Spawning yt-dlp on a 429 just hits
+///    YouTube's rate limit again from a different code path and ends
+///    up surfacing the bot-check wall to the user, so we propagate
+///    rate-limit / forbidden statuses to the caller instead.
 ///
 /// On success the converted body is cached in memory so repeated player
 /// "select track" actions don't re-hit yt-dlp.
@@ -328,7 +339,11 @@ pub async fn get_caption(
         })
         .cloned();
 
-    // Fast path: yt-dlp metadata exposed a vtt URL.
+    // Fast path: yt-dlp metadata exposed a vtt URL. Only fall through
+    // to the yt-dlp slow path on transport errors or when the URL
+    // wasn't a vtt — non-2xx responses (especially 429) are
+    // propagated, *not* retried, because yt-dlp shares the same
+    // upstream rate limit and amplifies the problem.
     if let Some(track) = &track {
         if track.ext == "vtt" {
             match reqwest::get(&track.url).await {
@@ -338,13 +353,23 @@ pub async fn get_caption(
                         return Ok(vtt_response(body));
                     }
                 }
-                Ok(res) => warn!(status = %res.status(), "caption fetch returned non-2xx"),
+                Ok(res) => {
+                    let status = res.status();
+                    warn!(%status, %lang, "caption fetch returned non-2xx; propagating");
+                    let body = res.bytes().await.unwrap_or_default();
+                    let mut response = Response::new(Body::from(body));
+                    *response.status_mut() = status;
+                    return Ok(response);
+                }
                 Err(err) => warn!(%err, "caption fetch failed"),
             }
         }
     }
 
-    // Slow path: ask yt-dlp to download + convert to vtt.
+    // Slow path: ask yt-dlp to download + convert to vtt. Only reached
+    // when no vtt URL was available *or* the fast path hit a transport
+    // error (DNS, TLS, connection-refused) — explicitly *not* on 429,
+    // which we propagated above.
     let body = crate::services::ytdlp::extract_subtitles(&state.config, &video_id, &lang).await?;
     caption_cache_set(cache_key, body.clone()).await;
     Ok(vtt_response(body))
