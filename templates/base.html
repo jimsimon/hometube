@@ -16,6 +16,8 @@
       type="module"
       src="https://ka-f.webawesome.com/webawesome@3.6.0/webawesome.loader.js"
     ></script>
+    <!-- Preload components used inside shadow DOM (auto-loader only scans light DOM). -->
+    <div hidden data-wa-preload="wa-dropdown wa-dropdown-item"></div>
 
     <link rel="stylesheet" href="/assets/styles/global.css" />
 
