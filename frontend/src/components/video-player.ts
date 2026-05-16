@@ -505,22 +505,19 @@ export class VideoPlayer extends LitElement {
 
     // Restore caption visibility from prior session.
     try {
-      if (localStorage.getItem(CAPTIONS_KEY) === "true") {
-        player.setTextVisibility(true);
+      if (localStorage.getItem(CAPTIONS_KEY) === "true" && this.videoEl.textTracks.length > 0) {
+        this.videoEl.textTracks[0].mode = "showing";
       }
     } catch {
       // localStorage unavailable.
     }
 
-    // Persist caption visibility changes. shaka fires "textchanged"
-    // when text track visibility or selection changes.
-    player.addEventListener("textchanged", () => {
-      try {
-        localStorage.setItem(CAPTIONS_KEY, String(player.isTextVisible()));
-      } catch {
-        // localStorage unavailable.
-      }
-    });
+    // Persist caption visibility via native textTracks change event.
+    // shaka's NativeTextDisplayer toggles track.mode directly, so we
+    // listen on the video element's textTracks collection rather than
+    // relying on shaka's own "textchanged" event (which only fires
+    // from shaka's internal text management path).
+    this.videoEl.textTracks.addEventListener("change", this.onCaptionChange);
 
     // Seek to start position if specified.
     if (this.startAt != null && Number.isFinite(this.startAt)) {
@@ -549,6 +546,7 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("pause", this.onPause);
       this.videoEl.removeEventListener("ended", this.onEnded);
       this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
+      this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
     }
     if (this.ui) {
       this.ui.destroy();
@@ -583,6 +581,17 @@ export class VideoPlayer extends LitElement {
     if (!this.videoEl) return;
     try {
       localStorage.setItem(VOLUME_KEY, String(this.videoEl.volume));
+    } catch {
+      // localStorage unavailable.
+    }
+  };
+
+  private onCaptionChange = (): void => {
+    if (!this.videoEl) return;
+    const tracks = this.videoEl.textTracks;
+    const anyShowing = Array.from(tracks).some((t) => t.mode === "showing");
+    try {
+      localStorage.setItem(CAPTIONS_KEY, String(anyShowing));
     } catch {
       // localStorage unavailable.
     }
