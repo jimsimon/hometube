@@ -175,6 +175,8 @@ struct ExtractResultRaw {
     automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     #[serde(default)]
     manifest_url: Option<String>,
+    #[serde(default)]
+    segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
 }
 
 impl From<ExtractResultRaw> for ExtractResult {
@@ -195,7 +197,7 @@ impl From<ExtractResultRaw> for ExtractResult {
             subtitles: raw.subtitles,
             automatic_captions: raw.automatic_captions,
             manifest_url: raw.manifest_url,
-            segment_ranges: std::collections::HashMap::new(),
+            segment_ranges: raw.segment_ranges,
         }
     }
 }
