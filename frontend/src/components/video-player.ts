@@ -188,11 +188,35 @@ export class VideoPlayer extends LitElement {
         background: black;
         border-radius: 0.5rem;
         overflow: hidden;
+        position: relative;
       }
       .shaka-container video {
         width: 100%;
         height: 100%;
         object-fit: contain;
+      }
+      /* Shaka's text display container renders caption cues in an
+         absolutely-positioned overlay. Ensure it's centered, properly
+         sized, and text wraps naturally. */
+      .shaka-text-container {
+        text-align: center !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: flex-end !important;
+        align-items: center !important;
+        padding: 0 10% 3rem !important;
+        box-sizing: border-box !important;
+      }
+      .shaka-text-container span {
+        background: rgba(0, 0, 0, 0.75);
+        padding: 0.15em 0.4em;
+        border-radius: 0.2em;
+        font-size: clamp(0.9rem, 2.5vw, 1.3rem);
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        max-width: 80%;
+        display: inline-block;
       }
       /* Audio-only mode: replace the player surface with the poster. */
       :host([data-audio-only]) .shaka-container {
