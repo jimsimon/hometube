@@ -53,9 +53,20 @@ interface ShakaPlayer {
   load(uri: string, startTime?: number, mimeType?: string): Promise<void>;
   destroy(): Promise<void>;
   configure(path: string, value: unknown): void;
-  getNetworkingEngine(): { registerRequestFilter(filter: (type: number, request: { allowCrossSiteCredentials: boolean }) => void): void } | null;
+  getNetworkingEngine(): {
+    registerRequestFilter(
+      filter: (type: number, request: { allowCrossSiteCredentials: boolean }) => void,
+    ): void;
+  } | null;
   addEventListener(event: string, handler: (e: Event) => void): void;
-  addTextTrackAsync(uri: string, language: string, kind: string, mimeType: string, codec?: string, label?: string): Promise<unknown>;
+  addTextTrackAsync(
+    uri: string,
+    language: string,
+    kind: string,
+    mimeType: string,
+    codec?: string,
+    label?: string,
+  ): Promise<unknown>;
 }
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
@@ -66,7 +77,9 @@ interface ShakaUI {
 const Shaka = shaka as unknown as {
   polyfill: { installAll(): void };
   Player: new () => ShakaPlayer;
-  ui: { Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI };
+  ui: {
+    Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI;
+  };
 };
 
 import { ApiError, api } from "../services/api.js";
@@ -409,12 +422,7 @@ export class VideoPlayer extends LitElement {
     const uiConfig: Record<string, unknown> = {};
     if (this.settings?.playback_speed_locked) {
       // Hide the playback speed button when locked.
-      uiConfig["overflowMenuButtons"] = [
-        "quality",
-        "language",
-        "captions",
-        "picture_in_picture",
-      ];
+      uiConfig["overflowMenuButtons"] = ["quality", "language", "captions", "picture_in_picture"];
     }
     ui.configure(uiConfig);
 
@@ -803,10 +811,7 @@ export class VideoPlayer extends LitElement {
     return html`
       <div class="player-shell">
         <div class="shaka-container" style=${posterStyle}>
-          <video
-            autoplay
-            .poster=${this.metadata?.thumbnail_url ?? ""}
-          ></video>
+          <video autoplay .poster=${this.metadata?.thumbnail_url ?? ""}></video>
         </div>
         ${this.continuePromptOpen
           ? html`
