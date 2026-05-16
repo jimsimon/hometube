@@ -665,8 +665,8 @@ async fn resolve_segment_ranges(
     pool: &SqlitePool,
     video_id: &str,
     result: &ExtractResult,
-) -> std::collections::HashMap<String, crate::services::mp4::BoxRanges> {
-    use crate::services::mp4::{BoxRanges, ByteRange};
+) -> std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges> {
+    use crate::services::segment_ranges::{BoxRanges, ByteRange};
 
     let mut out: std::collections::HashMap<String, BoxRanges> = std::collections::HashMap::new();
 
@@ -706,7 +706,7 @@ async fn resolve_segment_ranges(
         .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
         .collect();
     if !uncovered.is_empty() {
-        let cached = crate::services::mp4::lookup_all(pool, video_id, &uncovered).await;
+        let cached = crate::services::segment_ranges::lookup_all(pool, video_id, &uncovered).await;
         out.extend(cached);
     }
 
@@ -731,7 +731,13 @@ async fn resolve_segment_ranges(
         let video_id_owned = video_id.to_string();
         tokio::spawn(async move {
             for (format_id, ranges) in new_from_innertube {
-                crate::services::mp4::store(&pool_clone, &video_id_owned, &format_id, ranges).await;
+                crate::services::segment_ranges::store(
+                    &pool_clone,
+                    &video_id_owned,
+                    &format_id,
+                    ranges,
+                )
+                .await;
             }
         });
     }

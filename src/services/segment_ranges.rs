@@ -1,13 +1,13 @@
-//! mp4 box-range DB cache layer.
+//! SegmentBase byte-range DB cache layer.
 //!
-//! Stores and retrieves the byte ranges of the `moov` (initialization)
-//! and `sidx` (segment index) top-level boxes for YouTube's fast-start
-//! mp4/webm files. The synthesized DASH manifest uses these to emit
+//! Stores and retrieves the inclusive byte ranges of the initialization
+//! segment and segment index for each `(video_id, format_id)` pair.
+//! The synthesized DASH manifest uses these to emit
 //! `<SegmentBase indexRange="...">` with a child
-//! `<Initialization range="...">`.
+//! `<Initialization range="..."/>`.
 //!
-//! Ranges are populated from innertube `/player` API dump parsing at
-//! extraction time (see `services::ytdlp`). This module is purely a
+//! Ranges are populated from YouTube's innertube `/player` API response
+//! at extraction time (see `services::ytdlp`). This module is purely a
 //! persistence layer — it never touches the network.
 
 use std::collections::HashMap;

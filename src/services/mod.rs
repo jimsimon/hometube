@@ -17,9 +17,9 @@
 pub mod access;
 pub mod cron;
 pub mod dash;
-pub mod mp4;
 pub mod notifications;
 pub mod oauth;
+pub mod segment_ranges;
 pub mod setup;
 pub mod video_cache;
 pub mod youtube;

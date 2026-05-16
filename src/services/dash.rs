@@ -148,7 +148,7 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 ///    abandons in-flight buffer.
 ///
 /// `box_ranges` maps `format_id → BoxRanges`. Callers are expected to
-/// pre-populate this from [`crate::services::mp4::resolve_all`] which
+/// pre-populate this from [`crate::services::segment_ranges`] which
 /// handles both the cache lookup and the parallel-probe fallback.
 /// Passing an empty map is fine and produces case-2 manifests for
 /// every format.
@@ -160,7 +160,7 @@ pub fn synthesize_manifest(
     video_id: &str,
     formats: &[Format],
     duration: Option<f64>,
-    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
+    box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
 ) -> Option<String> {
     // Collect formats whose URLs we can actually use. We accept both
     // `https` (whole-file with byte-range) and `http_dash_segments`
@@ -406,7 +406,7 @@ fn push_representation(
     attrs: &str,
     secret: &[u8],
     video_id: &str,
-    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
+    box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
 ) {
     mpd.push_str(&format!("    <Representation {attrs}>\n"));
     let base_url = build_format_proxy_url(secret, video_id, &f.format_id);
@@ -448,7 +448,7 @@ fn push_representation(
 /// existing one doesn't.
 fn dedupe_prefer_with_ranges<'a>(
     usable: Vec<&'a Format>,
-    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
+    box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
 ) -> Vec<&'a Format> {
     type Key = (
         Option<String>,
@@ -821,13 +821,13 @@ mod tests {
         init_end: u64,
         idx_start: u64,
         idx_end: u64,
-    ) -> super::super::mp4::BoxRanges {
-        super::super::mp4::BoxRanges {
-            init: super::super::mp4::ByteRange {
+    ) -> super::super::segment_ranges::BoxRanges {
+        super::super::segment_ranges::BoxRanges {
+            init: super::super::segment_ranges::ByteRange {
                 start: init_start,
                 end: init_end,
             },
-            index: super::super::mp4::ByteRange {
+            index: super::super::segment_ranges::ByteRange {
                 start: idx_start,
                 end: idx_end,
             },
@@ -840,7 +840,7 @@ mod tests {
     /// synthesizer doesn't filter Representations out.
     fn dummy_ranges(
         format_ids: &[&str],
-    ) -> std::collections::HashMap<String, super::super::mp4::BoxRanges> {
+    ) -> std::collections::HashMap<String, super::super::segment_ranges::BoxRanges> {
         format_ids
             .iter()
             .map(|id| (id.to_string(), ranges(0, 219, 220, 4481)))
