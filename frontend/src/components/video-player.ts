@@ -318,7 +318,7 @@ export class VideoPlayer extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopHeartbeat();
-    this.destroyPlayer();
+    void this.destroyPlayer();
     document.removeEventListener(
       "hometube:sleep-timer-expired",
       this.onSleepExpired as EventListener,
@@ -393,7 +393,7 @@ export class VideoPlayer extends LitElement {
     if (!this.videoEl || !this.containerEl) return;
 
     // Destroy any existing player instance (e.g. on videoId change).
-    this.destroyPlayer();
+    await this.destroyPlayer();
 
     // Install polyfills if needed (no-op in modern browsers).
     Shaka.polyfill.installAll();
@@ -419,12 +419,12 @@ export class VideoPlayer extends LitElement {
     // Create UI overlay (controls, quality menu, language menu, etc.).
     const ui = new Shaka.ui.Overlay(player, this.containerEl, this.videoEl);
     this.ui = ui;
-    const uiConfig: Record<string, unknown> = {};
-    if (this.settings?.playback_speed_locked) {
-      // Hide the playback speed button when locked.
-      uiConfig["overflowMenuButtons"] = ["quality", "language", "captions", "picture_in_picture"];
-    }
-    ui.configure(uiConfig);
+    // Always include captions in the overflow menu. When playback speed
+    // is locked, omit the speed button; otherwise use the full set.
+    const overflowButtons = this.settings?.playback_speed_locked
+      ? ["quality", "language", "captions", "picture_in_picture"]
+      : ["quality", "language", "captions", "playback_rate", "picture_in_picture"];
+    ui.configure({ overflowMenuButtons: overflowButtons });
 
     // Error handling.
     player.addEventListener("error", (event: Event) => {
@@ -505,7 +505,7 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  private destroyPlayer(): void {
+  private async destroyPlayer(): Promise<void> {
     if (this.videoEl) {
       this.videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
       this.videoEl.removeEventListener("play", this.onPlay);
@@ -518,7 +518,11 @@ export class VideoPlayer extends LitElement {
       this.ui = null;
     }
     if (this.player) {
-      void this.player.destroy();
+      try {
+        await this.player.destroy();
+      } catch {
+        // Ignore errors during teardown.
+      }
       this.player = null;
     }
   }
