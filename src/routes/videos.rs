@@ -296,67 +296,17 @@ async fn fetch_and_rewrite_manifest(
     // background probes have populated the cache — gets a proper
     // SegmentBase manifest. The cache is permanent: box offsets
     // describe file structure, not URL state.
-    // Split format probe inputs by container so we can dispatch to
-    // the right parser. yt-dlp tags each format's `ext` as either
-    // `mp4` (avc1/mp4a → ISO BMFF box layout, parsed by
-    // [`crate::services::mp4`]) or `webm` (vp9/opus → EBML/matroska
-    // layout, parsed by [`crate::services::webm`]). Storage and the
-    // per-video in-flight dedupe lock are shared between the two
-    // modules, so a video that mixes containers (it almost always
-    // does) gets one combined probe pass instead of two interleaved
-    // ones.
-    let usable = |f: &&crate::services::ytdlp::Format| -> bool {
-        !f.format_id.starts_with("sb")
-            && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
-    };
-    let mp4_inputs: Vec<(String, String)> = result
-        .formats
-        .iter()
-        .filter(usable)
-        .filter(|f| f.ext.as_deref() == Some("mp4"))
-        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
-        .collect();
-    let webm_inputs: Vec<(String, String)> = result
-        .formats
-        .iter()
-        .filter(usable)
-        .filter(|f| f.ext.as_deref() == Some("webm"))
-        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
-        .collect();
-    let mut all_inputs = mp4_inputs.clone();
-    all_inputs.extend(webm_inputs.clone());
-    // Cache lookup is container-agnostic — both kinds live in the
-    // same `format_box_ranges` table.
-    let box_ranges = crate::services::mp4::lookup_all(&state.db, video_id, &all_inputs).await;
-    let mp4_missing: Vec<(String, String)> = mp4_inputs
-        .into_iter()
-        .filter(|(fid, _)| !box_ranges.contains_key(fid))
-        .collect();
-    let webm_missing: Vec<(String, String)> = webm_inputs
-        .into_iter()
-        .filter(|(fid, _)| !box_ranges.contains_key(fid))
-        .collect();
-    // The two spawn calls share an in-flight slot: only the first
-    // one wins. Whichever container happens to have more missing
-    // entries gets the slot first; the loser drops its inputs. That's
-    // acceptable because the next manifest reload will retry the
-    // unprobed half — and after a couple of reloads the cache is hot
-    // for both. Avoiding two parallel workers per video matters more
-    // than maximizing per-load probe coverage.
-    if !mp4_missing.is_empty() {
-        crate::services::mp4::spawn_background_probes(
-            state.db.clone(),
-            video_id.to_string(),
-            mp4_missing,
-        );
-    }
-    if !webm_missing.is_empty() {
-        crate::services::webm::spawn_background_probes(
-            state.db.clone(),
-            video_id.to_string(),
-            webm_missing,
-        );
-    }
+    // Build the SegmentBase byte-range map for the DASH synthesizer.
+    //
+    // Primary source: `result.segment_ranges` — parsed from the
+    // innertube `/player` API dump at extract time. These are keyed by
+    // itag (integer) so we resolve each format's itag and look it up.
+    // The result is cached in `format_box_ranges` so subsequent
+    // manifest loads skip re-extraction entirely.
+    //
+    // Fallback: `format_box_ranges` SQLite table (populated on prior
+    // extractions or by the legacy background-probe path).
+    let box_ranges = resolve_segment_ranges(&state.db, video_id, result).await;
 
     if let Some(synthetic) = dash::synthesize_manifest(
         &secret,
@@ -1218,6 +1168,93 @@ fn pick_thumbnail(result: &ExtractResult) -> Option<String> {
         .map(|t| t.url.clone())
 }
 
+/// Resolve SegmentBase byte ranges for all usable formats.
+///
+/// Merges two sources:
+/// 1. `result.segment_ranges` (innertube `/player` API, keyed by itag)
+///    — available immediately after extraction.
+/// 2. `format_box_ranges` SQLite table — cached from prior extractions
+///    or legacy background probes.
+///
+/// Any ranges present in source 1 but missing from the DB are
+/// persisted (fire-and-forget) so future loads are instant.
+async fn resolve_segment_ranges(
+    pool: &SqlitePool,
+    video_id: &str,
+    result: &ExtractResult,
+) -> std::collections::HashMap<String, crate::services::mp4::BoxRanges> {
+    use crate::services::mp4::{BoxRanges, ByteRange};
+
+    let mut out: std::collections::HashMap<String, BoxRanges> = std::collections::HashMap::new();
+
+    // Step 1: Convert itag-keyed segment_ranges to format_id-keyed map.
+    // A format_id like "303-dashy" shares itag 303 with "303". We
+    // parse the leading integer itag from each format_id.
+    for f in &result.formats {
+        let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
+            continue;
+        };
+        let Some(sr) = result.segment_ranges.get(&itag) else {
+            continue;
+        };
+        let br = BoxRanges {
+            init: ByteRange {
+                start: sr.init_start,
+                end: sr.init_end,
+            },
+            index: ByteRange {
+                start: sr.index_start,
+                end: sr.index_end,
+            },
+        };
+        out.insert(f.format_id.clone(), br);
+    }
+
+    // Step 2: For any format NOT covered by segment_ranges, fall back
+    // to the database cache (legacy probe results or prior extractions).
+    let uncovered: Vec<(String, String)> = result
+        .formats
+        .iter()
+        .filter(|f| {
+            !f.format_id.starts_with("sb")
+                && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
+                && !out.contains_key(&f.format_id)
+        })
+        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
+        .collect();
+    if !uncovered.is_empty() {
+        let cached = crate::services::mp4::lookup_all(pool, video_id, &uncovered).await;
+        out.extend(cached);
+    }
+
+    // Step 3: Persist any new ranges to the DB for future loads.
+    // Fire-and-forget — don't block the manifest response on DB writes.
+    let pool_clone = pool.clone();
+    let video_id_owned = video_id.to_string();
+    let to_persist: Vec<(String, BoxRanges)> =
+        out.iter().map(|(fid, br)| (fid.clone(), *br)).collect();
+    tokio::spawn(async move {
+        for (format_id, ranges) in to_persist {
+            crate::services::mp4::store(&pool_clone, &video_id_owned, &format_id, ranges).await;
+        }
+    });
+
+    out
+}
+
+/// Extract the leading integer itag from a yt-dlp format_id.
+///
+/// yt-dlp names formats like `"303"`, `"303-dashy"`, `"251-drc"`,
+/// `"251-0"`, `"251-dashy-1"`. The itag is always the leading integer
+/// prefix before the first `-` (or the entire string if no `-`).
+fn parse_itag_from_format_id(format_id: &str) -> Option<i64> {
+    let numeric_prefix: String = format_id
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    numeric_prefix.parse::<i64>().ok()
+}
+
 /// Resolve `(format_id, sq)` to an upstream googlevideo.com URL.
 ///
 /// Used by the legacy DASH manifest path (`rewrite_manifest`) which
@@ -1622,6 +1659,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         }
     }
 
@@ -1685,6 +1723,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(build_upstream_segment_url(&result, "137", "0"), None);
     }
@@ -1765,6 +1804,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(best_audio_format_id(&result), Some("251".into()));
     }
@@ -1801,6 +1841,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(best_audio_format_id(&result), None);
     }
@@ -1828,6 +1869,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1862,6 +1904,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1883,6 +1926,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(pick_thumbnail(&result), None);
     }

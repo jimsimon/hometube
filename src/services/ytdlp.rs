@@ -121,6 +121,28 @@ pub struct ExtractResult {
     /// Some formats expose a single DASH manifest URL alongside the
     /// per-format URLs; yt-dlp also exposes it at top level.
     pub manifest_url: Option<String>,
+    /// SegmentBase byte ranges parsed from YouTube's innertube
+    /// `/player` response (via yt-dlp `--write-pages`). Keyed by itag
+    /// (the integer format identifier YouTube assigns). Each value
+    /// provides the inclusive byte ranges for the initialization
+    /// segment (moov / EBML header) and the segment index
+    /// (sidx / Cues). These are used by the DASH synthesizer
+    /// to emit `<SegmentBase indexRange>` + `<Initialization range>`.
+    ///
+    /// Populated at extract time and immediately cached in
+    /// `format_box_ranges` so probing is never needed.
+    #[serde(default)]
+    pub segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+}
+
+/// Inclusive byte ranges for a single adaptive format's SegmentBase,
+/// as reported by YouTube's innertube `/player` API.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SegmentRanges {
+    pub init_start: u64,
+    pub init_end: u64,
+    pub index_start: u64,
+    pub index_end: u64,
 }
 
 /// Raw shape of yt-dlp's `--dump-json` output. Used purely as a
@@ -173,6 +195,7 @@ impl From<ExtractResultRaw> for ExtractResult {
             subtitles: raw.subtitles,
             automatic_captions: raw.automatic_captions,
             manifest_url: raw.manifest_url,
+            segment_ranges: std::collections::HashMap::new(),
         }
     }
 }
@@ -185,13 +208,30 @@ impl<'de> Deserialize<'de> for ExtractResult {
 
 /// Run `yt-dlp --dump-json --no-playlist <video_url>` and parse the
 /// result. Times out after [`DEFAULT_TIMEOUT`].
+///
+/// Additionally runs with `--write-pages` to capture the raw innertube
+/// `/player` API response, from which we extract `initRange` and
+/// `indexRange` for each adaptive format. These byte ranges let us
+/// emit `<SegmentBase indexRange>` + `<Initialization range>` in the
+/// synthesized DASH manifest without probing the upstream files.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
+
+    // yt-dlp's --write-pages dumps all HTTP responses to the working
+    // directory. Use a dedicated temp dir so we can find the player
+    // dumps without polluting the project root.
+    let pages_dir = tempdir_for_pages(video_id);
+    tokio::fs::create_dir_all(&pages_dir)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("creating pages tmp: {e}")))?;
+
     let mut cmd = Command::new(&cfg.ytdlp_path);
     cmd.arg("--dump-json")
         .arg("--no-playlist")
         .arg("--no-warnings")
-        .arg("--skip-download");
+        .arg("--skip-download")
+        .arg("--write-pages")
+        .current_dir(&pages_dir);
     let yt_args_guard = append_youtube_args(&mut cmd);
     cmd.arg(&url);
     debug!(?cmd, %video_id, "running yt-dlp");
@@ -204,6 +244,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!(%video_id, %stderr, "yt-dlp failed");
+        let _ = tokio::fs::remove_dir_all(&pages_dir).await;
         return Err(AppError::Other(anyhow::anyhow!(
             "yt-dlp exited with status {}: {}",
             output.status,
@@ -213,13 +254,125 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("yt-dlp stdout not UTF-8: {e}")))?;
-    let result: ExtractResult = serde_json::from_str(&stdout)
+    let mut result: ExtractResult = serde_json::from_str(&stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("parsing yt-dlp JSON: {e}")))?;
+
+    // Parse SegmentBase ranges from the innertube player dump(s).
+    result.segment_ranges = parse_player_page_dumps(&pages_dir).await;
+    if result.segment_ranges.is_empty() {
+        debug!(%video_id, "no segment ranges found in player dumps");
+    } else {
+        debug!(%video_id, count = result.segment_ranges.len(), "parsed segment ranges from player dump");
+    }
+
+    // Cleanup pages temp dir (best-effort).
+    let _ = tokio::fs::remove_dir_all(&pages_dir).await;
+
     // Fold any rotated session cookies (e.g. `__Secure-1PSIDTS`) back
     // into the canonical cookie file, but only if every original cookie
     // name still survived yt-dlp's cookiejar rewrite.
     yt_args_guard.persist_cookies_if_safe().await;
     Ok(result)
+}
+
+/// Temp directory for yt-dlp's `--write-pages` output.
+fn tempdir_for_pages(video_id: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    let nonce: u64 = rand::random();
+    p.push(format!("hometube-pages-{video_id}-{nonce:x}"));
+    p
+}
+
+/// Scan a directory of yt-dlp `--write-pages` dumps for innertube
+/// `/player` responses and extract `initRange` / `indexRange` for
+/// each adaptive format.
+///
+/// Returns a map from itag (YouTube's integer format identifier) to
+/// the inclusive byte ranges for the initialization segment and the
+/// segment index. Missing or malformed entries are silently skipped.
+async fn parse_player_page_dumps(
+    dir: &std::path::Path,
+) -> std::collections::HashMap<i64, SegmentRanges> {
+    let mut ranges = std::collections::HashMap::new();
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return ranges,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        // yt-dlp names player API dumps with "youtubei_v1_player" in
+        // the filename.
+        if !name.contains("youtubei_v1_player") {
+            continue;
+        }
+        let body = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let json: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let formats = json
+            .get("streamingData")
+            .and_then(|sd| sd.get("adaptiveFormats"))
+            .and_then(|af| af.as_array());
+        let Some(formats) = formats else { continue };
+        for fmt in formats {
+            let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some(init_range) = fmt.get("initRange") else {
+                continue;
+            };
+            let Some(index_range) = fmt.get("indexRange") else {
+                continue;
+            };
+            let Some(init_start) = init_range
+                .get("start")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(init_end) = init_range
+                .get("end")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(index_start) = index_range
+                .get("start")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(index_end) = index_range
+                .get("end")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            ranges.insert(
+                itag,
+                SegmentRanges {
+                    init_start,
+                    init_end,
+                    index_start,
+                    index_end,
+                },
+            );
+        }
+    }
+    ranges
 }
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
