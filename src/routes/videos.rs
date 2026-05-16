@@ -273,7 +273,7 @@ pub async fn list_captions(
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let tracks: Vec<CaptionTrack> = result
+    let mut tracks: Vec<CaptionTrack> = result
         .subtitles
         .keys()
         .map(|lang| CaptionTrack {
@@ -282,6 +282,22 @@ pub async fn list_captions(
             auto_generated: false,
         })
         .collect();
+
+    // Include the original-language auto-generated caption track.
+    // YouTube tags it with a `-orig` suffix (e.g. `en-orig`). We only
+    // surface this one — NOT the 100+ auto-translated variants which
+    // trigger 429 rate limits when the player eagerly fetches them.
+    for lang in result.automatic_captions.keys() {
+        if lang.ends_with("-orig") {
+            let display_lang = lang.strip_suffix("-orig").unwrap_or(lang);
+            tracks.push(CaptionTrack {
+                lang: lang.clone(),
+                name: Some(format!("{display_lang} (auto)")),
+                auto_generated: true,
+            });
+        }
+    }
+
     Ok(Json(tracks))
 }
 

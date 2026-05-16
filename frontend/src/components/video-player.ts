@@ -67,6 +67,8 @@ interface ShakaPlayer {
     codec?: string,
     label?: string,
   ): Promise<unknown>;
+  setTextTrackVisibility(visible: boolean): void;
+  isTextTrackVisible(): boolean;
 }
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
@@ -86,9 +88,7 @@ import { ApiError, api } from "../services/api.js";
 import {
   ensurePersistentStorage,
   getStorageEstimate,
-  getVideoPrefs,
   saveVideoToOpfs,
-  setVideoPrefs,
 } from "../services/offline.js";
 import type {
   Bookmark,
@@ -109,6 +109,8 @@ import "./error-banner.js";
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
 const VOLUME_KEY = "hometube-volume";
+const AUDIO_ONLY_KEY = "hometube-audio-only";
+const CAPTIONS_KEY = "hometube-captions";
 /** How long the audio fade-out lasts when the sleep timer expires. */
 const SLEEP_FADE_MS = 4_000;
 /** Warn the user if free storage is below this (500 MB). */
@@ -346,8 +348,12 @@ export class VideoPlayer extends LitElement {
     this.loadInFlight = true;
     this.error = "";
     try {
-      // Restore the audio-only preference for this video.
-      this.audioOnly = !!getVideoPrefs(this.videoId).audioOnly;
+      // Restore the audio-only preference (global, not per-video).
+      try {
+        this.audioOnly = localStorage.getItem(AUDIO_ONLY_KEY) === "true";
+      } catch {
+        this.audioOnly = false;
+      }
 
       if (this.preview) {
         const meta = await api.get<VideoMetadata>(`/api/preview/video/${this.videoId}`);
@@ -485,6 +491,24 @@ export class VideoPlayer extends LitElement {
       }
     }
 
+    // Restore caption visibility from prior session.
+    try {
+      if (localStorage.getItem(CAPTIONS_KEY) === "true") {
+        player.setTextTrackVisibility(true);
+      }
+    } catch {
+      // localStorage unavailable.
+    }
+
+    // Persist caption visibility changes.
+    player.addEventListener("texttrackvisibility", () => {
+      try {
+        localStorage.setItem(CAPTIONS_KEY, String(player.isTextTrackVisible()));
+      } catch {
+        // localStorage unavailable.
+      }
+    });
+
     // Seek to start position if specified.
     if (this.startAt != null && Number.isFinite(this.startAt)) {
       this.videoEl.currentTime = this.startAt;
@@ -534,7 +558,11 @@ export class VideoPlayer extends LitElement {
 
   private toggleAudioOnly = (): void => {
     this.audioOnly = !this.audioOnly;
-    setVideoPrefs(this.videoId, { audioOnly: this.audioOnly });
+    try {
+      localStorage.setItem(AUDIO_ONLY_KEY, String(this.audioOnly));
+    } catch {
+      // localStorage unavailable.
+    }
     void this.attachSource();
   };
 
