@@ -39,20 +39,15 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
 // shaka-player's pre-built UI bundle (includes player + UI overlay).
-// This is a UMD/global build that puts `shaka` on globalThis.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — shaka-player's UI bundle is UMD, not ESM
-import "shaka-player/dist/shaka-player.ui.js";
+// The build uses a UMD-like wrapper that exports via `exports` when
+// available (which Vite's bundler provides), making it importable
+// as a default/namespace import.
+// @ts-ignore — shaka-player doesn't ship proper ESM type mappings
+import * as shaka from "shaka-player/dist/shaka-player.ui.js";
 import shakaControlsCss from "shaka-player/dist/controls.css?inline";
 
-// TypeScript doesn't understand the global `shaka` that the UMD
-// build creates. We declare what we need with `any`-typed
-// constructors — the runtime types are correct.
-declare const shaka: {
-  polyfill: { installAll(): void };
-  Player: new () => ShakaPlayer;
-  ui: { Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI };
-};
+// Minimal type declarations for the shaka APIs we use. The actual
+// runtime objects are full-featured; we only type what we touch.
 interface ShakaPlayer {
   attach(video: HTMLVideoElement): Promise<void>;
   load(uri: string, startTime?: number, mimeType?: string): Promise<void>;
@@ -66,6 +61,13 @@ interface ShakaUI {
   configure(config: Record<string, unknown>): void;
   destroy(): void;
 }
+
+// Cast the imported namespace to our typed shape.
+const Shaka = shaka as unknown as {
+  polyfill: { installAll(): void };
+  Player: new () => ShakaPlayer;
+  ui: { Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI };
+};
 
 import { ApiError, api } from "../services/api.js";
 import {
@@ -365,10 +367,10 @@ export class VideoPlayer extends LitElement {
     this.destroyPlayer();
 
     // Install polyfills if needed (no-op in modern browsers).
-    shaka.polyfill.installAll();
+    Shaka.polyfill.installAll();
 
-    // Create shaka.Player.
-    const player = new shaka.Player();
+    // Create player.
+    const player = new Shaka.Player();
     await player.attach(this.videoEl);
     this.player = player;
 
@@ -386,7 +388,7 @@ export class VideoPlayer extends LitElement {
     }
 
     // Create UI overlay (controls, quality menu, language menu, etc.).
-    const ui = new shaka.ui.Overlay(player, this.containerEl, this.videoEl);
+    const ui = new Shaka.ui.Overlay(player, this.containerEl, this.videoEl);
     this.ui = ui;
     const uiConfig: Record<string, unknown> = {};
     if (this.settings?.playback_speed_locked) {
