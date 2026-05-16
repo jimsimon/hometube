@@ -393,6 +393,223 @@ pub fn build_segment_proxy_url(secret: &[u8], video_id: &str, format_id: &str, s
     )
 }
 
+/// Build a signed proxy URL for streaming an entire format file via
+/// byte-range requests. Used by the synthetic DASH manifest where each
+/// `<Representation>` points at a `<BaseURL>` through our proxy.
+pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) -> String {
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", video_id.to_string()),
+        ("format", format_id.to_string()),
+    ];
+    let sig = sign_query(secret, &params);
+    format!(
+        "/api/proxy/format?video_id={}&format={}&sig={}",
+        youtube::percent_encode(video_id),
+        youtube::percent_encode(format_id),
+        sig
+    )
+}
+
+/// Synthesize a minimal DASH MPD from yt-dlp's per-format metadata.
+///
+/// This is used when yt-dlp doesn't expose an upstream DASH manifest
+/// (common on videos that only offer HLS or direct-download formats).
+/// The resulting MPD groups video-only and audio-only `https`-protocol
+/// formats into separate `<AdaptationSet>`s, each with a `<BaseURL>`
+/// pointing at our signed `/api/proxy/format` endpoint. dash.js then
+/// issues byte-range requests against those URLs and our proxy
+/// streams them through from YouTube's CDN.
+///
+/// We deliberately use the on-demand DASH profile (`isoff-on-demand`)
+/// rather than the live profile so the player understands every
+/// `<Representation>` is a self-contained file fetched with `Range:`
+/// headers — there are no segments and no SegmentTemplate.
+///
+/// Returns `None` if there are no usable `https`-protocol formats with
+/// URLs (degenerate case — shouldn't happen for normal YouTube videos).
+pub fn synthesize_manifest(
+    secret: &[u8],
+    video_id: &str,
+    formats: &[Format],
+    duration: Option<f64>,
+) -> Option<String> {
+    // Collect only `https`-protocol formats that have a direct URL.
+    // Storyboard formats (`sb0`..`sb3`) are excluded — they're image
+    // sprite-sheets, not playable media.
+    let usable: Vec<&Format> = formats
+        .iter()
+        .filter(|f| {
+            f.protocol.as_deref() == Some("https")
+                && f.url.is_some()
+                && !f.format_id.starts_with("sb")
+        })
+        .collect();
+
+    let video_formats: Vec<&Format> = usable
+        .iter()
+        .copied()
+        .filter(|f| f.vcodec.as_deref().unwrap_or("none") != "none" && f.height.is_some())
+        .collect();
+    let audio_formats: Vec<&Format> = usable
+        .iter()
+        .copied()
+        .filter(|f| {
+            f.acodec.as_deref().unwrap_or("none") != "none"
+                && (f.vcodec.as_deref().unwrap_or("none") == "none" || f.height.is_none())
+        })
+        .collect();
+
+    if video_formats.is_empty() && audio_formats.is_empty() {
+        return None;
+    }
+
+    let dur_str = duration
+        .map(|d| format!("PT{:.3}S", d))
+        .unwrap_or_else(|| "PT0S".to_string());
+
+    let mut mpd = String::with_capacity(4096);
+    mpd.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    mpd.push_str(&format!(
+        "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"{}\" minBufferTime=\"PT2S\" profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\">\n",
+        dur_str
+    ));
+    mpd.push_str("<Period>\n");
+
+    if !video_formats.is_empty() {
+        mpd.push_str("  <AdaptationSet mimeType=\"video/mp4\" contentType=\"video\" segmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">\n");
+        for f in &video_formats {
+            let id = &f.format_id;
+            let width = f.width.unwrap_or(0);
+            let height = f.height.unwrap_or(0);
+            let bandwidth = f
+                .tbr
+                .or(f.vbr)
+                .map(|b| (b * 1000.0) as u64)
+                .unwrap_or(500_000);
+            let codecs = f.vcodec.as_deref().unwrap_or("avc1.4d401f");
+            let base_url = build_format_proxy_url(secret, video_id, id);
+            mpd.push_str(&format!(
+                "    <Representation id=\"{}\" bandwidth=\"{}\" width=\"{}\" height=\"{}\" codecs=\"{}\">\n",
+                escape_xml(id),
+                bandwidth,
+                width,
+                height,
+                escape_xml(codecs)
+            ));
+            mpd.push_str(&format!(
+                "      <BaseURL>{}</BaseURL>\n",
+                escape_xml(&base_url)
+            ));
+            mpd.push_str("    </Representation>\n");
+        }
+        mpd.push_str("  </AdaptationSet>\n");
+    }
+
+    if !audio_formats.is_empty() {
+        // Group by language (or "" if absent). BTreeMap gives a stable
+        // ordering across calls so the manifest is deterministic.
+        let mut lang_groups: std::collections::BTreeMap<String, Vec<&Format>> =
+            std::collections::BTreeMap::new();
+        for f in &audio_formats {
+            let lang = f.language.clone().unwrap_or_default();
+            lang_groups.entry(lang).or_default().push(*f);
+        }
+
+        let main_lang = pick_main_audio_lang(&audio_formats);
+
+        for (lang, group) in &lang_groups {
+            let lang_attr = if lang.is_empty() {
+                String::new()
+            } else {
+                format!(" lang=\"{}\"", escape_xml(lang))
+            };
+            mpd.push_str(&format!(
+                "  <AdaptationSet mimeType=\"audio/mp4\" contentType=\"audio\"{}>\n",
+                lang_attr
+            ));
+            // Mark the original-language audio as `Role=main` so
+            // dash.js's `prioritizeRoleMain` selects it. Skip when only
+            // one language is present (no ambiguity to resolve).
+            if main_lang.as_deref() == Some(lang.as_str()) && lang_groups.len() > 1 {
+                mpd.push_str(
+                    "    <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n",
+                );
+            }
+            for f in group {
+                let id = &f.format_id;
+                let bandwidth = f
+                    .tbr
+                    .or(f.abr)
+                    .map(|b| (b * 1000.0) as u64)
+                    .unwrap_or(128_000);
+                let codecs = f.acodec.as_deref().unwrap_or("mp4a.40.2");
+                let base_url = build_format_proxy_url(secret, video_id, id);
+                mpd.push_str(&format!(
+                    "    <Representation id=\"{}\" bandwidth=\"{}\" codecs=\"{}\">\n",
+                    escape_xml(id),
+                    bandwidth,
+                    escape_xml(codecs)
+                ));
+                mpd.push_str(&format!(
+                    "      <BaseURL>{}</BaseURL>\n",
+                    escape_xml(&base_url)
+                ));
+                mpd.push_str("    </Representation>\n");
+            }
+            mpd.push_str("  </AdaptationSet>\n");
+        }
+    }
+
+    mpd.push_str("</Period>\n</MPD>\n");
+    Some(mpd)
+}
+
+/// Pick the language tag of the audio track that should be marked as
+/// `Role=main` in a synthesized manifest.
+///
+/// Mirrors the heuristics used by [`rewrite_manifest`]: a format whose
+/// `format_note` contains the substring `"original"` (case-insensitive)
+/// wins, otherwise the format with the highest `language_preference`.
+/// Returns `None` when no signal is available.
+fn pick_main_audio_lang(audio_formats: &[&Format]) -> Option<String> {
+    for f in audio_formats {
+        if f.format_note
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase().contains("original"))
+            .unwrap_or(false)
+        {
+            return f.language.clone();
+        }
+    }
+    let mut best: Option<(&str, i64)> = None;
+    for f in audio_formats {
+        if let (Some(lang), Some(pref)) = (f.language.as_deref(), f.language_preference) {
+            if best.map(|(_, p)| pref > p).unwrap_or(true) {
+                best = Some((lang, pref));
+            }
+        }
+    }
+    best.map(|(l, _)| l.to_string())
+}
+
+/// Minimal XML escaping for attribute and text values in the
+/// synthesized MPD. Covers the five characters that have special
+/// meaning in attribute and element content per the XML 1.0 spec.
+fn escape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// If `el` is a `<SegmentURL>` or `<BaseURL>` (and friends), return a
 /// rewritten version. Otherwise `Ok(None)`.
 fn rewrite_url_element<'a>(
@@ -718,6 +935,153 @@ mod tests {
             !rewritten.contains("<Role"),
             "no Role expected:\n{rewritten}"
         );
+    }
+
+    /// Build a `Format` for the synthesizer tests with the minimum
+    /// fields needed: `https` protocol, a URL, and codec info.
+    fn https_format(
+        id: &str,
+        height: Option<i64>,
+        vcodec: Option<&str>,
+        acodec: Option<&str>,
+        language: Option<&str>,
+    ) -> Format {
+        Format {
+            format_id: id.into(),
+            ext: Some("mp4".into()),
+            height,
+            width: height.map(|h| h * 16 / 9),
+            tbr: Some(1000.0),
+            vbr: vcodec.and_then(|c| (c != "none").then_some(800.0)),
+            abr: acodec.and_then(|c| (c != "none").then_some(128.0)),
+            fps: Some(30.0),
+            vcodec: vcodec.map(str::to_owned),
+            acodec: acodec.map(str::to_owned),
+            filesize: None,
+            url: Some(format!(
+                "https://example.googlevideo.com/videoplayback?id={id}"
+            )),
+            manifest_url: None,
+            protocol: Some("https".into()),
+            language: language.map(str::to_owned),
+            language_preference: None,
+            format_note: None,
+        }
+    }
+
+    #[test]
+    fn synthesize_manifest_produces_video_and_audio_adaptation_sets() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
+            https_format("136", Some(720), Some("avc1.4d401f"), Some("none"), None),
+            https_format("251", None, Some("none"), Some("opus"), Some("en")),
+            // Storyboard format must be filtered out.
+            Format {
+                format_id: "sb0".into(),
+                protocol: Some("https".into()),
+                url: Some("https://example.com/sb0".into()),
+                ..https_format("ignored", None, None, None, None)
+            },
+        ];
+        let mpd = synthesize_manifest(secret, "vid-1", &formats, Some(213.0)).expect("synthesize");
+
+        // Well-formed shell.
+        assert!(mpd.starts_with("<?xml"));
+        assert!(mpd.contains(r#"type="static""#));
+        assert!(mpd.contains(r#"mediaPresentationDuration="PT213.000S""#));
+        assert!(mpd.contains(r#"profiles="urn:mpeg:dash:profile:isoff-on-demand:2011""#));
+
+        // Both AdaptationSets present with the right contentType.
+        assert!(
+            mpd.contains(r#"contentType="video""#),
+            "video set missing:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"contentType="audio""#),
+            "audio set missing:\n{mpd}"
+        );
+
+        // Both video Representations present (1080p + 720p) with their
+        // proxy BaseURLs.
+        assert!(mpd.contains(r#"id="137""#));
+        assert!(mpd.contains(r#"id="136""#));
+        assert!(mpd.contains("/api/proxy/format?"));
+        assert!(mpd.contains("video_id=vid-1"));
+
+        // Audio Representation with language attribute.
+        assert!(mpd.contains(r#"id="251""#));
+        assert!(mpd.contains(r#"lang="en""#));
+
+        // Storyboard format omitted.
+        assert!(!mpd.contains(r#"id="sb0""#), "storyboard leaked:\n{mpd}");
+
+        // BaseURL contents are XML-safe (ampersand-escaped query string).
+        assert!(mpd.contains("&amp;format=137"));
+    }
+
+    #[test]
+    fn synthesize_manifest_returns_none_when_no_https_formats() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![Format {
+            // m3u8 protocol — not usable for synthesis.
+            protocol: Some("m3u8_native".into()),
+            ..https_format("96", Some(720), Some("avc1"), Some("aac"), None)
+        }];
+        assert!(synthesize_manifest(secret, "vid", &formats, None).is_none());
+    }
+
+    #[test]
+    fn synthesize_manifest_marks_original_audio_role_main() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut en = https_format("251-en", None, Some("none"), Some("opus"), Some("en"));
+        en.format_note = Some("original (default), low".into());
+        let es = https_format("251-es", None, Some("none"), Some("opus"), Some("es"));
+        let mpd = synthesize_manifest(secret, "vid", &[en, es], Some(60.0)).expect("synthesize");
+
+        // Exactly one Role=main, and it's inside the en AdaptationSet.
+        assert_eq!(mpd.matches(r#"value="main""#).count(), 1, "{mpd}");
+        let en_block = mpd
+            .split(r#"lang="en""#)
+            .nth(1)
+            .expect("en AdaptationSet")
+            .split("</AdaptationSet>")
+            .next()
+            .unwrap();
+        assert!(
+            en_block.contains(r#"value="main""#),
+            "Role=main not in en block: {mpd}"
+        );
+    }
+
+    #[test]
+    fn synthesize_manifest_single_audio_lang_skips_role_main() {
+        // Role=main is only meaningful when there's ambiguity to
+        // resolve. Single-language audio shouldn't emit it.
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![https_format(
+            "251",
+            None,
+            Some("none"),
+            Some("opus"),
+            Some("en"),
+        )];
+        let mpd = synthesize_manifest(secret, "v", &formats, Some(60.0)).expect("synthesize");
+        assert!(
+            !mpd.contains(r#"value="main""#),
+            "unexpected Role=main:\n{mpd}"
+        );
+    }
+
+    #[test]
+    fn synthesize_manifest_proxy_url_signature_round_trips() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let url = build_format_proxy_url(secret, "abc", "137");
+        // Extract sig and verify under the same params.
+        let (_, sig) = url.rsplit_once("sig=").expect("sig in url");
+        let params: Vec<(&str, String)> =
+            vec![("video_id", "abc".into()), ("format", "137".into())];
+        assert!(verify_query(secret, &params, sig));
     }
 
     /// Custom (non-`urn:mpeg:dash:role:*`) Role schemes must round-trip

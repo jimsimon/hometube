@@ -273,6 +273,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/proxy/segment", get(videos::get_segment))
         .route("/api/proxy/hls", get(videos::get_hls_proxy))
         .route("/api/proxy/audio", get(videos::get_audio))
+        .route("/api/proxy/format", get(videos::get_format))
         .route(
             "/api/proxy/thumbnail/{video_id}",
             get(videos::get_thumbnail),

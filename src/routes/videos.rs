@@ -216,34 +216,78 @@ pub async fn get_stream_manifest(
 /// it's DASH or HLS, and return the rewritten body together with the
 /// flavour. `Ok(None)` means yt-dlp didn't expose any manifest at all
 /// for this video.
+/// Resolve the playable manifest for a video.
+///
+/// The selection cascade prefers manifests whose segment URLs we can
+/// actually fetch reliably:
+///
+/// 1. **Upstream DASH** — if yt-dlp surfaced a `manifest_url` and the
+///    body parses as DASH, rewrite it (existing behaviour). DASH
+///    segment URLs are the most reliable path because they're
+///    individually signed and *not* PoT-pipelined.
+/// 2. **Synthesized DASH** — build an MPD from the `https`-protocol
+///    per-format URLs in `result.formats[]`. Each `<Representation>`
+///    points at a `<BaseURL>` through `/api/proxy/format`. dash.js
+///    drives playback via byte-range requests, sidestepping the
+///    upstream HLS path entirely.
+/// 3. **Upstream HLS** — last resort. Used only if synthesis returned
+///    `None` (no usable `https` formats) *and* the upstream manifest
+///    parsed as HLS. Kept around because some videos may legitimately
+///    only expose this flavour, even though Google's CDN often
+///    rejects PoT-pipelined HLS segments with 403.
 async fn fetch_and_rewrite_manifest(
     state: &AppState,
     video_id: &str,
     result: &ExtractResult,
 ) -> AppResult<Option<(String, ManifestType)>> {
-    let Some(url) = result
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+
+    // Step 1: try upstream DASH manifest if yt-dlp surfaced one.
+    let upstream_url = result
         .manifest_url
         .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()))
-    else {
-        return Ok(None);
-    };
+        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
+    let mut upstream_hls_body: Option<String> = None;
 
-    let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let res = reqwest::get(&url).await?;
-    if !res.status().is_success() {
-        warn!(%url, status = %res.status(), "non-2xx fetching upstream manifest");
-        return Ok(None);
+    if let Some(url) = upstream_url {
+        match reqwest::get(&url).await {
+            Ok(res) if res.status().is_success() => match res.text().await {
+                Ok(body) => {
+                    if hls::is_hls_manifest(&body) {
+                        // Defer the HLS path until after synthesis fails.
+                        upstream_hls_body = Some(body);
+                    } else {
+                        let rewritten =
+                            dash::rewrite_manifest(&secret, video_id, &body, &result.formats)?;
+                        return Ok(Some((rewritten, ManifestType::Dash)));
+                    }
+                }
+                Err(err) => warn!(%url, %err, "failed to read upstream manifest body"),
+            },
+            Ok(res) => warn!(%url, status = %res.status(), "non-2xx fetching upstream manifest"),
+            Err(err) => warn!(%url, %err, "failed to fetch upstream manifest"),
+        }
     }
-    let body = res.text().await?;
 
-    if hls::is_hls_manifest(&body) {
+    // Step 2: synthesize DASH from `https`-protocol formats. This is
+    // the preferred path for videos that don't expose a real DASH
+    // manifest because the per-format `https` URLs work reliably with
+    // byte-range fetching (whereas PoT-pipelined HLS segments get
+    // 403'd by Google's CDN).
+    if let Some(synthetic) =
+        dash::synthesize_manifest(&secret, video_id, &result.formats, result.duration)
+    {
+        return Ok(Some((synthetic, ManifestType::Dash)));
+    }
+
+    // Step 3: fall back to upstream HLS if we have it. May 403 on
+    // segment fetches but it's better than failing playback outright.
+    if let Some(body) = upstream_hls_body {
         let rewritten = hls::rewrite_playlist(&secret, video_id, &body, HlsProxyKind::Playlist);
-        Ok(Some((rewritten, ManifestType::Hls)))
-    } else {
-        let rewritten = dash::rewrite_manifest(&secret, video_id, &body, &result.formats)?;
-        Ok(Some((rewritten, ManifestType::Dash)))
+        return Ok(Some((rewritten, ManifestType::Hls)));
     }
+
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +890,113 @@ pub async fn get_audio(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FormatQuery {
+    pub video_id: String,
+    pub format: String,
+    pub sig: String,
+}
+
+/// `GET /api/proxy/format` — proxy a single yt-dlp format URL.
+///
+/// Used by the synthesized DASH manifest (see [`dash::synthesize_manifest`])
+/// where each `<Representation>` points at a `<BaseURL>` of the form
+/// `/api/proxy/format?video_id=X&format=Y&sig=Z`. dash.js then issues
+/// byte-range requests against that URL and we stream the bytes
+/// through from YouTube's CDN with `Range:` pass-through.
+///
+/// This endpoint is deliberately *not* segmented: there is no `sq=`,
+/// no per-segment caching, and no upstream URL reconstruction. The
+/// upstream URL is whatever yt-dlp surfaced for the format, and we
+/// fetch it verbatim. That sidesteps the broken HLS-PoT segment path
+/// (which gets 403'd by Google's CDN) by relying on the more reliable
+/// `https`-protocol per-format URLs.
+pub async fn get_format(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FormatQuery>,
+) -> AppResult<Response> {
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", q.video_id.clone()),
+        ("format", q.format.clone()),
+    ];
+    if !dash::verify_query(&secret, &params, &q.sig) {
+        return Err(AppError::Forbidden);
+    }
+
+    let cache = video_cache(&state);
+    let result = cache
+        .get_or_extract(&state.db, &state.config, &q.video_id)
+        .await?;
+
+    let format = result
+        .formats
+        .iter()
+        .find(|f| f.format_id == q.format)
+        .ok_or_else(|| AppError::BadRequest("unknown format".into()))?;
+    let url = format
+        .url
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?;
+
+    let mut req = reqwest::Client::new().get(&url);
+    if let Some(range) = headers.get(header::RANGE) {
+        if let Ok(s) = range.to_str() {
+            req = req.header(header::RANGE, s);
+        }
+    }
+    let res = req.send().await.map_err(AppError::Http)?;
+    let status = res.status();
+    let upstream_content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    // Pass through Content-Length and Content-Range so the browser
+    // knows the file size and which range it received — both are
+    // required for dash.js's byte-range fetching to work.
+    let upstream_content_length = res
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let upstream_content_range = res
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let upstream_accept_ranges = res
+        .headers()
+        .get(header::ACCEPT_RANGES)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let stream = res.bytes_stream().map_err(std::io::Error::other);
+    let body = Body::from_stream(stream);
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    let h = response.headers_mut();
+    h.insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
+    if let Some(len) = upstream_content_length {
+        if let Ok(v) = len.parse() {
+            h.insert(header::CONTENT_LENGTH, v);
+        }
+    }
+    if let Some(rng) = upstream_content_range {
+        if let Ok(v) = rng.parse() {
+            h.insert(header::CONTENT_RANGE, v);
+        }
+    }
+    if let Some(ar) = upstream_accept_ranges {
+        if let Ok(v) = ar.parse() {
+            h.insert(header::ACCEPT_RANGES, v);
+        }
+    }
     Ok(response)
 }
 
