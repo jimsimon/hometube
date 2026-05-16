@@ -480,6 +480,22 @@ pub fn synthesize_manifest(
         {
             return false;
         }
+        // DRC (Dynamic Range Compression) variants share an itag with
+        // the standard variant but are different files with different
+        // Cues byte offsets. The innertube `/player` API only reports
+        // ranges for the non-DRC version, so applying those ranges to
+        // a DRC variant makes shaka read garbage bytes and fail with
+        // WEBM_CUES_ELEMENT_MISSING. Exclude them entirely — DRC is
+        // redundant for our use-case (kids watching on tablets/phones).
+        let is_drc = f.format_id.contains("-drc")
+            || f.format_note
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase().contains("drc"))
+                .unwrap_or(false);
+        if is_drc {
+            return false;
+        }
+
         let vcodec = f.vcodec.as_deref().unwrap_or("none");
         let acodec = f.acodec.as_deref().unwrap_or("none");
         let is_video_only = vcodec != "none" && acodec == "none";
