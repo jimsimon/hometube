@@ -203,7 +203,8 @@ pub fn synthesize_manifest(
         // a DRC variant makes shaka read garbage bytes and fail with
         // WEBM_CUES_ELEMENT_MISSING. Exclude them entirely — DRC is
         // redundant for our use-case (kids watching on tablets/phones).
-        let is_drc = f.format_id.contains("-drc")
+        let is_drc = f.format_id.contains("-drc-")
+            || f.format_id.ends_with("-drc")
             || f.format_note
                 .as_deref()
                 .map(|s| s.to_ascii_lowercase().contains("drc"))

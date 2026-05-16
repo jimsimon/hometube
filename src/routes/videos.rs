@@ -710,17 +710,31 @@ async fn resolve_segment_ranges(
         out.extend(cached);
     }
 
-    // Step 3: Persist any new ranges to the DB for future loads.
-    // Fire-and-forget — don't block the manifest response on DB writes.
-    let pool_clone = pool.clone();
-    let video_id_owned = video_id.to_string();
-    let to_persist: Vec<(String, BoxRanges)> =
-        out.iter().map(|(fid, br)| (fid.clone(), *br)).collect();
-    tokio::spawn(async move {
-        for (format_id, ranges) in to_persist {
-            crate::services::mp4::store(&pool_clone, &video_id_owned, &format_id, ranges).await;
-        }
-    });
+    // Step 3: Persist only newly-resolved ranges (from Step 1) that
+    // weren't already in the DB (from Step 2). This avoids redundant
+    // INSERT OR REPLACE writes on warm-cache manifest loads.
+    let new_from_innertube: Vec<(String, BoxRanges)> = result
+        .formats
+        .iter()
+        .filter_map(|f| {
+            let itag = parse_itag_from_format_id(&f.format_id)?;
+            result.segment_ranges.get(&itag)?;
+            // Only persist if this format_id wasn't already served by
+            // the DB lookup in Step 2 (i.e. it came from segment_ranges).
+            out.get(&f.format_id)
+                .copied()
+                .map(|br| (f.format_id.clone(), br))
+        })
+        .collect();
+    if !new_from_innertube.is_empty() {
+        let pool_clone = pool.clone();
+        let video_id_owned = video_id.to_string();
+        tokio::spawn(async move {
+            for (format_id, ranges) in new_from_innertube {
+                crate::services::mp4::store(&pool_clone, &video_id_owned, &format_id, ranges).await;
+            }
+        });
+    }
 
     out
 }
@@ -734,7 +748,8 @@ fn best_audio_format(formats: &[Format]) -> Option<&Format> {
             let acodec = f.acodec.as_deref().unwrap_or("none");
             let vcodec = f.vcodec.as_deref().unwrap_or("none");
             let is_audio_only = acodec != "none" && vcodec == "none";
-            let is_drc = f.format_id.contains("-drc")
+            let is_drc = f.format_id.contains("-drc-")
+                || f.format_id.ends_with("-drc")
                 || f.format_note
                     .as_deref()
                     .map(|s| s.to_ascii_lowercase().contains("drc"))

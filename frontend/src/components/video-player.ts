@@ -448,7 +448,9 @@ export class VideoPlayer extends LitElement {
     if (this.audioOnly) {
       const audioUrl = this.bestAudioUrl();
       if (audioUrl) {
-        await player.load(audioUrl);
+        // Explicit mimeType prevents shaka from guessing based on the
+        // proxy URL (which has no file extension).
+        await player.load(audioUrl, undefined, "audio/webm");
       }
     } else {
       const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
