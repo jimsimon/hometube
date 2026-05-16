@@ -296,25 +296,65 @@ async fn fetch_and_rewrite_manifest(
     // background probes have populated the cache — gets a proper
     // SegmentBase manifest. The cache is permanent: box offsets
     // describe file structure, not URL state.
-    let probe_inputs: Vec<(String, String)> = result
+    // Split format probe inputs by container so we can dispatch to
+    // the right parser. yt-dlp tags each format's `ext` as either
+    // `mp4` (avc1/mp4a → ISO BMFF box layout, parsed by
+    // [`crate::services::mp4`]) or `webm` (vp9/opus → EBML/matroska
+    // layout, parsed by [`crate::services::webm`]). Storage and the
+    // per-video in-flight dedupe lock are shared between the two
+    // modules, so a video that mixes containers (it almost always
+    // does) gets one combined probe pass instead of two interleaved
+    // ones.
+    let usable = |f: &&crate::services::ytdlp::Format| -> bool {
+        !f.format_id.starts_with("sb")
+            && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
+    };
+    let mp4_inputs: Vec<(String, String)> = result
         .formats
         .iter()
-        .filter(|f| {
-            !f.format_id.starts_with("sb")
-                && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
-        })
+        .filter(usable)
+        .filter(|f| f.ext.as_deref() == Some("mp4"))
         .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
         .collect();
-    let box_ranges = crate::services::mp4::lookup_all(&state.db, video_id, &probe_inputs).await;
-    let missing: Vec<(String, String)> = probe_inputs
+    let webm_inputs: Vec<(String, String)> = result
+        .formats
+        .iter()
+        .filter(usable)
+        .filter(|f| f.ext.as_deref() == Some("webm"))
+        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
+        .collect();
+    let mut all_inputs = mp4_inputs.clone();
+    all_inputs.extend(webm_inputs.clone());
+    // Cache lookup is container-agnostic — both kinds live in the
+    // same `format_box_ranges` table.
+    let box_ranges = crate::services::mp4::lookup_all(&state.db, video_id, &all_inputs).await;
+    let mp4_missing: Vec<(String, String)> = mp4_inputs
         .into_iter()
         .filter(|(fid, _)| !box_ranges.contains_key(fid))
         .collect();
-    if !missing.is_empty() {
+    let webm_missing: Vec<(String, String)> = webm_inputs
+        .into_iter()
+        .filter(|(fid, _)| !box_ranges.contains_key(fid))
+        .collect();
+    // The two spawn calls share an in-flight slot: only the first
+    // one wins. Whichever container happens to have more missing
+    // entries gets the slot first; the loser drops its inputs. That's
+    // acceptable because the next manifest reload will retry the
+    // unprobed half — and after a couple of reloads the cache is hot
+    // for both. Avoiding two parallel workers per video matters more
+    // than maximizing per-load probe coverage.
+    if !mp4_missing.is_empty() {
         crate::services::mp4::spawn_background_probes(
             state.db.clone(),
             video_id.to_string(),
-            missing,
+            mp4_missing,
+        );
+    }
+    if !webm_missing.is_empty() {
+        crate::services::webm::spawn_background_probes(
+            state.db.clone(),
+            video_id.to_string(),
+            webm_missing,
         );
     }
 

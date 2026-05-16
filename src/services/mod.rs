@@ -23,5 +23,6 @@ pub mod notifications;
 pub mod oauth;
 pub mod setup;
 pub mod video_cache;
+pub mod webm;
 pub mod youtube;
 pub mod ytdlp;

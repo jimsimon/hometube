@@ -241,7 +241,11 @@ pub async fn lookup_all(
 /// — well below googlevideo's anti-abuse thresholds in practice
 /// while still completing a cold-load probe sequence (~15 formats)
 /// within ~30 seconds.
-const DEFAULT_PROBE_INTERVAL_MS: u64 = 2_000;
+///
+/// Exposed so the [`crate::services::webm`] module's
+/// `spawn_background_probes` can mirror the same default and respect
+/// the same env var without redefining either.
+pub const DEFAULT_PROBE_INTERVAL_MS: u64 = 2_000;
 
 /// Track which `video_id`s currently have a probe task running, so
 /// concurrent manifest loads of the same video don't spawn duplicate
@@ -253,6 +257,30 @@ static PROBES_IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::
 
 fn probes_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     PROBES_IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Try to claim the in-flight probe slot for `video_id`. Returns
+/// `true` on success (caller should proceed to spawn the worker) or
+/// `false` if another probe worker — for either container — is
+/// already running for this video. The lock is released by
+/// [`release_probe_in_flight`] when the worker exits.
+///
+/// Exposed so [`crate::services::webm::spawn_background_probes`] can
+/// participate in the same per-video dedupe set.
+pub fn register_probe_in_flight(video_id: &str) -> bool {
+    let mut set = match probes_in_flight().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    set.insert(video_id.to_string())
+}
+
+/// Release the in-flight probe slot for `video_id`. Idempotent —
+/// removing an absent entry is a no-op.
+pub fn release_probe_in_flight(video_id: &str) {
+    if let Ok(mut set) = probes_in_flight().lock() {
+        set.remove(video_id);
+    }
 }
 
 /// Spawn a background tokio task that probes each format
@@ -276,15 +304,9 @@ pub fn spawn_background_probes(pool: SqlitePool, video_id: String, formats: Vec<
     if formats.is_empty() {
         return;
     }
-    {
-        let mut set = match probes_in_flight().lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if !set.insert(video_id.clone()) {
-            // Already being probed — drop this call as a no-op.
-            return;
-        }
+    if !register_probe_in_flight(&video_id) {
+        // Already being probed — drop this call as a no-op.
+        return;
     }
 
     let interval_ms = std::env::var("HOMETUBE_PROBE_INTERVAL_MS")
@@ -315,9 +337,7 @@ pub fn spawn_background_probes(pool: SqlitePool, video_id: String, formats: Vec<
             tokio::time::sleep(interval).await;
         }
 
-        if let Ok(mut set) = probes_in_flight().lock() {
-            set.remove(&video_id);
-        }
+        release_probe_in_flight(&video_id);
     });
 }
 
