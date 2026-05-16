@@ -54,8 +54,13 @@ FROM debian:bookworm-slim AS runtime
 #   - python3       : yt-dlp's runtime requirement (single-binary works
 #                     in many cases but a Python interpreter is the
 #                     supported fallback)
+#   - nodejs        : JS runtime for yt-dlp's YouTube signature cipher
+#                     decoding (passed via --js-runtimes node). Adds
+#                     roughly 60 MB to the runtime image; we use the
+#                     bookworm-packaged Node 18 (no npm) rather than a
+#                     NodeSource build to minimise the size hit.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary and static assets.
@@ -73,13 +78,18 @@ RUN curl -fsSL \
 # Install the bgutil PO token provider plugin for yt-dlp. This plugin
 # automatically fetches Proof-of-Origin tokens from the pot-server
 # sidecar container to bypass YouTube's bot detection.
+#
+# yt-dlp's plugin loader scans `<plugin-dir>/<package>/yt_dlp_plugins/`
+# — without the package-wrapper subdirectory the loader silently
+# ignores the plugin. The release zip lays out the inner tree (`yt_dlp_plugins/`)
+# so we extract it under a `bgutil/` wrapper.
 RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/latest" \
-        | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4) \
+        | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/') \
     && curl -fsSL \
         "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${PLUGIN_VERSION}/bgutil-ytdlp-pot-provider.zip" \
         -o /tmp/pot-plugin.zip \
-    && mkdir -p /usr/local/share/yt-dlp-plugins \
-    && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/ \
+    && mkdir -p /usr/local/share/yt-dlp-plugins/bgutil \
+    && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/bgutil/ \
     && rm /tmp/pot-plugin.zip
 
 WORKDIR /app
@@ -89,6 +99,7 @@ VOLUME ["/app/data"]
 ENV STATIC_DIR=/app/static \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
+    YTDLP_COOKIES_PATH=/app/data/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
     DATABASE_PATH=/app/data/app.db
 

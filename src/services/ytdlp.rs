@@ -55,6 +55,22 @@ pub struct Format {
     /// `"https"`, `"http_dash_segments"`, etc.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// BCP-47 language tag for audio formats (e.g. `"en"`, `"es-MX"`).
+    /// Absent on video-only formats.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// yt-dlp's heuristic preference for this language. The "original"
+    /// audio for a video typically scores `10`, with auto-dubs ranking
+    /// lower. Used by [`crate::services::dash::synthesize_manifest`] to
+    /// pick the AdaptationSet to mark as `Role=main`.
+    #[serde(default)]
+    pub language_preference: Option<i64>,
+    /// Free-form note from yt-dlp (e.g. `"original (default), low"`).
+    /// Contains the substring `"original"` for the original-language
+    /// audio track on multi-audio videos — used as a fallback signal
+    /// when `language_preference` is absent.
+    #[serde(default)]
+    pub format_note: Option<String>,
 }
 
 /// One thumbnail variant.
@@ -80,45 +96,145 @@ pub struct SubtitleTrack {
 }
 
 /// Top-level parsed `--dump-json` output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `channel_title` is populated from whichever of yt-dlp's three
+/// channel-name keys is present, in priority order:
+/// `channel_title` → `channel` → `uploader`. Modern yt-dlp emits both
+/// `channel` and `uploader` simultaneously (usually identical), so we
+/// can't use serde's `alias` mechanism — it errors on duplicate keys.
+/// Instead we deserialize via [`ExtractResultRaw`] and fold the three
+/// keys together in [`From`].
+#[derive(Debug, Clone, Serialize)]
 pub struct ExtractResult {
     pub id: String,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub channel_id: Option<String>,
-    #[serde(default, alias = "channel", alias = "uploader")]
     pub channel_title: Option<String>,
-    #[serde(default)]
     pub duration: Option<f64>,
-    #[serde(default)]
     pub thumbnails: Vec<Thumbnail>,
-    #[serde(default)]
     pub thumbnail: Option<String>,
-    #[serde(default)]
     pub formats: Vec<Format>,
     /// User-uploaded subtitles, keyed by language code.
-    #[serde(default)]
     pub subtitles: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     /// Auto-generated captions, keyed by language code.
-    #[serde(default)]
     pub automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     /// Some formats expose a single DASH manifest URL alongside the
     /// per-format URLs; yt-dlp also exposes it at top level.
-    #[serde(default)]
     pub manifest_url: Option<String>,
+    /// SegmentBase byte ranges parsed from YouTube's innertube
+    /// `/player` response (via yt-dlp `--write-pages`). Keyed by itag
+    /// (the integer format identifier YouTube assigns). Each value
+    /// provides the inclusive byte ranges for the initialization
+    /// segment (moov / EBML header) and the segment index
+    /// (sidx / Cues). These are used by the DASH synthesizer
+    /// to emit `<SegmentBase indexRange>` + `<Initialization range>`.
+    ///
+    /// Populated at extract time and immediately cached in
+    /// `format_box_ranges` so probing is never needed.
+    #[serde(default)]
+    pub segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+}
+
+/// Inclusive byte ranges for a single adaptive format's SegmentBase,
+/// as reported by YouTube's innertube `/player` API.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SegmentRanges {
+    pub init_start: u64,
+    pub init_end: u64,
+    pub index_start: u64,
+    pub index_end: u64,
+}
+
+/// Raw shape of yt-dlp's `--dump-json` output. Used purely as a
+/// deserialization target; consumers see the canonicalised
+/// [`ExtractResult`].
+#[derive(Debug, Deserialize)]
+struct ExtractResultRaw {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    channel_title: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    thumbnails: Vec<Thumbnail>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    formats: Vec<Format>,
+    #[serde(default)]
+    subtitles: std::collections::HashMap<String, Vec<SubtitleTrack>>,
+    #[serde(default)]
+    automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
+    #[serde(default)]
+    manifest_url: Option<String>,
+    #[serde(default)]
+    segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+}
+
+impl From<ExtractResultRaw> for ExtractResult {
+    fn from(raw: ExtractResultRaw) -> Self {
+        // Prefer the most canonical key. `channel_title` is the only
+        // one that's guaranteed unambiguous when present; `channel` is
+        // the modern default; `uploader` is the legacy fallback.
+        let channel_title = raw.channel_title.or(raw.channel).or(raw.uploader);
+        ExtractResult {
+            id: raw.id,
+            title: raw.title,
+            channel_id: raw.channel_id,
+            channel_title,
+            duration: raw.duration,
+            thumbnails: raw.thumbnails,
+            thumbnail: raw.thumbnail,
+            formats: raw.formats,
+            subtitles: raw.subtitles,
+            automatic_captions: raw.automatic_captions,
+            manifest_url: raw.manifest_url,
+            segment_ranges: raw.segment_ranges,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtractResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ExtractResultRaw::deserialize(deserializer).map(Into::into)
+    }
 }
 
 /// Run `yt-dlp --dump-json --no-playlist <video_url>` and parse the
 /// result. Times out after [`DEFAULT_TIMEOUT`].
+///
+/// Additionally runs with `--write-pages` to capture the raw innertube
+/// `/player` API response, from which we extract `initRange` and
+/// `indexRange` for each adaptive format. These byte ranges let us
+/// emit `<SegmentBase indexRange>` + `<Initialization range>` in the
+/// synthesized DASH manifest without probing the upstream files.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
+
+    // yt-dlp's --write-pages dumps all HTTP responses to the working
+    // directory. Use a dedicated temp dir so we can find the player
+    // dumps without polluting the project root.
+    let pages_dir = tempdir_for_pages(video_id);
+    tokio::fs::create_dir_all(&pages_dir)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("creating pages tmp: {e}")))?;
+
     let mut cmd = Command::new(&cfg.ytdlp_path);
     cmd.arg("--dump-json")
         .arg("--no-playlist")
         .arg("--no-warnings")
-        .arg("--skip-download");
-    append_youtube_args(&mut cmd);
+        .arg("--skip-download")
+        .arg("--write-pages")
+        .current_dir(&pages_dir);
+    let yt_args_guard = append_youtube_args(&mut cmd);
     cmd.arg(&url);
     debug!(?cmd, %video_id, "running yt-dlp");
 
@@ -130,6 +246,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!(%video_id, %stderr, "yt-dlp failed");
+        let _ = tokio::fs::remove_dir_all(&pages_dir).await;
         return Err(AppError::Other(anyhow::anyhow!(
             "yt-dlp exited with status {}: {}",
             output.status,
@@ -139,9 +256,125 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("yt-dlp stdout not UTF-8: {e}")))?;
-    let result: ExtractResult = serde_json::from_str(&stdout)
+    let mut result: ExtractResult = serde_json::from_str(&stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("parsing yt-dlp JSON: {e}")))?;
+
+    // Parse SegmentBase ranges from the innertube player dump(s).
+    result.segment_ranges = parse_player_page_dumps(&pages_dir).await;
+    if result.segment_ranges.is_empty() {
+        debug!(%video_id, "no segment ranges found in player dumps");
+    } else {
+        debug!(%video_id, count = result.segment_ranges.len(), "parsed segment ranges from player dump");
+    }
+
+    // Cleanup pages temp dir (best-effort).
+    let _ = tokio::fs::remove_dir_all(&pages_dir).await;
+
+    // Fold any rotated session cookies (e.g. `__Secure-1PSIDTS`) back
+    // into the canonical cookie file, but only if every original cookie
+    // name still survived yt-dlp's cookiejar rewrite.
+    yt_args_guard.persist_cookies_if_safe().await;
     Ok(result)
+}
+
+/// Temp directory for yt-dlp's `--write-pages` output.
+fn tempdir_for_pages(video_id: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    let nonce: u64 = rand::random();
+    p.push(format!("hometube-pages-{video_id}-{nonce:x}"));
+    p
+}
+
+/// Scan a directory of yt-dlp `--write-pages` dumps for innertube
+/// `/player` responses and extract `initRange` / `indexRange` for
+/// each adaptive format.
+///
+/// Returns a map from itag (YouTube's integer format identifier) to
+/// the inclusive byte ranges for the initialization segment and the
+/// segment index. Missing or malformed entries are silently skipped.
+async fn parse_player_page_dumps(
+    dir: &std::path::Path,
+) -> std::collections::HashMap<i64, SegmentRanges> {
+    let mut ranges = std::collections::HashMap::new();
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return ranges,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        // yt-dlp names player API dumps with "youtubei_v1_player" in
+        // the filename.
+        if !name.contains("youtubei_v1_player") {
+            continue;
+        }
+        let body = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let json: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let formats = json
+            .get("streamingData")
+            .and_then(|sd| sd.get("adaptiveFormats"))
+            .and_then(|af| af.as_array());
+        let Some(formats) = formats else { continue };
+        for fmt in formats {
+            let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some(init_range) = fmt.get("initRange") else {
+                continue;
+            };
+            let Some(index_range) = fmt.get("indexRange") else {
+                continue;
+            };
+            let Some(init_start) = init_range
+                .get("start")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(init_end) = init_range
+                .get("end")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(index_start) = index_range
+                .get("start")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(index_end) = index_range
+                .get("end")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            ranges.insert(
+                itag,
+                SegmentRanges {
+                    init_start,
+                    init_end,
+                    index_start,
+                    index_end,
+                },
+            );
+        }
+    }
+    ranges
 }
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
@@ -171,7 +404,7 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
         .arg("--no-warnings")
         .arg("-o")
         .arg(&template);
-    append_youtube_args(&mut cmd);
+    let yt_args_guard = append_youtube_args(&mut cmd);
     cmd.arg(&url);
     debug!(?cmd, %video_id, %lang, "running yt-dlp for subtitles");
 
@@ -223,6 +456,9 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
     };
 
     let _ = tokio::fs::remove_dir_all(&tmp).await;
+    // Fold any rotated session cookies back into the canonical file
+    // (gated on the survivor check inside the guard).
+    yt_args_guard.persist_cookies_if_safe().await;
     Ok(body)
 }
 
@@ -258,19 +494,152 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Guard returned by [`append_youtube_args`] that owns any per-invocation
+/// temp files (currently just the throwaway cookies copy). Drop it
+/// *after* `cmd.output().await` so yt-dlp can finish reading the file.
+///
+/// On a successful run, call [`Self::persist_cookies_if_safe`] before
+/// dropping to fold yt-dlp's refreshed session cookies (e.g.
+/// `__Secure-1PSIDTS`, `SIDCC`) back into the canonical cookies file.
+/// The persist step is gated on a survivor check — if any of the cookies
+/// captured at startup are missing from the rewritten jar, we keep the
+/// original instead of letting yt-dlp's cookiejar pruning erode auth.
+pub struct YoutubeArgsGuard {
+    cookies_tempfile: Option<std::path::PathBuf>,
+    /// Snapshot of cookie names present in the file we passed to
+    /// yt-dlp (i.e. read from the tempfile copy itself, not the
+    /// canonical source). Used as the survivor list for persistence.
+    original_cookie_names: std::collections::HashSet<String>,
+    /// Path of the canonical cookies file (where we'd persist back to).
+    canonical_cookies_path: std::path::PathBuf,
+}
+
+impl YoutubeArgsGuard {
+    /// Read yt-dlp's rewritten cookies tempfile and, if every cookie
+    /// name we started with is still present, write the rewritten
+    /// content back to the canonical cookies file. This captures the
+    /// freshness benefit of yt-dlp's auto-rotation of session cookies
+    /// (`__Secure-1PSIDTS`, `SIDCC`, etc.) while skipping rewrites that
+    /// would drop auth cookies.
+    ///
+    /// Each invocation writes to its own per-call staging filename
+    /// (`cookies.txt.new.<nonce>`) so concurrent extractions cannot
+    /// stomp on each other's staged content before the atomic rename.
+    ///
+    /// Errors and "auth cookie missing" cases are logged at WARN and
+    /// the canonical file is left untouched.
+    pub async fn persist_cookies_if_safe(&self) {
+        let Some(temp) = self.cookies_tempfile.as_ref() else {
+            return;
+        };
+        let new_content = match tokio::fs::read_to_string(temp).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to read rewritten cookies tempfile");
+                return;
+            }
+        };
+        let new_names = parse_cookie_names(&new_content);
+        let missing: Vec<&str> = self
+            .original_cookie_names
+            .iter()
+            .filter(|n| !new_names.contains(n.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+        if !missing.is_empty() {
+            warn!(
+                missing = ?missing,
+                "yt-dlp dropped cookies during rewrite; keeping canonical file unchanged"
+            );
+            return;
+        }
+        // All original cookie names survived; persist the refreshed
+        // jar. Stage to a unique-per-invocation filename so concurrent
+        // runs cannot overwrite each other's staged content, then
+        // atomically rename onto the canonical path.
+        let dest = &self.canonical_cookies_path;
+        let nonce: u64 = rand::random();
+        let staging = dest.with_extension(format!("txt.new.{nonce:x}"));
+        if let Err(e) = tokio::fs::write(&staging, &new_content).await {
+            warn!(error = %e, "failed to write staged cookies file");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                tokio::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)).await;
+        }
+        if let Err(e) = tokio::fs::rename(&staging, dest).await {
+            warn!(error = %e, "failed to atomically replace canonical cookies file");
+            let _ = tokio::fs::remove_file(&staging).await;
+            return;
+        }
+        debug!("persisted refreshed cookies from yt-dlp run");
+    }
+}
+
+impl Drop for YoutubeArgsGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.cookies_tempfile.take() {
+            // Best-effort cleanup; ignore errors (file may already be
+            // gone if yt-dlp deleted it, or we're shutting down). This
+            // runs in `drop` which can't be async, so a sync remove is
+            // unavoidable here — the file is small (<10 KB) and on the
+            // tempdir's filesystem, so the call is effectively free.
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Extract cookie names from a Netscape/Mozilla cookies.txt body. Each
+/// non-comment, non-blank line has 7 tab-separated fields, with the
+/// cookie name in the 6th column.
+fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for line in body.lines() {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() >= 7 {
+            names.insert(fields[5].to_string());
+        }
+    }
+    names
+}
+
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
 /// 2. `--extractor-args youtube-bgutilhttp:base_url=<url>` — PO token
 ///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
 ///    Compose sidecar at `http://pot-server:4416`).
-/// 3. `--cookies <path>` — if a cookies file exists on disk.
-fn append_youtube_args(cmd: &mut Command) {
-    // PO token plugin directory.
+/// 3. `--cookies <path>` — if a cookies file exists on disk. The file
+///    is *copied* to a tempfile first because yt-dlp rewrites the
+///    cookie jar in place after each run, only persisting the cookies
+///    it actually used. That gradually erodes the canonical cookie
+///    set (auth cookies disappear after a few invocations) and breaks
+///    authentication. The tempfile is owned by the returned guard.
+/// 4. `--js-runtimes node` — yt-dlp needs a JS runtime to decode
+///    YouTube's signature cipher; configurable via the
+///    `YTDLP_JS_RUNTIME` env var (defaults to `node`).
+fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
+    // PO token plugin directory. Must be absolute because the caller
+    // may set `.current_dir()` to a temp directory for `--write-pages`.
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
         .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());
-    if std::path::Path::new(&plugin_dir).exists() {
-        cmd.arg("--plugin-dirs").arg(&plugin_dir);
+    let plugin_path = std::path::Path::new(&plugin_dir);
+    let plugin_path_abs = if plugin_path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(plugin_path))
+            .unwrap_or_else(|_| plugin_path.to_path_buf())
+    } else {
+        plugin_path.to_path_buf()
+    };
+    if plugin_path_abs.exists() {
+        cmd.arg("--plugin-dirs").arg(&plugin_path_abs);
     }
 
     // PO token server URL for the bgutil plugin.
@@ -281,11 +650,84 @@ fn append_youtube_args(cmd: &mut Command) {
             .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
     }
 
-    // Cookies file for authenticated YouTube access.
+    // YouTube extractor tuning. We deliberately request multiple player
+    // clients so yt-dlp returns the *union* of formats they expose:
+    //
+    // - `default` keeps yt-dlp's built-in client list as a baseline.
+    // - `ios` returns DASH-segmented formats *without* requiring a PO
+    //   token — those URLs are the most reliable path for playback
+    //   because Google's CDN doesn't 403 them the way it 403s
+    //   PoT-pipelined HLS segments.
+    // - `web` is the canonical client; it surfaces DASH manifests when
+    //   it can authenticate via cookies + the bgutil PoT plugin, and
+    //   gives us the richest format pool.
+    //
+    // `formats=duplicate` asks yt-dlp to keep adaptive *and*
+    // progressive variants in the output, even when they overlap. That
+    // gives `synthesize_manifest` more `https`-protocol formats to
+    // pick from when no upstream DASH manifest is available, and lets
+    // the rewriter prefer real DASH when it is.
+    //
+    // Configurable via the `YTDLP_PLAYER_CLIENT` env var so production
+    // deployments can pin to a single client if they discover one
+    // works better for their cookie set / IP geolocation.
+    let player_clients =
+        std::env::var("YTDLP_PLAYER_CLIENT").unwrap_or_else(|_| "default,ios,web".to_string());
+    cmd.arg("--extractor-args").arg(format!(
+        "youtube:player_client={player_clients};formats=duplicate"
+    ));
+
+    // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
+    // doesn't erode the canonical jar. Snapshot the cookie names from
+    // the *tempfile we just wrote* (not the canonical source) so the
+    // survivor-check is consistent with what yt-dlp will actually see,
+    // even if the canonical file is mutated concurrently.
+    let mut cookies_tempfile: Option<std::path::PathBuf> = None;
+    let mut original_cookie_names = std::collections::HashSet::new();
     let cookies_path = cookies_file_path();
     if cookies_path.exists() {
-        cmd.arg("--cookies").arg(&cookies_path);
+        match copy_cookies_to_tempfile(&cookies_path) {
+            Ok(temp) => {
+                if let Ok(body) = std::fs::read_to_string(&temp) {
+                    original_cookie_names = parse_cookie_names(&body);
+                }
+                cmd.arg("--cookies").arg(&temp);
+                cookies_tempfile = Some(temp);
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to copy cookies to tempfile; running without --cookies");
+            }
+        }
     }
+
+    // JS runtime for YouTube signature cipher decoding. yt-dlp's default
+    // (`deno`) is broken on some systems, and YouTube extraction without
+    // a JS runtime has been deprecated upstream.
+    let js_runtime = std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "node".to_string());
+    if !js_runtime.is_empty() {
+        cmd.arg("--js-runtimes").arg(&js_runtime);
+    }
+
+    YoutubeArgsGuard {
+        cookies_tempfile,
+        original_cookie_names,
+        canonical_cookies_path: cookies_path,
+    }
+}
+
+/// Copy the canonical cookies file to a unique tempfile and return the
+/// new path. Permissions are restricted to the current user on Unix.
+fn copy_cookies_to_tempfile(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let nonce: u64 = rand::random();
+    let mut tmp = std::env::temp_dir();
+    tmp.push(format!("hometube-ytdlp-cookies-{nonce:x}.txt"));
+    std::fs::copy(src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(tmp)
 }
 
 fn tempdir_for_video(video_id: &str) -> std::path::PathBuf {

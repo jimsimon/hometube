@@ -1,4 +1,4 @@
-//! Video metadata + DASH manifest + segment-proxy routes.
+//! Video metadata + DASH manifest + format-proxy routes.
 //!
 //! Most of the heavy lifting lives in `services::ytdlp`, `services::video_cache`,
 //! and `services::dash`. The handlers here glue access control, the
@@ -7,15 +7,13 @@
 //! Routes:
 //! - `GET /api/videos/:videoId` — metadata + child access check
 //! - `GET /api/videos/:videoId/stream` — JSON metadata (formats list + manifest text)
-//! - `GET /api/videos/:videoId/stream/manifest.mpd` — rewritten DASH XML
+//! - `GET /api/videos/:videoId/stream/manifest.mpd` — synthesized DASH XML
 //! - `GET /api/videos/:videoId/captions` — caption track list
 //! - `GET /api/videos/:videoId/captions/:lang` — WebVTT track
-//! - `GET /api/proxy/segment` — signed DASH segment proxy
-//! - `GET /api/proxy/audio` — audio-only stream proxy
+//! - `GET /api/proxy/format` — signed format byte-range proxy
 //! - `GET /api/proxy/thumbnail/:videoId` — thumbnail proxy
 
 use std::collections::HashMap;
-use std::path::{Path as FsPath, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -26,12 +24,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
@@ -59,11 +56,20 @@ pub struct VideoMetadata {
 #[derive(Debug, Serialize)]
 pub struct StreamResponse {
     pub video_id: String,
-    /// Rewritten DASH manifest text. The XML references segment URLs
-    /// pointing at our `/api/proxy/segment` endpoint.
+    /// Rewritten DASH manifest XML. References our proxy endpoints
+    /// rather than `*.googlevideo.com` directly.
     pub manifest: Option<String>,
+    /// Always `"dash"` when `manifest` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_type: Option<&'static str>,
     /// Filtered list of progressive formats (max-quality cap applied).
     pub formats: Vec<Format>,
+    /// Pre-signed proxy URL for audio-only mode. Points at the
+    /// highest-bitrate opus audio-only format (excluding DRC
+    /// variants). The frontend uses this directly without needing to
+    /// generate an HMAC signature client-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_proxy_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,36 +143,30 @@ pub async fn get_stream(
         .cloned()
         .collect();
 
-    // If there's a DASH manifest URL on the result, fetch + rewrite it.
-    let manifest_url = result
-        .manifest_url
-        .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
-    let manifest = match manifest_url {
-        Some(url) => {
-            let secret = dash::ensure_proxy_secret(&state.db).await?;
-            match reqwest::get(&url).await {
-                Ok(res) if res.status().is_success() => {
-                    let body = res.text().await.unwrap_or_default();
-                    Some(dash::rewrite_manifest(&secret, &video_id, &body)?)
-                }
-                Ok(res) => {
-                    warn!(%url, status = %res.status(), "failed to fetch DASH manifest");
-                    None
-                }
-                Err(err) => {
-                    warn!(%url, %err, "failed to fetch DASH manifest");
-                    None
-                }
+    // Fetch + rewrite the manifest (always DASH).
+    let (manifest, manifest_type) =
+        match fetch_and_rewrite_manifest(&state, &video_id, &result).await {
+            Ok(Some(body)) => (Some(body), Some("dash")),
+            Ok(None) => (None, None),
+            Err(err) => {
+                warn!(%video_id, %err, "failed to fetch upstream manifest");
+                (None, None)
             }
-        }
-        None => None,
+        };
+
+    // Pick the best audio-only format and generate a pre-signed proxy URL.
+    let audio_proxy_url = {
+        let secret = dash::ensure_proxy_secret(&state.db).await?;
+        best_audio_format(&formats)
+            .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
     };
 
     Ok(Json(StreamResponse {
         video_id,
         manifest,
+        manifest_type,
         formats,
+        audio_proxy_url,
     }))
 }
 
@@ -175,9 +175,9 @@ pub async fn get_stream(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
-/// DASH XML body directly. vidstack's dash.js provider fetches this URL
-/// to bootstrap playback; we cannot reuse the JSON `/stream` endpoint
-/// because it returns the manifest as a string field inside JSON.
+/// DASH manifest body directly. The player fetches this URL to bootstrap
+/// playback; we cannot reuse the JSON `/stream` endpoint because that
+/// embeds the manifest text inside a JSON envelope.
 pub async fn get_stream_manifest(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -189,20 +189,9 @@ pub async fn get_stream_manifest(
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let manifest_url = result
-        .manifest_url
-        .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
-    let url = manifest_url.ok_or(AppError::NotFound)?;
-
-    let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let res = reqwest::get(&url).await?;
-    if !res.status().is_success() {
-        warn!(%url, status = %res.status(), "non-2xx fetching DASH manifest");
-        return Err(AppError::NotFound);
-    }
-    let body = res.text().await?;
-    let rewritten = dash::rewrite_manifest(&secret, &video_id, &body)?;
+    let body = fetch_and_rewrite_manifest(&state, &video_id, &result)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -210,13 +199,69 @@ pub async fn get_stream_manifest(
         "application/dash+xml".parse().unwrap(),
     );
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    Ok((StatusCode::OK, headers, rewritten).into_response())
+    Ok((StatusCode::OK, headers, body).into_response())
+}
+
+/// Resolve the playable DASH manifest for a video.
+///
+/// Builds a synthesized MPD from the `https`-protocol per-format URLs
+/// in `result.formats[]`. Each `<Representation>` points at a
+/// `<BaseURL>` through `/api/proxy/format`. The player drives playback
+/// via byte-range requests.
+///
+/// For each Representation we surface, we emit a `<SegmentBase
+/// indexRange>` block — that lets the player learn every
+/// Representation's segment layout from a single small byte-range
+/// fetch instead of empirically probing each one.
+///
+/// Primary source: `result.segment_ranges` — parsed from the
+/// innertube `/player` API dump at extract time. These are keyed by
+/// itag (integer) so we resolve each format's itag and look it up.
+/// The result is cached in `format_box_ranges` so subsequent
+/// manifest loads skip re-extraction entirely.
+///
+/// Fallback: `format_box_ranges` SQLite table (populated on prior
+/// extractions or by the legacy background-probe path).
+///
+/// Returns `Ok(None)` when no manifest can be produced.
+async fn fetch_and_rewrite_manifest(
+    state: &AppState,
+    video_id: &str,
+    result: &ExtractResult,
+) -> AppResult<Option<String>> {
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let box_ranges = resolve_segment_ranges(&state.db, video_id, result).await;
+
+    if let Some(synthetic) = dash::synthesize_manifest(
+        &secret,
+        video_id,
+        &result.formats,
+        result.duration,
+        &box_ranges,
+    ) {
+        return Ok(Some(synthetic));
+    }
+
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
 // /api/videos/:videoId/captions
 // ---------------------------------------------------------------------------
 
+/// `GET /api/videos/:videoId/captions` — list user-uploaded subtitle
+/// tracks.
+///
+/// **Auto-generated captions are deliberately *not* surfaced.** YouTube
+/// auto-translates user captions into ~100 target languages and returns
+/// every one in `automatic_captions`. If the frontend renders them all
+/// as `<track>` elements the browser eagerly fetches each, which
+/// instantly trips YouTube's `caption fetch returned non-2xx
+/// status=429` rate limit and cascades into the bot-check wall when
+/// the proxy falls back to spawning yt-dlp. The auto-translated
+/// captions are also low quality compared to the source. Users who
+/// genuinely need a translation can request it explicitly via the
+/// per-language endpoint.
 pub async fn list_captions(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -237,13 +282,22 @@ pub async fn list_captions(
             auto_generated: false,
         })
         .collect();
+
+    // Include the original-language auto-generated caption track.
+    // YouTube tags it with a `-orig` suffix (e.g. `en-orig`). We only
+    // surface this one — NOT the 100+ auto-translated variants which
+    // trigger 429 rate limits when the player eagerly fetches them.
     for lang in result.automatic_captions.keys() {
-        tracks.push(CaptionTrack {
-            lang: lang.clone(),
-            name: None,
-            auto_generated: true,
-        });
+        if lang.ends_with("-orig") {
+            let display_lang = lang.strip_suffix("-orig").unwrap_or(lang);
+            tracks.push(CaptionTrack {
+                lang: lang.clone(),
+                name: Some(format!("{display_lang} (auto)")),
+                auto_generated: true,
+            });
+        }
     }
+
     Ok(Json(tracks))
 }
 
@@ -255,7 +309,12 @@ pub async fn list_captions(
 /// 1. In-memory `(video_id, lang)` cache (1 hour TTL).
 /// 2. yt-dlp metadata: if we already have a `.vtt` URL, fetch it.
 /// 3. Re-invoke yt-dlp with `--convert-subs vtt` so any non-VTT source
-///    (SRV1/SRV3/TTML) gets converted on the server.
+///    (SRV1/SRV3/TTML) gets converted on the server. Only used when
+///    step 2 had no URL at all — *not* when the upstream returned a
+///    transient error like 429. Spawning yt-dlp on a 429 just hits
+///    YouTube's rate limit again from a different code path and ends
+///    up surfacing the bot-check wall to the user, so we propagate
+///    rate-limit / forbidden statuses to the caller instead.
 ///
 /// On success the converted body is cached in memory so repeated player
 /// "select track" actions don't re-hit yt-dlp.
@@ -295,7 +354,11 @@ pub async fn get_caption(
         })
         .cloned();
 
-    // Fast path: yt-dlp metadata exposed a vtt URL.
+    // Fast path: yt-dlp metadata exposed a vtt URL. Only fall through
+    // to the yt-dlp slow path on transport errors or when the URL
+    // wasn't a vtt — non-2xx responses (especially 429) are
+    // propagated, *not* retried, because yt-dlp shares the same
+    // upstream rate limit and amplifies the problem.
     if let Some(track) = &track {
         if track.ext == "vtt" {
             match reqwest::get(&track.url).await {
@@ -305,32 +368,81 @@ pub async fn get_caption(
                         return Ok(vtt_response(body));
                     }
                 }
-                Ok(res) => warn!(status = %res.status(), "caption fetch returned non-2xx"),
+                Ok(res) => {
+                    let status = res.status();
+                    warn!(%status, %lang, "caption fetch returned non-2xx; propagating");
+                    let body = res.bytes().await.unwrap_or_default();
+                    let mut response = Response::new(Body::from(body));
+                    *response.status_mut() = status;
+                    return Ok(response);
+                }
                 Err(err) => warn!(%err, "caption fetch failed"),
             }
         }
     }
 
-    // Slow path: ask yt-dlp to download + convert to vtt.
+    // Slow path: ask yt-dlp to download + convert to vtt. Only reached
+    // when no vtt URL was available *or* the fast path hit a transport
+    // error (DNS, TLS, connection-refused) — explicitly *not* on 429,
+    // which we propagated above.
     let body = crate::services::ytdlp::extract_subtitles(&state.config, &video_id, &lang).await?;
     caption_cache_set(cache_key, body.clone()).await;
     Ok(vtt_response(body))
 }
 
-/// Build the `text/vtt` HTTP response.
+/// Build the `text/vtt` HTTP response. Strips YouTube's inline cue
+/// positioning (`align:start position:0%`) so captions render centered
+/// with default browser placement.
 fn vtt_response(body: String) -> Response {
-    let mut response = (StatusCode::OK, body).into_response();
+    let cleaned = strip_vtt_positioning(&body);
+    let mut response = (StatusCode::OK, cleaned).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         "text/vtt; charset=utf-8".parse().unwrap(),
     );
-    // Help vidstack cache cross-track switches by allowing a short
+    // Help the player cache cross-track switches by allowing a short
     // browser cache lifetime.
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         "private, max-age=3600".parse().unwrap(),
     );
     response
+}
+
+/// Remove inline cue settings (e.g. `align:start position:0%`) from
+/// WebVTT timing lines. YouTube's auto-generated captions force
+/// left-alignment and 0% position, which looks off-center in a
+/// standard player. Stripping them lets the browser use the default
+/// centered presentation.
+///
+/// A VTT timing line looks like:
+/// ```text
+/// 00:00:02.950 --> 00:00:05.349 align:start position:0%
+/// ```
+/// We keep the timestamps and drop everything after them.
+fn strip_vtt_positioning(vtt: &str) -> String {
+    let mut out = String::with_capacity(vtt.len());
+    for line in vtt.lines() {
+        if line.contains("-->") {
+            // Timing line: keep only the "START --> END" portion.
+            if let Some(arrow_end) = line.find("-->") {
+                // Find end of the end-timestamp (next space after "-->")
+                let after_arrow = &line[arrow_end + 3..];
+                let end_ts_end = after_arrow
+                    .trim_start()
+                    .find([' ', '\t'])
+                    .map(|i| arrow_end + 3 + after_arrow.len() - after_arrow.trim_start().len() + i)
+                    .unwrap_or(line.len());
+                out.push_str(&line[..end_ts_end]);
+            } else {
+                out.push_str(line);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -374,207 +486,59 @@ async fn caption_cache_set(key: (String, String), body: String) {
 }
 
 // ---------------------------------------------------------------------------
-// /api/proxy/segment
+// /api/proxy/thumbnail
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct SegmentQuery {
+pub struct FormatQuery {
     pub video_id: String,
     pub format: String,
-    pub sq: String,
     pub sig: String,
 }
 
-/// `GET /api/proxy/segment` — serve a DASH segment, signed.
+/// `GET /api/proxy/format` — proxy a single yt-dlp format URL.
 ///
-/// On hit: stream from disk. On miss: fetch from googlevideo.com,
-/// tee-write to disk, stream to the client.
-pub async fn get_segment(
+/// Used by the synthesized DASH manifest (see [`dash::synthesize_manifest`])
+/// where each `<Representation>` points at a `<BaseURL>` of the form
+/// `/api/proxy/format?video_id=X&format=Y&sig=Z`. the player then issues
+/// byte-range requests against that URL and we stream the bytes
+/// through from YouTube's CDN with `Range:` pass-through.
+///
+/// This endpoint is deliberately *not* segmented: there is no `sq=`,
+/// no per-segment caching, and no upstream URL reconstruction. The
+/// upstream URL is whatever yt-dlp surfaced for the format, and we
+/// fetch it verbatim. That sidesteps the broken HLS-PoT segment path
+/// (which gets 403'd by Google's CDN) by relying on the more reliable
+/// `https`-protocol per-format URLs.
+pub async fn get_format(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<SegmentQuery>,
+    Query(q): Query<FormatQuery>,
 ) -> AppResult<Response> {
     let secret = dash::ensure_proxy_secret(&state.db).await?;
     let params: Vec<(&str, String)> = vec![
         ("video_id", q.video_id.clone()),
         ("format", q.format.clone()),
-        ("sq", q.sq.clone()),
     ];
     if !dash::verify_query(&secret, &params, &q.sig) {
         return Err(AppError::Forbidden);
-    }
-
-    // Disk-cache hit?
-    if let Some((path, size)) =
-        lookup_cached_segment(&state.db, &q.video_id, &q.format, &q.sq).await?
-    {
-        debug!(video = %q.video_id, fmt = %q.format, sq = %q.sq, "segment cache hit");
-        crate::services::cron::CACHE_HIT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return serve_file(&path, size, &headers).await;
-    }
-    crate::services::cron::CACHE_MISS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    // Miss: resolve the upstream URL via the cached metadata.
-    let cache = video_cache(&state);
-    let result = cache
-        .get_or_extract(&state.db, &state.config, &q.video_id)
-        .await?;
-    let upstream = build_upstream_segment_url(&result, &q.format, &q.sq).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "no upstream URL for video {} format {}",
-            q.video_id, q.format
-        ))
-    })?;
-
-    // Fetch from upstream. For the miss path we read the whole segment
-    // into memory (2-5 MB typical), write it to disk, and serve. Range
-    // requests are passed through so seek-while-uncached still works
-    // even though we won't cache a partial response.
-    let is_range = headers.get(header::RANGE).is_some();
-    let mut req = reqwest::Client::new().get(&upstream);
-    if let Some(range) = headers.get(header::RANGE) {
-        if let Ok(s) = range.to_str() {
-            req = req.header(header::RANGE, s);
-        }
-    }
-    let res = req.send().await.map_err(AppError::Http)?;
-    let status = res.status();
-    let content_type = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
-    if !status.is_success() || is_range {
-        // Either the upstream errored or this is a range request — pass
-        // through without caching.
-        let stream = res.bytes_stream().map_err(std::io::Error::other);
-        let body = Body::from_stream(stream);
-        let mut response = Response::new(body);
-        *response.status_mut() = status;
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-        return Ok(response);
-    }
-
-    let bytes = res.bytes().await.map_err(AppError::Http)?;
-    let cache_path = segment_cache_path(&state.config, &q.video_id, &q.format, &q.sq);
-    if let Err(err) = write_segment(&cache_path, &bytes).await {
-        warn!(error = %err, "segment cache write failed");
-    } else {
-        let _ = register_cached_segment(
-            &state.db,
-            &q.video_id,
-            &q.format,
-            &q.sq,
-            &cache_path,
-            bytes.len() as i64,
-        )
-        .await;
-    }
-
-    let body = Body::from(bytes);
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-    Ok(response)
-}
-
-// ---------------------------------------------------------------------------
-// /api/proxy/audio + /api/proxy/thumbnail
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct AudioQuery {
-    pub video_id: String,
-    pub format: String,
-    /// Optional DASH segment sequence number. When present the audio
-    /// stream is served segment-by-segment (mirroring the `/api/proxy/segment`
-    /// flow) so each segment is independently cacheable. When absent
-    /// the full audio file is streamed without disk caching.
-    #[serde(default)]
-    pub sq: Option<String>,
-    pub sig: String,
-}
-
-/// `GET /api/proxy/audio` — proxy an audio-only stream.
-///
-/// When `sq=` is present the request is treated as a DASH audio segment
-/// (cached on disk by `(video_id, format_id, sq)`, signed over the same
-/// triple). Otherwise the request is for the full audio URL of the
-/// chosen format and is streamed through without caching — the
-/// signature in that case is over `(video_id, format)` only.
-pub async fn get_audio(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<AudioQuery>,
-) -> AppResult<Response> {
-    let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let mut params: Vec<(&str, String)> = vec![
-        ("video_id", q.video_id.clone()),
-        ("format", q.format.clone()),
-    ];
-    if let Some(sq) = &q.sq {
-        params.push(("sq", sq.clone()));
-    }
-    if !dash::verify_query(&secret, &params, &q.sig) {
-        return Err(AppError::Forbidden);
-    }
-
-    // Segmented path: identical caching strategy to /api/proxy/segment.
-    if let Some(sq) = &q.sq {
-        if let Some((path, size)) =
-            lookup_cached_segment(&state.db, &q.video_id, &q.format, sq).await?
-        {
-            debug!(video = %q.video_id, fmt = %q.format, sq = %sq, "audio segment cache hit");
-            crate::services::cron::CACHE_HIT_COUNTER
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return serve_file(&path, size, &headers).await;
-        }
-        crate::services::cron::CACHE_MISS_COUNTER
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     let cache = video_cache(&state);
     let result = cache
         .get_or_extract(&state.db, &state.config, &q.video_id)
         .await?;
-
-    // If no explicit format requested, default to the highest-bitrate
-    // audio-only format available so the player can transition in a
-    // single hop.
-    let chosen_format = if q.format.is_empty() {
-        best_audio_format_id(&result)
-            .ok_or_else(|| AppError::BadRequest("no audio formats".into()))?
-    } else {
-        q.format.clone()
-    };
 
     let format = result
         .formats
         .iter()
-        .find(|f| f.format_id == chosen_format)
+        .find(|f| f.format_id == q.format)
         .ok_or_else(|| AppError::BadRequest("unknown format".into()))?;
+    let url = format
+        .url
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?;
 
-    let url = if let Some(sq) = &q.sq {
-        build_upstream_segment_url(&result, &chosen_format, sq).ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "no upstream URL for video {} format {}",
-                q.video_id, chosen_format
-            ))
-        })?
-    } else {
-        format
-            .url
-            .clone()
-            .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?
-    };
-
-    let is_range = headers.get(header::RANGE).is_some();
     let mut req = reqwest::Client::new().get(&url);
     if let Some(range) = headers.get(header::RANGE) {
         if let Ok(s) = range.to_str() {
@@ -583,70 +547,53 @@ pub async fn get_audio(
     }
     let res = req.send().await.map_err(AppError::Http)?;
     let status = res.status();
-    let content_type = res
+    let upstream_content_type = res
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("audio/mp4")
+        .unwrap_or("application/octet-stream")
         .to_string();
+    // Pass through Content-Length and Content-Range so the browser
+    // knows the file size and which range it received — both are
+    // required for the player's byte-range fetching to work.
+    let upstream_content_length = res
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let upstream_content_range = res
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let upstream_accept_ranges = res
+        .headers()
+        .get(header::ACCEPT_RANGES)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
-    // For non-segment requests or range requests we just stream through.
-    if q.sq.is_none() || is_range || !status.is_success() {
-        let stream = res.bytes_stream().map_err(std::io::Error::other);
-        let body = Body::from_stream(stream);
-        let mut response = Response::new(body);
-        *response.status_mut() = status;
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-        return Ok(response);
-    }
-
-    // Segment cache write path.
-    let bytes = res.bytes().await.map_err(AppError::Http)?;
-    let sq = q.sq.as_deref().unwrap_or("");
-    let cache_path = segment_cache_path(&state.config, &q.video_id, &chosen_format, sq);
-    if let Err(err) = write_segment(&cache_path, &bytes).await {
-        warn!(error = %err, "audio segment cache write failed");
-    } else {
-        let _ = register_cached_segment(
-            &state.db,
-            &q.video_id,
-            &chosen_format,
-            sq,
-            &cache_path,
-            bytes.len() as i64,
-        )
-        .await;
-    }
-
-    let body = Body::from(bytes);
+    let stream = res.bytes_stream().map_err(std::io::Error::other);
+    let body = Body::from_stream(stream);
     let mut response = Response::new(body);
     *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    let h = response.headers_mut();
+    h.insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
+    if let Some(len) = upstream_content_length {
+        if let Ok(v) = len.parse() {
+            h.insert(header::CONTENT_LENGTH, v);
+        }
+    }
+    if let Some(rng) = upstream_content_range {
+        if let Ok(v) = rng.parse() {
+            h.insert(header::CONTENT_RANGE, v);
+        }
+    }
+    if let Some(ar) = upstream_accept_ranges {
+        if let Ok(v) = ar.parse() {
+            h.insert(header::ACCEPT_RANGES, v);
+        }
+    }
     Ok(response)
-}
-
-/// Pick the best audio-only format ID from a yt-dlp extraction result.
-/// "Best" = highest available `abr` among formats whose vcodec is
-/// `none` (audio-only).
-fn best_audio_format_id(result: &ExtractResult) -> Option<String> {
-    result
-        .formats
-        .iter()
-        .filter(|f| {
-            f.vcodec.as_deref().map(|c| c == "none").unwrap_or(false)
-                && (f.url.is_some() || f.manifest_url.is_some())
-        })
-        .max_by(|a, b| {
-            a.abr
-                .unwrap_or(0.0)
-                .partial_cmp(&b.abr.unwrap_or(0.0))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|f| f.format_id.clone())
 }
 
 /// `GET /api/proxy/thumbnail/:videoId` — stream the highest-resolution
@@ -759,564 +706,136 @@ fn pick_thumbnail(result: &ExtractResult) -> Option<String> {
         .map(|t| t.url.clone())
 }
 
-fn build_upstream_segment_url(result: &ExtractResult, format_id: &str, sq: &str) -> Option<String> {
-    let format = result.formats.iter().find(|f| f.format_id == format_id)?;
-
-    if let Some(url) = &format.url {
-        // Replace `&sq=<old>` with `&sq=<new>` if it's there; otherwise
-        // append.
-        if url.contains("sq=") {
-            let mut out = String::with_capacity(url.len() + sq.len());
-            let mut iter = url.split('&');
-            if let Some(first) = iter.next() {
-                if let Some(rest) = first.strip_prefix("sq=") {
-                    out.push_str("sq=");
-                    out.push_str(sq);
-                    let _ = rest;
-                } else {
-                    out.push_str(first);
-                }
-            }
-            for part in iter {
-                out.push('&');
-                if let Some(_rest) = part.strip_prefix("sq=") {
-                    out.push_str("sq=");
-                    out.push_str(sq);
-                } else {
-                    out.push_str(part);
-                }
-            }
-            return Some(out);
-        }
-        return Some(format!("{url}&sq={sq}"));
-    }
-    None
-}
-
-fn segment_cache_path(
-    cfg: &crate::config::Config,
-    video_id: &str,
-    format: &str,
-    sq: &str,
-) -> PathBuf {
-    let _ = cfg;
-    let mut path = PathBuf::from("./data/segment_cache");
-    path.push(video_id);
-    path.push(format);
-    path.push(sq);
-    path
-}
-
-async fn write_segment(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = path.with_extension("tmp");
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
-}
-
-async fn lookup_cached_segment(
+/// Resolve SegmentBase byte ranges for all usable formats.
+///
+/// Merges two sources:
+/// 1. `result.segment_ranges` (innertube `/player` API, keyed by itag)
+///    — available immediately after extraction.
+/// 2. `format_box_ranges` SQLite table — cached from prior extractions
+///    or legacy background probes.
+///
+/// Any ranges present in source 1 but missing from the DB are
+/// persisted (fire-and-forget) so future loads are instant.
+async fn resolve_segment_ranges(
     pool: &SqlitePool,
     video_id: &str,
-    format: &str,
-    sq: &str,
-) -> AppResult<Option<(PathBuf, i64)>> {
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT file_path, file_size_bytes FROM segment_cache \
-         WHERE video_id = ? AND format_id = ? AND segment_number = ?",
-    )
-    .bind(video_id)
-    .bind(format)
-    .bind(parse_sq(sq))
-    .fetch_optional(pool)
-    .await?;
-    if let Some((path, size)) = row {
-        let p = PathBuf::from(&path);
-        if tokio::fs::metadata(&p).await.is_ok() {
-            // Touch last_accessed_at so LRU eviction works.
-            let _ = sqlx::query(
-                "UPDATE segment_cache SET last_accessed_at = ? \
-                 WHERE video_id = ? AND format_id = ? AND segment_number = ?",
-            )
-            .bind(Utc::now().timestamp())
-            .bind(video_id)
-            .bind(format)
-            .bind(parse_sq(sq))
-            .execute(pool)
-            .await;
-            return Ok(Some((p, size)));
-        }
+    result: &ExtractResult,
+) -> std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges> {
+    use crate::services::segment_ranges::{BoxRanges, ByteRange};
+
+    let mut out: std::collections::HashMap<String, BoxRanges> = std::collections::HashMap::new();
+
+    // Step 1: Convert itag-keyed segment_ranges to format_id-keyed map.
+    // A format_id like "303-dashy" shares itag 303 with "303". We
+    // parse the leading integer itag from each format_id.
+    for f in &result.formats {
+        let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
+            continue;
+        };
+        let Some(sr) = result.segment_ranges.get(&itag) else {
+            continue;
+        };
+        let br = BoxRanges {
+            init: ByteRange {
+                start: sr.init_start,
+                end: sr.init_end,
+            },
+            index: ByteRange {
+                start: sr.index_start,
+                end: sr.index_end,
+            },
+        };
+        out.insert(f.format_id.clone(), br);
     }
-    Ok(None)
+
+    // Step 2: For any format NOT covered by segment_ranges, fall back
+    // to the database cache (legacy probe results or prior extractions).
+    let uncovered: Vec<(String, String)> = result
+        .formats
+        .iter()
+        .filter(|f| {
+            !f.format_id.starts_with("sb")
+                && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
+                && !out.contains_key(&f.format_id)
+        })
+        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
+        .collect();
+    if !uncovered.is_empty() {
+        let cached = crate::services::segment_ranges::lookup_all(pool, video_id, &uncovered).await;
+        out.extend(cached);
+    }
+
+    // Step 3: Persist only newly-resolved ranges (from Step 1) that
+    // weren't already in the DB (from Step 2). This avoids redundant
+    // INSERT OR REPLACE writes on warm-cache manifest loads.
+    let new_from_innertube: Vec<(String, BoxRanges)> = result
+        .formats
+        .iter()
+        .filter_map(|f| {
+            let itag = parse_itag_from_format_id(&f.format_id)?;
+            result.segment_ranges.get(&itag)?;
+            // Only persist if this format_id wasn't already served by
+            // the DB lookup in Step 2 (i.e. it came from segment_ranges).
+            out.get(&f.format_id)
+                .copied()
+                .map(|br| (f.format_id.clone(), br))
+        })
+        .collect();
+    if !new_from_innertube.is_empty() {
+        let pool_clone = pool.clone();
+        let video_id_owned = video_id.to_string();
+        tokio::spawn(async move {
+            for (format_id, ranges) in new_from_innertube {
+                crate::services::segment_ranges::store(
+                    &pool_clone,
+                    &video_id_owned,
+                    &format_id,
+                    ranges,
+                )
+                .await;
+            }
+        });
+    }
+
+    out
 }
 
-async fn register_cached_segment(
-    pool: &SqlitePool,
-    video_id: &str,
-    format: &str,
-    sq: &str,
-    path: &FsPath,
-    size: i64,
-) -> AppResult<()> {
-    sqlx::query(
-        "INSERT INTO segment_cache \
-            (video_id, format_id, segment_number, file_path, file_size_bytes) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(video_id, format_id, segment_number) DO UPDATE SET \
-            file_path = excluded.file_path, \
-            file_size_bytes = excluded.file_size_bytes, \
-            last_accessed_at = unixepoch()",
-    )
-    .bind(video_id)
-    .bind(format)
-    .bind(parse_sq(sq))
-    .bind(path.to_string_lossy().to_string())
-    .bind(size)
-    .execute(pool)
-    .await?;
-    Ok(())
+/// Pick the best audio-only format for the audio-only playback mode.
+/// Prefers the highest-bitrate opus format, excluding DRC variants.
+fn best_audio_format(formats: &[Format]) -> Option<&Format> {
+    formats
+        .iter()
+        .filter(|f| {
+            let acodec = f.acodec.as_deref().unwrap_or("none");
+            let vcodec = f.vcodec.as_deref().unwrap_or("none");
+            let is_audio_only = acodec != "none" && vcodec == "none";
+            let is_drc = f.format_id.contains("-drc-")
+                || f.format_id.ends_with("-drc")
+                || f.format_note
+                    .as_deref()
+                    .map(|s| s.to_ascii_lowercase().contains("drc"))
+                    .unwrap_or(false);
+            is_audio_only && acodec.starts_with("opus") && !is_drc
+        })
+        .max_by_key(|f| f.abr.map(|b| (b * 1000.0) as u64).unwrap_or(0))
 }
 
-fn parse_sq(sq: &str) -> i64 {
-    sq.parse().unwrap_or(0)
-}
-
-/// Serve a cached segment from disk, honouring HTTP Range requests so
-/// the vidstack player can seek inside an already-cached segment without
-/// a full re-download.
+/// Extract the leading integer itag from a yt-dlp format_id.
 ///
-/// Behaviour:
-/// - Always emits `Accept-Ranges: bytes` so the player knows seeking
-///   works.
-/// - For full-file requests: streams the whole file with a 200 response.
-/// - For a single `Range: bytes=N-M` request:
-///   - On valid range: 206 Partial Content with `Content-Range`,
-///     `Content-Length`, and the requested byte slice streamed via
-///     [`tokio_util::io::ReaderStream`].
-///   - On invalid / unsatisfiable range: 416 with
-///     `Content-Range: bytes */<total>`.
-/// - Multipart / multi-range requests are not supported (rare in
-///   practice for DASH segments) — they fall through to the full-file
-///   200 response.
-async fn serve_file(path: &FsPath, size: i64, headers: &HeaderMap) -> AppResult<Response> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    use tokio_util::io::ReaderStream;
-
-    let total = if size > 0 {
-        size as u64
-    } else {
-        // Fall back to a stat() if the cache table didn't have a value.
-        tokio::fs::metadata(path)
-            .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!("statting cached segment: {e}")))?
-            .len()
-    };
-
-    if let Some(range_header) = headers.get(header::RANGE) {
-        if let Some((start, end)) = parse_single_byte_range(range_header.to_str().ok(), total) {
-            // Valid range: stream the requested slice.
-            let mut file = tokio::fs::File::open(path)
-                .await
-                .map_err(|e| AppError::Other(anyhow::anyhow!("opening cached segment: {e}")))?;
-            file.seek(std::io::SeekFrom::Start(start))
-                .await
-                .map_err(|e| AppError::Other(anyhow::anyhow!("seeking cached segment: {e}")))?;
-            let length = end - start + 1;
-            let stream = ReaderStream::new(file.take(length));
-            let body = Body::from_stream(stream);
-            let mut response = Response::new(body);
-            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
-            let h = response.headers_mut();
-            h.insert(
-                header::CONTENT_TYPE,
-                "application/octet-stream".parse().unwrap(),
-            );
-            h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-            h.insert(
-                header::CONTENT_RANGE,
-                format!("bytes {start}-{end}/{total}").parse().unwrap(),
-            );
-            h.insert(header::CONTENT_LENGTH, length.to_string().parse().unwrap());
-            return Ok(response);
-        }
-        // Header was present but unparseable / unsatisfiable — return 416.
-        if range_header
-            .to_str()
-            .ok()
-            .filter(|s| s.starts_with("bytes="))
-            .is_some()
-        {
-            let mut response = Response::new(Body::empty());
-            *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
-            let h = response.headers_mut();
-            h.insert(
-                header::CONTENT_RANGE,
-                format!("bytes */{total}").parse().unwrap(),
-            );
-            h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-            return Ok(response);
-        }
-        // Anything else (e.g. an unknown range unit) — fall through to
-        // a full-file 200 response, matching common server behaviour.
-    }
-
-    // Full-file response. Stream from disk to avoid loading the whole
-    // segment into memory.
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("opening cached segment: {e}")))?;
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-    let mut response = Response::new(body);
-    let h = response.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        "application/octet-stream".parse().unwrap(),
-    );
-    h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    h.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
-    Ok(response)
-}
-
-/// Parse a single-range HTTP `Range` header value (`bytes=N-M`) against
-/// a known resource size.
-///
-/// Returns `Some((start, end))` (both inclusive) if the request is
-/// satisfiable. Open-ended ranges (`bytes=N-` or `bytes=-N` for
-/// suffix length) are accepted; multipart ranges and non-`bytes` units
-/// are rejected.
-pub(crate) fn parse_single_byte_range(value: Option<&str>, total: u64) -> Option<(u64, u64)> {
-    let value = value?;
-    let body = value.strip_prefix("bytes=")?;
-    if body.contains(',') {
-        return None; // multi-range not supported
-    }
-    let (start_s, end_s) = body.split_once('-')?;
-    let start_s = start_s.trim();
-    let end_s = end_s.trim();
-
-    if start_s.is_empty() {
-        // Suffix form: "bytes=-N" → last N bytes.
-        let suffix_len: u64 = end_s.parse().ok()?;
-        if suffix_len == 0 || total == 0 {
-            return None;
-        }
-        let len = suffix_len.min(total);
-        let start = total - len;
-        return Some((start, total - 1));
-    }
-
-    let start: u64 = start_s.parse().ok()?;
-    if start >= total {
-        return None;
-    }
-    let end: u64 = if end_s.is_empty() {
-        total - 1
-    } else {
-        let parsed: u64 = end_s.parse().ok()?;
-        parsed.min(total - 1)
-    };
-    if end < start {
-        return None;
-    }
-    Some((start, end))
+/// yt-dlp names formats like `"303"`, `"303-dashy"`, `"251-drc"`,
+/// `"251-0"`, `"251-dashy-1"`. The itag is always the leading integer
+/// prefix before the first `-` (or the entire string if no `-`).
+fn parse_itag_from_format_id(format_id: &str) -> Option<i64> {
+    let numeric_prefix: String = format_id
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    numeric_prefix.parse::<i64>().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -----------------------------------------------------------------------
-    // parse_single_byte_range
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn range_none_input() {
-        assert_eq!(parse_single_byte_range(None, 1000), None);
-    }
-
-    #[test]
-    fn range_empty_string() {
-        assert_eq!(parse_single_byte_range(Some(""), 1000), None);
-    }
-
-    #[test]
-    fn range_non_bytes_unit() {
-        assert_eq!(parse_single_byte_range(Some("items=0-10"), 1000), None);
-    }
-
-    #[test]
-    fn range_multipart() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=0-10,20-30"), 1000),
-            None
-        );
-    }
-
-    #[test]
-    fn range_full_spec() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=0-499"), 1000),
-            Some((0, 499))
-        );
-    }
-
-    #[test]
-    fn range_open_ended() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=500-"), 1000),
-            Some((500, 999))
-        );
-    }
-
-    #[test]
-    fn range_suffix() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=-200"), 1000),
-            Some((800, 999))
-        );
-    }
-
-    #[test]
-    fn range_suffix_larger_than_total() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=-2000"), 1000),
-            Some((0, 999))
-        );
-    }
-
-    #[test]
-    fn range_suffix_zero() {
-        assert_eq!(parse_single_byte_range(Some("bytes=-0"), 1000), None);
-    }
-
-    #[test]
-    fn range_suffix_zero_total() {
-        assert_eq!(parse_single_byte_range(Some("bytes=-100"), 0), None);
-    }
-
-    #[test]
-    fn range_start_past_end() {
-        assert_eq!(parse_single_byte_range(Some("bytes=1000-"), 1000), None);
-    }
-
-    #[test]
-    fn range_end_clamped() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=0-5000"), 1000),
-            Some((0, 999))
-        );
-    }
-
-    #[test]
-    fn range_single_byte() {
-        assert_eq!(
-            parse_single_byte_range(Some("bytes=42-42"), 1000),
-            Some((42, 42))
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // build_upstream_segment_url
-    // -----------------------------------------------------------------------
-
-    fn make_result_with_format(format_id: &str, url: &str) -> ExtractResult {
-        ExtractResult {
-            id: "test".into(),
-            title: None,
-            channel_id: None,
-            channel_title: None,
-            duration: None,
-            thumbnails: vec![],
-            thumbnail: None,
-            formats: vec![Format {
-                format_id: format_id.into(),
-                ext: None,
-                height: None,
-                width: None,
-                tbr: None,
-                vbr: None,
-                abr: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                filesize: None,
-                url: Some(url.into()),
-                manifest_url: None,
-                protocol: None,
-            }],
-            subtitles: Default::default(),
-            automatic_captions: Default::default(),
-            manifest_url: None,
-        }
-    }
-
-    #[test]
-    fn upstream_url_appends_sq() {
-        let result = make_result_with_format("137", "https://rr.example.com/seg?key=val");
-        let url = build_upstream_segment_url(&result, "137", "5").unwrap();
-        assert_eq!(url, "https://rr.example.com/seg?key=val&sq=5");
-    }
-
-    #[test]
-    fn upstream_url_replaces_existing_sq() {
-        let result = make_result_with_format("137", "https://rr.example.com/seg?key=val&sq=0");
-        let url = build_upstream_segment_url(&result, "137", "7").unwrap();
-        assert!(url.contains("sq=7"), "got: {url}");
-        assert!(!url.contains("sq=0"), "old sq not replaced in: {url}");
-    }
-
-    #[test]
-    fn upstream_url_replaces_sq_at_start() {
-        let result = make_result_with_format("137", "sq=0&key=val");
-        let url = build_upstream_segment_url(&result, "137", "3").unwrap();
-        assert!(url.starts_with("sq=3"), "got: {url}");
-    }
-
-    #[test]
-    fn upstream_url_unknown_format_returns_none() {
-        let result = make_result_with_format("137", "https://x/y");
-        assert_eq!(build_upstream_segment_url(&result, "999", "0"), None);
-    }
-
-    #[test]
-    fn upstream_url_no_url_field() {
-        let result = ExtractResult {
-            id: "test".into(),
-            title: None,
-            channel_id: None,
-            channel_title: None,
-            duration: None,
-            thumbnails: vec![],
-            thumbnail: None,
-            formats: vec![Format {
-                format_id: "137".into(),
-                ext: None,
-                height: None,
-                width: None,
-                tbr: None,
-                vbr: None,
-                abr: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                filesize: None,
-                url: None,
-                manifest_url: Some("https://m.example.com/dash.mpd".into()),
-                protocol: None,
-            }],
-            subtitles: Default::default(),
-            automatic_captions: Default::default(),
-            manifest_url: None,
-        };
-        assert_eq!(build_upstream_segment_url(&result, "137", "0"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // best_audio_format_id
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn best_audio_picks_highest_abr() {
-        let result = ExtractResult {
-            id: "test".into(),
-            title: None,
-            channel_id: None,
-            channel_title: None,
-            duration: None,
-            thumbnails: vec![],
-            thumbnail: None,
-            formats: vec![
-                Format {
-                    format_id: "140".into(),
-                    ext: None,
-                    height: None,
-                    width: None,
-                    tbr: None,
-                    vbr: None,
-                    abr: Some(128.0),
-                    fps: None,
-                    vcodec: Some("none".into()),
-                    acodec: Some("aac".into()),
-                    filesize: None,
-                    url: Some("https://x/audio128".into()),
-                    manifest_url: None,
-                    protocol: None,
-                },
-                Format {
-                    format_id: "251".into(),
-                    ext: None,
-                    height: None,
-                    width: None,
-                    tbr: None,
-                    vbr: None,
-                    abr: Some(160.0),
-                    fps: None,
-                    vcodec: Some("none".into()),
-                    acodec: Some("opus".into()),
-                    filesize: None,
-                    url: Some("https://x/audio160".into()),
-                    manifest_url: None,
-                    protocol: None,
-                },
-                Format {
-                    format_id: "137".into(),
-                    ext: None,
-                    height: Some(1080),
-                    width: Some(1920),
-                    tbr: None,
-                    vbr: None,
-                    abr: None,
-                    fps: None,
-                    vcodec: Some("avc1".into()),
-                    acodec: None,
-                    filesize: None,
-                    url: Some("https://x/video".into()),
-                    manifest_url: None,
-                    protocol: None,
-                },
-            ],
-            subtitles: Default::default(),
-            automatic_captions: Default::default(),
-            manifest_url: None,
-        };
-        assert_eq!(best_audio_format_id(&result), Some("251".into()));
-    }
-
-    #[test]
-    fn best_audio_returns_none_when_no_audio() {
-        let result = ExtractResult {
-            id: "test".into(),
-            title: None,
-            channel_id: None,
-            channel_title: None,
-            duration: None,
-            thumbnails: vec![],
-            thumbnail: None,
-            formats: vec![Format {
-                format_id: "137".into(),
-                ext: None,
-                height: Some(1080),
-                width: None,
-                tbr: None,
-                vbr: None,
-                abr: None,
-                fps: None,
-                vcodec: Some("avc1".into()),
-                acodec: None,
-                filesize: None,
-                url: Some("https://x/video".into()),
-                manifest_url: None,
-                protocol: None,
-            }],
-            subtitles: Default::default(),
-            automatic_captions: Default::default(),
-            manifest_url: None,
-        };
-        assert_eq!(best_audio_format_id(&result), None);
-    }
 
     // -----------------------------------------------------------------------
     // pick_thumbnail
@@ -1341,6 +860,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1375,6 +895,7 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1396,39 +917,9 @@ mod tests {
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
+            segment_ranges: Default::default(),
         };
         assert_eq!(pick_thumbnail(&result), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_sq
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_sq_valid() {
-        assert_eq!(parse_sq("42"), 42);
-    }
-
-    #[test]
-    fn parse_sq_invalid() {
-        assert_eq!(parse_sq("abc"), 0);
-    }
-
-    #[test]
-    fn parse_sq_empty() {
-        assert_eq!(parse_sq(""), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // segment_cache_path
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn segment_cache_path_structure() {
-        let cfg = crate::config::Config::from_env().unwrap();
-        let p = segment_cache_path(&cfg, "vid123", "137", "5");
-        assert!(p.ends_with("vid123/137/5"));
-        assert!(p.starts_with("./data/segment_cache"));
     }
 
     // -----------------------------------------------------------------------

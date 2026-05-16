@@ -36,6 +36,10 @@ function discoverComponentEntries(): Record<string, string> {
 
 export default defineConfig({
   root: __dirname,
+  // The Rust server mounts the dist directory at `/assets/...`. Set the
+  // public base path so dynamic `import()` calls resolve `chunks/...` to
+  // `/assets/chunks/...` rather than `/chunks/...`.
+  base: '/assets/',
   plugins: [
     VitePWA({
       strategies: 'injectManifest',
@@ -70,9 +74,9 @@ export default defineConfig({
     emptyOutDir: true,
     target: 'es2022',
     sourcemap: true,
-    // The video-player bundle pulls in vidstack + dashjs; ~1.2 MB
-    // unminified is expected. Bump the soft warning ceiling to silence
-    // the noisy "chunk larger than 500 kB" output.
+    // The video-player bundle pulls in shaka-player; ~1 MB unminified
+    // is expected. Bump the soft warning ceiling to silence the noisy
+    // "chunk larger than 500 kB" output.
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       input: {

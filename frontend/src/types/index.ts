@@ -175,6 +175,8 @@ export interface VideoMetadata {
 export interface StreamResponse {
   video_id: string;
   manifest: string | null;
+  /** Manifest flavour. Always "dash" when manifest is present. */
+  manifest_type?: "dash";
   formats: Array<{
     format_id: string;
     ext?: string | null;
@@ -186,6 +188,8 @@ export interface StreamResponse {
     url?: string | null;
     protocol?: string | null;
   }>;
+  /** Pre-signed proxy URL for audio-only playback. */
+  audio_proxy_url?: string | null;
 }
 
 export interface AllowedWindow {

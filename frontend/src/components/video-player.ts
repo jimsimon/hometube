@@ -1,19 +1,17 @@
 /**
  * <hometube-video-player video-id="...">
  *
- * Wraps a vidstack `<media-player>` (with dash.js + hls.js auto-loaded
- * by vidstack as soon as the manifest type is detected) and adds the
- * HomeTube-specific behaviour:
+ * Wraps a native `<video>` element with shaka-player (Google's
+ * open-source adaptive streaming library) and adds HomeTube-specific
+ * behaviour:
  *
  *   - Loads metadata + DASH-manifest URL from
- *     `/api/videos/:id/stream`. The backend now exposes the rewritten
- *     manifest at `/api/videos/:id/stream/manifest.mpd` so vidstack
- *     can fetch it directly (vidstack/dash.js cannot consume blob:
- *     URLs reliably).
+ *     `/api/videos/:id/stream`. The backend exposes the synthesized
+ *     manifest at `/api/videos/:id/stream/manifest.mpd`.
  *   - Sends a heartbeat every 30s while playing to
  *     `/api/usage/heartbeat`; dispatches `hometube:usage-limit` on a
  *     403.
- *   - Dispatches `hometube:current-time` on every `time-update` and
+ *   - Dispatches `hometube:current-time` on every `timeupdate` and
  *     `hometube:video-ended` on `ended`.
  *   - Hosts the bookmark / sleep-timer / like / subscribe / download
  *     controls in a "chrome" row below the video.
@@ -31,33 +29,66 @@
  *   - Adds a "Download" button when `child_settings.downloads_enabled`
  *     is on; the click handler talks to the offline-downloads service
  *     to pipe the response into the Cache API.
+ *
+ * shaka-player handles DASH (including webm SegmentBase) and HLS
+ * natively. Its built-in UI overlay provides quality switching,
+ * language selection, fullscreen, PiP, and captions.
  */
 
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
-// dashjs is dynamically imported by vidstack when it sees a DASH source,
-// but we pull the type-only import in so vidstack's elements.d.ts can
-// resolve. We side-effect-import it in `connectedCallback` to ensure
-// it's bundled.
-import "dashjs";
+// shaka-player's pre-built UI bundle (includes player + UI overlay).
+// The build uses a UMD-like wrapper that exports via `exports` when
+// available (which Vite's bundler provides), making it importable
+// as a default/namespace import.
+// @ts-ignore — shaka-player doesn't ship proper ESM type mappings
+import * as shaka from "shaka-player/dist/shaka-player.ui.js";
+import shakaControlsCss from "shaka-player/dist/controls.css?inline";
 
-// vidstack styles + element registration. We rely on the default
-// layout rather than authoring our own; HomeTube only needs to add a
-// chrome strip below the player.
-import "vidstack/player/styles/default/theme.css";
-import "vidstack/player/styles/default/layouts/video.css";
-import "vidstack/player";
-import "vidstack/player/layouts";
-import "vidstack/player/ui";
+// Minimal type declarations for the shaka APIs we use. The actual
+// runtime objects are full-featured; we only type what we touch.
+interface ShakaPlayer {
+  attach(video: HTMLVideoElement): Promise<void>;
+  load(uri: string, startTime?: number, mimeType?: string): Promise<void>;
+  destroy(): Promise<void>;
+  configure(path: string, value: unknown): void;
+  getNetworkingEngine(): {
+    registerRequestFilter(
+      filter: (type: number, request: { allowCrossSiteCredentials: boolean }) => void,
+    ): void;
+  } | null;
+  addEventListener(event: string, handler: (e: Event) => void): void;
+  addTextTrackAsync(
+    uri: string,
+    language: string,
+    kind: string,
+    mimeType: string,
+    codec?: string,
+    label?: string,
+  ): Promise<unknown>;
+  setTextVisibility(visible: boolean): void;
+  isTextVisible(): boolean;
+}
+interface ShakaUI {
+  configure(config: Record<string, unknown>): void;
+  destroy(): void;
+}
+
+// Cast the imported namespace to our typed shape.
+const Shaka = shaka as unknown as {
+  polyfill: { installAll(): void };
+  Player: new () => ShakaPlayer;
+  ui: {
+    Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI;
+  };
+};
 
 import { ApiError, api } from "../services/api.js";
 import {
   ensurePersistentStorage,
   getStorageEstimate,
-  getVideoPrefs,
   saveVideoToOpfs,
-  setVideoPrefs,
 } from "../services/offline.js";
 import type {
   Bookmark,
@@ -77,6 +108,9 @@ import "./error-banner.js";
 
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
+const VOLUME_KEY = "hometube-volume";
+const AUDIO_ONLY_KEY = "hometube-audio-only";
+const CAPTIONS_KEY = "hometube-captions";
 /** How long the audio fade-out lasts when the sleep timer expires. */
 const SLEEP_FADE_MS = 4_000;
 /** Warn the user if free storage is below this (500 MB). */
@@ -88,23 +122,6 @@ const QUALITY_CAP: Record<string, number> = {
   "720p": 720,
   "1080p": 1080,
 };
-
-/** Minimal subset of the vidstack media-state we read from. */
-interface VidstackMediaState {
-  currentTime: number;
-  duration: number;
-  paused: boolean;
-  ended: boolean;
-}
-
-/** Subset of `<media-player>` we touch programmatically. */
-interface VidstackMediaPlayer extends HTMLElement {
-  src: string | { src: string; type: string };
-  currentTime: number;
-  playbackRate: number;
-  state: VidstackMediaState;
-  subscribe(cb: (state: VidstackMediaState) => void): () => void;
-}
 
 @customElement("hometube-video-player")
 export class VideoPlayer extends LitElement {
@@ -139,137 +156,167 @@ export class VideoPlayer extends LitElement {
   /** Set when a download succeeds — collapses to a "downloaded" badge. */
   @state() private downloaded = false;
 
-  @query("media-player") private playerEl!: VidstackMediaPlayer;
+  @query("video") private videoEl!: HTMLVideoElement;
+  @query(".shaka-container") private containerEl!: HTMLElement;
 
   private heartbeatTimer: number | null = null;
   private lastHeartbeatAt = 0;
   /** True after a manual play interaction; resets the autoplay counter. */
   private manualPlayed = false;
-  /** Unsubscribe from the vidstack state subscription. */
-  private mediaUnsub: (() => void) | null = null;
   /** Last currentTime we saw — used to compute heartbeat deltas. */
   private lastSeenTime = 0;
+  /** shaka.Player instance. */
+  private player: ShakaPlayer | null = null;
+  /** shaka.ui.Overlay instance (manages the control bar). */
+  private ui: ShakaUI | null = null;
 
-  static styles = css`
-    :host {
-      display: block;
-    }
-    .player-shell {
-      position: relative;
-      width: 100%;
-      max-width: 64rem;
-      margin: 0 auto;
-      view-transition-name: video-hero;
-    }
-    media-player {
-      width: 100%;
-      aspect-ratio: 16 / 9;
-      background: black;
-      border-radius: 0.5rem;
-      overflow: hidden;
-    }
-    /* Audio-only mode: replace the player surface with the poster. */
-    :host([data-audio-only]) media-player {
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-    }
-    .error {
-      color: var(--wa-color-danger-fill, #b91c1c);
-      padding: 1rem;
-    }
-    .meta {
-      margin-top: 1rem;
-    }
-    .meta h1 {
-      margin: 0 0 0.25rem;
-      font-size: 1.25rem;
-    }
-    .meta .channel {
-      color: var(--wa-color-text-quiet);
-    }
-    .chrome {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-top: 1rem;
-      align-items: center;
-    }
-    .seek-overlay {
-      position: relative;
-      height: 0.5rem;
-      margin-top: -0.5rem;
-      pointer-events: none;
-    }
-    .bookmark-marker {
-      position: absolute;
-      top: 0;
-      width: 0.4rem;
-      height: 100%;
-      background: var(--wa-color-warning-fill, #d97706);
-      border-radius: 2px;
-      transform: translateX(-50%);
-    }
-    .continue-prompt {
-      position: absolute;
-      inset: 0;
-      z-index: 500;
-      background: rgba(0, 0, 0, 0.65);
-      color: white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-direction: column;
-      gap: 0.75rem;
-      padding: 1rem;
-      text-align: center;
-    }
-    .continue-prompt button {
-      padding: 0.5rem 1rem;
-      border-radius: 0.375rem;
-      border: 1px solid white;
-      background: white;
-      color: black;
-      font: inherit;
-      cursor: pointer;
-    }
-    .countdown {
-      margin: 0.5rem 0;
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.375rem;
-      background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
-      color: var(--wa-color-warning-on-quiet, #92400e);
-      font-size: 0.9rem;
-    }
-    .countdown.urgent {
-      background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
-      color: var(--wa-color-danger-on-quiet, #991b1b);
-      font-weight: 600;
-      font-size: 1rem;
-    }
-    .audio-toggle,
-    .download-button {
-      padding: 0.4rem 0.75rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: transparent;
-      color: var(--wa-color-text-normal);
-      font: inherit;
-      cursor: pointer;
-    }
-    .audio-toggle[aria-pressed="true"] {
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      border-color: transparent;
-    }
-    .download-button[disabled] {
-      opacity: 0.7;
-      cursor: progress;
-    }
-  `;
+  static styles = [
+    css`
+      :host {
+        display: block;
+      }
+      .player-shell {
+        position: relative;
+        width: 100%;
+        max-width: 64rem;
+        margin: 0 auto;
+        view-transition-name: video-hero;
+      }
+      .shaka-container {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: black;
+        border-radius: 0.5rem;
+        overflow: hidden;
+        position: relative;
+      }
+      .shaka-container video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+      /* Caption styling. Shaka uses native <track> / ::cue rendering
+         via NativeTextDisplayer. The ::cue pseudo-element controls how
+         WebVTT cues appear over the video. */
+      video::cue {
+        background-color: rgba(0, 0, 0, 0.8);
+        color: white;
+        font-size: clamp(0.85rem, 2.2vw, 1.2rem);
+        line-height: 1.4;
+        padding: 0.1em 0.3em;
+        white-space: pre-wrap;
+      }
+      /* Audio-only mode: replace the player surface with the poster. */
+      :host([data-audio-only]) .shaka-container {
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+      :host([data-audio-only]) .shaka-container video {
+        opacity: 0;
+      }
+      .error {
+        color: var(--wa-color-danger-fill, #b91c1c);
+        padding: 1rem;
+      }
+      .meta {
+        margin-top: 1rem;
+      }
+      .meta h1 {
+        margin: 0 0 0.25rem;
+        font-size: 1.25rem;
+      }
+      .meta .channel {
+        color: var(--wa-color-text-quiet);
+      }
+      .chrome {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+        align-items: center;
+      }
+      .seek-overlay {
+        position: relative;
+        height: 0.5rem;
+        margin-top: -0.5rem;
+        pointer-events: none;
+      }
+      .bookmark-marker {
+        position: absolute;
+        top: 0;
+        width: 0.4rem;
+        height: 100%;
+        background: var(--wa-color-warning-fill, #d97706);
+        border-radius: 2px;
+        transform: translateX(-50%);
+      }
+      .continue-prompt {
+        position: absolute;
+        inset: 0;
+        z-index: 500;
+        background: rgba(0, 0, 0, 0.65);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 0.75rem;
+        padding: 1rem;
+        text-align: center;
+      }
+      .continue-prompt button {
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+        border: 1px solid white;
+        background: white;
+        color: black;
+        font: inherit;
+        cursor: pointer;
+      }
+      .countdown {
+        margin: 0.5rem 0;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.375rem;
+        background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
+        color: var(--wa-color-warning-on-quiet, #92400e);
+        font-size: 0.9rem;
+      }
+      .countdown.urgent {
+        background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
+        color: var(--wa-color-danger-on-quiet, #991b1b);
+        font-weight: 600;
+        font-size: 1rem;
+      }
+      .audio-toggle,
+      .download-button {
+        padding: 0.4rem 0.75rem;
+        border-radius: 0.375rem;
+        border: 1px solid var(--wa-color-surface-border, #ccc);
+        background: transparent;
+        color: var(--wa-color-text-normal);
+        font: inherit;
+        cursor: pointer;
+      }
+      .audio-toggle[aria-pressed="true"] {
+        background: var(--wa-color-brand-fill, #2563eb);
+        color: white;
+        border-color: transparent;
+      }
+      .download-button[disabled] {
+        opacity: 0.7;
+        cursor: progress;
+      }
+    `,
+  ];
+
+  /** Guard against concurrent load() calls (connectedCallback + updated race). */
+  private loadInFlight = false;
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Inject shaka's control CSS into the shadow root via adoptedStyleSheets.
+    this.injectShakaStyles();
     if (this.videoId) void this.load();
     document.addEventListener("hometube:sleep-timer-expired", this.onSleepExpired as EventListener);
     document.addEventListener("hometube:bookmarks-loaded", this.onBookmarksLoaded as EventListener);
@@ -277,7 +324,7 @@ export class VideoPlayer extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has("videoId") && this.videoId) {
+    if (changed.has("videoId") && this.videoId && !this.loadInFlight) {
       void this.load();
     }
   }
@@ -285,8 +332,7 @@ export class VideoPlayer extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopHeartbeat();
-    this.mediaUnsub?.();
-    this.mediaUnsub = null;
+    void this.destroyPlayer();
     document.removeEventListener(
       "hometube:sleep-timer-expired",
       this.onSleepExpired as EventListener,
@@ -301,11 +347,25 @@ export class VideoPlayer extends LitElement {
     );
   }
 
+  /** Inject shaka-player's controls.css into this shadow root. */
+  private injectShakaStyles(): void {
+    if (!this.shadowRoot) return;
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(shakaControlsCss);
+    this.shadowRoot.adoptedStyleSheets = [...this.shadowRoot.adoptedStyleSheets, sheet];
+  }
+
   private async load(): Promise<void> {
+    if (this.loadInFlight) return;
+    this.loadInFlight = true;
     this.error = "";
     try {
-      // Restore the audio-only preference for this video.
-      this.audioOnly = !!getVideoPrefs(this.videoId).audioOnly;
+      // Restore the audio-only preference (global, not per-video).
+      try {
+        this.audioOnly = localStorage.getItem(AUDIO_ONLY_KEY) === "true";
+      } catch {
+        this.audioOnly = false;
+      }
 
       if (this.preview) {
         const meta = await api.get<VideoMetadata>(`/api/preview/video/${this.videoId}`);
@@ -329,101 +389,225 @@ export class VideoPlayer extends LitElement {
         this.settings = settings;
         this.captionTracks = captions;
       }
-      // Wait for the player element to render before attaching the source.
-      queueMicrotask(() => this.attachSource());
+      // Wait for the element to render before attaching the player.
+      await this.updateComplete;
+      await this.attachSource();
     } catch (err) {
-      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
+      if (err instanceof ApiError) {
+        this.error = String(err.body);
+      } else if (err && typeof err === "object" && "code" in err && "category" in err) {
+        // shaka.util.Error: surface the code, category, and data for debugging.
+        const se = err as { code: number; category: number; data: unknown[] };
+        this.error = `Shaka Error ${se.category}.${se.code}: ${JSON.stringify(se.data)}`;
+      } else {
+        this.error = (err as Error).message ?? String(err);
+      }
+    } finally {
+      this.loadInFlight = false;
     }
   }
 
-  private attachSource(): void {
-    if (!this.playerEl) return;
+  private async attachSource(): Promise<void> {
+    if (!this.videoEl || !this.containerEl) return;
 
+    // Destroy any existing player instance (e.g. on videoId change).
+    await this.destroyPlayer();
+
+    // Install polyfills if needed (no-op in modern browsers).
+    Shaka.polyfill.installAll();
+
+    // Create player.
+    const player = new Shaka.Player();
+    await player.attach(this.videoEl);
+    this.player = player;
+
+    // Configure networking: send cookies with manifest/segment requests.
+    player.getNetworkingEngine()!.registerRequestFilter((_type, request) => {
+      request.allowCrossSiteCredentials = true;
+    });
+
+    // Apply quality cap if set.
+    if (this.settings?.max_quality) {
+      const maxHeight = QUALITY_CAP[this.settings.max_quality];
+      if (maxHeight) {
+        player.configure("abr.restrictions.maxHeight", maxHeight);
+      }
+    }
+
+    // Create UI overlay (controls, quality menu, language menu, etc.).
+    const ui = new Shaka.ui.Overlay(player, this.containerEl, this.videoEl);
+    this.ui = ui;
+    // Always include captions in the overflow menu. When playback speed
+    // is locked, omit the speed button; otherwise use the full set.
+    const overflowButtons = this.settings?.playback_speed_locked
+      ? ["quality", "language", "captions", "picture_in_picture"]
+      : ["quality", "language", "captions", "playback_rate", "picture_in_picture"];
+    ui.configure({ overflowMenuButtons: overflowButtons });
+
+    // Error handling.
+    player.addEventListener("error", (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      console.error("shaka error", detail);
+    });
+
+    // Wire up HTML5 video events.
+    this.videoEl.addEventListener("timeupdate", this.onTimeUpdate);
+    this.videoEl.addEventListener("play", this.onPlay);
+    this.videoEl.addEventListener("pause", this.onPause);
+    this.videoEl.addEventListener("ended", this.onEnded);
+    this.videoEl.addEventListener("volumechange", this.onVolumeChange);
+
+    // Restore persisted volume level.
+    try {
+      const saved = localStorage.getItem(VOLUME_KEY);
+      if (saved != null) {
+        const vol = parseFloat(saved);
+        if (Number.isFinite(vol)) {
+          this.videoEl.volume = Math.max(0, Math.min(1, vol));
+        }
+      }
+    } catch {
+      // localStorage unavailable — use browser default.
+    }
+
+    // Load the appropriate source.
     if (this.audioOnly) {
       const audioUrl = this.bestAudioUrl();
       if (audioUrl) {
-        this.playerEl.src = { src: audioUrl, type: "audio/mp4" };
+        // Explicit mimeType prevents shaka from guessing based on the
+        // proxy URL (which has no file extension).
+        await player.load(audioUrl, undefined, "audio/webm");
       }
     } else {
-      // Vidstack + dash.js plays the rewritten DASH manifest directly.
-      // The backend now exposes the manifest as XML (not blob:) at
-      // `/api/videos/:id/stream/manifest.mpd`.
-      this.playerEl.src = {
-        src: `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`,
-        type: "application/dash+xml",
-      };
+      const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      // Explicitly specify the MIME type so shaka doesn't have to guess
+      // from the URL or Content-Type header (which may be text/xml or
+      // application/octet-stream depending on the server config).
+      await player.load(manifestUrl, undefined, "application/dash+xml");
     }
 
-    if (this.settings?.playback_speed_locked) {
-      this.playerEl.playbackRate = 1;
-    }
-    if (this.startAt != null && Number.isFinite(this.startAt)) {
-      const target = this.startAt;
-      // Subscribe to wait until duration is known, then seek.
-      const stop = this.playerEl.subscribe((s) => {
-        if (Number.isFinite(s.duration) && s.duration > 0) {
-          try {
-            this.playerEl.currentTime = target;
-          } catch {
-            // ignore
-          }
-          stop();
-        }
-      });
-    }
-    this.subscribeToMediaState();
-  }
-
-  /** Subscribe once to vidstack's state stream and dispatch events. */
-  private subscribeToMediaState(): void {
-    if (!this.playerEl || this.mediaUnsub) return;
-    let lastPaused = true;
-    let lastEnded = false;
-    this.mediaUnsub = this.playerEl.subscribe((state) => {
-      // currentTime → outbound event
-      if (state.currentTime !== this.lastSeenTime) {
-        this.lastSeenTime = state.currentTime;
-        document.dispatchEvent(
-          new CustomEvent("hometube:current-time", {
-            detail: { seconds: state.currentTime },
-          }),
+    // Add caption tracks (non-fatal — some languages may 404).
+    for (const t of this.captionTracks) {
+      const trackUrl = `/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`;
+      try {
+        await player.addTextTrackAsync(
+          trackUrl,
+          t.lang,
+          "subtitle",
+          "text/vtt",
+          undefined,
+          t.auto_generated ? `${t.lang} (auto)` : t.lang,
         );
+      } catch {
+        // Caption track failed to load — not fatal for playback.
       }
-      if (lastPaused && !state.paused) {
-        lastPaused = false;
-        this.onPlay();
-      } else if (!lastPaused && state.paused) {
-        lastPaused = true;
-        this.onPause();
+    }
+
+    // Restore caption visibility from prior session.
+    try {
+      if (localStorage.getItem(CAPTIONS_KEY) === "true" && this.videoEl.textTracks.length > 0) {
+        this.videoEl.textTracks[0].mode = "showing";
       }
-      if (!lastEnded && state.ended) {
-        lastEnded = true;
-        this.onEnded();
-      } else if (lastEnded && !state.ended) {
-        lastEnded = false;
-      }
-    });
+    } catch {
+      // localStorage unavailable.
+    }
+
+    // Persist caption visibility via native textTracks change event.
+    // shaka's NativeTextDisplayer toggles track.mode directly, so we
+    // listen on the video element's textTracks collection rather than
+    // relying on shaka's own "textchanged" event (which only fires
+    // from shaka's internal text management path).
+    this.videoEl.textTracks.addEventListener("change", this.onCaptionChange);
+
+    // Seek to start position if specified.
+    if (this.startAt != null && Number.isFinite(this.startAt)) {
+      this.videoEl.currentTime = this.startAt;
+    }
+
+    // Lock playback rate if needed.
+    if (this.settings?.playback_speed_locked) {
+      this.videoEl.playbackRate = 1;
+    }
+
+    // Autoplay: attempt to start playback immediately. If the browser
+    // blocks it (autoplay policy requires user gesture for unmuted
+    // video), silently fall back to paused — the kid taps play.
+    try {
+      await this.videoEl.play();
+    } catch {
+      // Autoplay blocked — that's fine.
+    }
   }
 
-  /** Pick the highest-bitrate audio-only format from the stream list. */
+  private async destroyPlayer(): Promise<void> {
+    if (this.videoEl) {
+      this.videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
+      this.videoEl.removeEventListener("play", this.onPlay);
+      this.videoEl.removeEventListener("pause", this.onPause);
+      this.videoEl.removeEventListener("ended", this.onEnded);
+      this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
+      this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
+    }
+    if (this.ui) {
+      this.ui.destroy();
+      this.ui = null;
+    }
+    if (this.player) {
+      try {
+        await this.player.destroy();
+      } catch {
+        // Ignore errors during teardown.
+      }
+      this.player = null;
+    }
+  }
+
+  /** Pre-signed audio-only proxy URL from the stream response. */
   private bestAudioUrl(): string | null {
-    if (!this.stream) return null;
-    const audio = this.stream.formats
-      .filter((f) => (f.vcodec === "none" || f.height == null) && f.acodec !== "none")
-      .sort((a, b) => (b.format_id?.length ?? 0) - (a.format_id?.length ?? 0));
-    const chosen = audio[0];
-    if (!chosen) return null;
-    const params = new URLSearchParams({
-      video_id: this.videoId,
-      format: chosen.format_id,
-    });
-    return `/api/proxy/audio?${params.toString()}`;
+    return this.stream?.audio_proxy_url ?? null;
   }
 
   private toggleAudioOnly = (): void => {
     this.audioOnly = !this.audioOnly;
-    setVideoPrefs(this.videoId, { audioOnly: this.audioOnly });
-    queueMicrotask(() => this.attachSource());
+    try {
+      localStorage.setItem(AUDIO_ONLY_KEY, String(this.audioOnly));
+    } catch {
+      // localStorage unavailable.
+    }
+    void this.attachSource();
+  };
+
+  private onVolumeChange = (): void => {
+    if (!this.videoEl) return;
+    try {
+      localStorage.setItem(VOLUME_KEY, String(this.videoEl.volume));
+    } catch {
+      // localStorage unavailable.
+    }
+  };
+
+  private onCaptionChange = (): void => {
+    if (!this.videoEl) return;
+    const tracks = this.videoEl.textTracks;
+    const anyShowing = Array.from(tracks).some((t) => t.mode === "showing");
+    try {
+      localStorage.setItem(CAPTIONS_KEY, String(anyShowing));
+    } catch {
+      // localStorage unavailable.
+    }
+  };
+
+  private onTimeUpdate = (): void => {
+    if (!this.videoEl) return;
+    const t = this.videoEl.currentTime;
+    if (t !== this.lastSeenTime) {
+      this.lastSeenTime = t;
+      document.dispatchEvent(
+        new CustomEvent("hometube:current-time", {
+          detail: { seconds: t },
+        }),
+      );
+    }
   };
 
   private onPlay = (): void => {
@@ -500,33 +684,18 @@ export class VideoPlayer extends LitElement {
   };
 
   private onSleepExpired = (): void => {
-    if (!this.playerEl) return;
-    // Vidstack exposes volume on the underlying media element via the
-    // `state` stream; for the fade-out we just touch the host element's
-    // CSS-mediated `--media-volume` and call `pause()` after the fade.
-    const player = this.playerEl as unknown as {
-      volume: number;
-      pause(): void;
-    };
-    const startVolume = player.volume ?? 1;
+    if (!this.videoEl) return;
+    const startVolume = this.videoEl.volume;
     const start = Date.now();
     const fade = (): void => {
       const elapsed = Date.now() - start;
       const ratio = Math.max(0, 1 - elapsed / SLEEP_FADE_MS);
-      try {
-        player.volume = Math.max(0, startVolume * ratio);
-      } catch {
-        // ignore
-      }
+      this.videoEl.volume = Math.max(0, startVolume * ratio);
       if (elapsed < SLEEP_FADE_MS) {
         requestAnimationFrame(fade);
       } else {
-        try {
-          player.pause();
-          player.volume = startVolume;
-        } catch {
-          // ignore
-        }
+        this.videoEl.pause();
+        this.videoEl.volume = startVolume;
       }
     };
     requestAnimationFrame(fade);
@@ -558,16 +727,15 @@ export class VideoPlayer extends LitElement {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    if (!this.playerEl || !this.metadata) return;
+    if (!this.videoEl || !this.metadata) return;
     const now = Date.now();
     const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
     this.lastHeartbeatAt = now;
-    const state = this.playerEl.state;
     try {
       const res = await api.post<HeartbeatResponse>("/api/usage/heartbeat", {
         video_id: this.videoId,
-        position_seconds: Math.floor(state.currentTime ?? 0),
-        duration_seconds: Math.floor(state.duration ?? 0) || null,
+        position_seconds: Math.floor(this.videoEl.currentTime ?? 0),
+        duration_seconds: Math.floor(this.videoEl.duration ?? 0) || null,
         video_title: this.metadata.title,
         video_thumbnail_url: this.metadata.thumbnail_url,
         channel_title: this.metadata.channel_title,
@@ -594,7 +762,7 @@ export class VideoPlayer extends LitElement {
 
   private handleUsageLimit(detail: UsageLimitResponse): void {
     try {
-      (this.playerEl as unknown as { pause(): void }).pause();
+      this.videoEl?.pause();
     } catch {
       // ignore
     }
@@ -609,8 +777,8 @@ export class VideoPlayer extends LitElement {
   }
 
   private renderBookmarkMarkers() {
-    if (!this.playerEl || !this.metadata) return nothing;
-    const duration = Math.max(1, this.playerEl.state?.duration ?? 0);
+    if (!this.videoEl || !this.metadata) return nothing;
+    const duration = Math.max(1, this.videoEl.duration ?? 0);
     if (!isFinite(duration) || duration <= 0) return nothing;
     return html`
       <div class="seek-overlay" aria-hidden="true">
@@ -696,30 +864,9 @@ export class VideoPlayer extends LitElement {
         : "";
     return html`
       <div class="player-shell">
-        <media-player
-          aria-label=${this.metadata?.title ?? "Video player"}
-          style=${posterStyle}
-          .crossOrigin=${"use-credentials"}
-        >
-          <media-provider>
-            ${this.captionTracks.map(
-              (t) =>
-                html`<track
-                  kind="subtitles"
-                  src=${`/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`}
-                  srclang=${t.lang}
-                  label=${t.auto_generated ? `${t.lang} (auto)` : t.lang}
-                />`,
-            )}
-            ${this.metadata?.thumbnail_url
-              ? html`<media-poster
-                  src=${this.metadata.thumbnail_url}
-                  class="vds-poster"
-                ></media-poster>`
-              : nothing}
-          </media-provider>
-          <media-video-layout></media-video-layout>
-        </media-player>
+        <div class="shaka-container" style=${posterStyle}>
+          <video autoplay .poster=${this.metadata?.thumbnail_url ?? ""}></video>
+        </div>
         ${this.continuePromptOpen
           ? html`
               <div

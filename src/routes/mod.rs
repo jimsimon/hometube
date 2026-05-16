@@ -265,13 +265,12 @@ pub fn router(state: AppState) -> Router {
     // control (allowlist) is enforced inside each handler via
     // [`crate::services::access::can_child_view`].
     //
-    // The proxy endpoints (segment / audio / thumbnail) additionally
-    // pass through the per-account rate limiter to bound how aggressively
+    // The proxy endpoints (format / thumbnail) additionally pass
+    // through the per-account rate limiter to bound how aggressively
     // any one client can pull bytes through us.
     // -----------------------------------------------------------------
     let proxy_routes = Router::new()
-        .route("/api/proxy/segment", get(videos::get_segment))
-        .route("/api/proxy/audio", get(videos::get_audio))
+        .route("/api/proxy/format", get(videos::get_format))
         .route(
             "/api/proxy/thumbnail/{video_id}",
             get(videos::get_thumbnail),
