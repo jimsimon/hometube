@@ -282,6 +282,9 @@ export class VideoPlayer extends LitElement {
     `,
   ];
 
+  /** Guard against concurrent load() calls (connectedCallback + updated race). */
+  private loadInFlight = false;
+
   override connectedCallback(): void {
     super.connectedCallback();
     // Inject shaka's control CSS into the shadow root via adoptedStyleSheets.
@@ -293,7 +296,7 @@ export class VideoPlayer extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has("videoId") && this.videoId) {
+    if (changed.has("videoId") && this.videoId && !this.loadInFlight) {
       void this.load();
     }
   }
@@ -325,6 +328,8 @@ export class VideoPlayer extends LitElement {
   }
 
   private async load(): Promise<void> {
+    if (this.loadInFlight) return;
+    this.loadInFlight = true;
     this.error = "";
     try {
       // Restore the audio-only preference for this video.
@@ -365,6 +370,8 @@ export class VideoPlayer extends LitElement {
       } else {
         this.error = (err as Error).message ?? String(err);
       }
+    } finally {
+      this.loadInFlight = false;
     }
   }
 
@@ -436,17 +443,21 @@ export class VideoPlayer extends LitElement {
       await player.load(manifestUrl, undefined, "application/dash+xml");
     }
 
-    // Add caption tracks.
+    // Add caption tracks (non-fatal — some languages may 404).
     for (const t of this.captionTracks) {
       const trackUrl = `/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`;
-      await player.addTextTrackAsync(
-        trackUrl,
-        t.lang,
-        "subtitle",
-        "text/vtt",
-        undefined,
-        t.auto_generated ? `${t.lang} (auto)` : t.lang,
-      );
+      try {
+        await player.addTextTrackAsync(
+          trackUrl,
+          t.lang,
+          "subtitle",
+          "text/vtt",
+          undefined,
+          t.auto_generated ? `${t.lang} (auto)` : t.lang,
+        );
+      } catch {
+        // Caption track failed to load — not fatal for playback.
+      }
     }
 
     // Seek to start position if specified.
