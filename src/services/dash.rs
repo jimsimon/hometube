@@ -554,6 +554,26 @@ pub fn synthesize_manifest(
     ));
     mpd.push_str("<Period>\n");
 
+    // Only emit Representations that have SegmentBase data.
+    // shaka-player requires indexRange for the isoff-on-demand profile;
+    // bare <BaseURL> without SegmentBase triggers error 4003
+    // (DASH_NO_SEGMENT_INFO). Formats without ranges are simply
+    // omitted — the user gets fewer quality tiers on cold load, but
+    // playback works. After background probes or a second extraction
+    // fills the cache, the full set appears.
+    let video_formats: Vec<&Format> = video_formats
+        .into_iter()
+        .filter(|f| box_ranges.contains_key(&f.format_id))
+        .collect();
+    let audio_formats: Vec<&Format> = audio_formats
+        .into_iter()
+        .filter(|f| box_ranges.contains_key(&f.format_id))
+        .collect();
+
+    if video_formats.is_empty() && audio_formats.is_empty() {
+        return None;
+    }
+
     if !video_formats.is_empty() {
         mpd.push_str("  <AdaptationSet mimeType=\"video/webm\" contentType=\"video\" segmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">\n");
         for f in &video_formats {
@@ -1205,7 +1225,7 @@ mod tests {
                 ..https_format("ignored", None, None, None, None)
             },
         ];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["248", "247", "251"]);
         let mpd =
             synthesize_manifest(secret, "vid-1", &formats, Some(213.0), &br).expect("synthesize");
 
@@ -1261,7 +1281,7 @@ mod tests {
         let mut en = https_format("251-en", None, Some("none"), Some("opus"), Some("en"));
         en.format_note = Some("original (default), low".into());
         let es = https_format("251-es", None, Some("none"), Some("opus"), Some("es"));
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["251-en", "251-es"]);
         let mpd =
             synthesize_manifest(secret, "vid", &[en, es], Some(60.0), &br).expect("synthesize");
 
@@ -1292,7 +1312,7 @@ mod tests {
             Some("opus"),
             Some("en"),
         )];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["251"]);
         let mpd = synthesize_manifest(secret, "v", &formats, Some(60.0), &br).expect("synthesize");
         assert!(
             !mpd.contains(r#"value="main""#),
@@ -1330,6 +1350,19 @@ mod tests {
                 end: idx_end,
             },
         }
+    }
+
+    /// Build a `box_ranges` map with dummy SegmentBase ranges for
+    /// every format ID in the slice. Used by tests that don't care
+    /// about the actual byte values but need ranges present so the
+    /// synthesizer doesn't filter Representations out.
+    fn dummy_ranges(
+        format_ids: &[&str],
+    ) -> std::collections::HashMap<String, super::super::mp4::BoxRanges> {
+        format_ids
+            .iter()
+            .map(|id| (id.to_string(), ranges(0, 219, 220, 4481)))
+            .collect()
     }
 
     /// When `box_ranges` contains an entry for a format, the
@@ -1375,11 +1408,9 @@ mod tests {
         );
     }
 
-    /// When `box_ranges` is missing for a format, the synthesizer
-    /// falls back to plain `<BaseURL>` (no `<SegmentBase>`). dash.js
-    /// will then byte-range-fetch the entire file. Used for formats
-    /// where the probe failed or hasn't run yet (audio with no sidx,
-    /// transient probe errors).
+    /// When `box_ranges` is missing for all formats, the synthesizer
+    /// now skips those Representations entirely — resulting in no
+    /// usable content, so synthesize_manifest returns `None`.
     #[test]
     fn synthesize_manifest_falls_back_to_base_url_when_ranges_unknown() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1392,25 +1423,15 @@ mod tests {
         )];
         let br = std::collections::HashMap::new();
 
-        let mpd =
-            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
-        assert!(mpd.contains("<BaseURL>"), "BaseURL always emitted:\n{mpd}");
         assert!(
-            !mpd.contains("<SegmentBase"),
-            "SegmentBase only when ranges are known:\n{mpd}"
-        );
-        assert!(
-            !mpd.contains("<Initialization"),
-            "Initialization only when ranges are known:\n{mpd}"
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).is_none(),
+            "manifest should be None when no formats have ranges"
         );
     }
 
     /// Mixed format pools: ranges available for one format but not
-    /// another should produce a manifest with a SegmentBase block on
-    /// the probed format and a plain BaseURL on the other. dash.js
-    /// handles this fine — each Representation is independent.
-    /// Uses two different heights so the per-height trim doesn't drop
-    /// either Representation.
+    /// another — now only the format with ranges survives. The format
+    /// without ranges is filtered out by the synthesizer.
     #[test]
     fn synthesize_manifest_mixes_segment_base_and_plain_base_url() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1423,7 +1444,11 @@ mod tests {
 
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
-        assert_eq!(mpd.matches("<BaseURL>").count(), 2, "two BaseURLs:\n{mpd}");
+        assert_eq!(
+            mpd.matches("<BaseURL>").count(),
+            1,
+            "one BaseURL (only 248 has ranges):\n{mpd}"
+        );
         assert_eq!(
             mpd.matches("<SegmentBase ").count(),
             1,
@@ -1488,7 +1513,7 @@ mod tests {
             https_format("398", Some(720), Some("av01.0.05M.08"), Some("none"), None),
             dashy_720,
         ];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["248", "247", "248-dashy", "247-dashy"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
 
@@ -1532,7 +1557,7 @@ mod tests {
             https_format("271", Some(1440), Some("vp9"), Some("none"), None),
             https_format("313", Some(2160), Some("vp9"), Some("none"), None),
         ];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["278", "242", "243", "247", "248", "271", "313"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
         assert!(mpd.contains(r#"id="278""#), "144p must survive:\n{mpd}");
@@ -1567,7 +1592,7 @@ mod tests {
             https_format("247", Some(720), Some("vp9"), Some("none"), None),
             https_format("251", None, Some("none"), Some("opus"), Some("en")),
         ];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["247", "251"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
         assert!(!mpd.contains(r#"id="18""#), "muxed format dropped:\n{mpd}");
@@ -1597,7 +1622,7 @@ mod tests {
             // Spanish has a single opus candidate — survives.
             https_format("251-es", None, Some("none"), Some("opus"), Some("es")),
         ];
-        let br = std::collections::HashMap::new();
+        let br = dummy_ranges(&["251", "250", "251-drc", "251-es"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
         // First-seen English opus wins.
