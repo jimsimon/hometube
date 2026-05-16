@@ -10,6 +10,9 @@
 //! The HMAC over the canonical query string prevents abuse — a client
 //! can't rewrite arbitrary URLs through our proxy because they cannot
 //! produce a valid signature without the server-side secret.
+//!
+//! The player (shaka-player) drives playback via byte-range requests
+//! against the format proxy URL.
 
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
@@ -106,25 +109,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Build the proxy URL for a segment. The `sq` parameter is the segment
-/// sequence number; the rest of the URL is recoverable from the cached
-/// metadata + format ID.
-pub fn build_segment_proxy_url(secret: &[u8], video_id: &str, format_id: &str, sq: &str) -> String {
-    let params: Vec<(&str, String)> = vec![
-        ("video_id", video_id.to_string()),
-        ("format", format_id.to_string()),
-        ("sq", sq.to_string()),
-    ];
-    let sig = sign_query(secret, &params);
-    format!(
-        "/api/proxy/segment?video_id={}&format={}&sq={}&sig={}",
-        youtube::percent_encode(video_id),
-        youtube::percent_encode(format_id),
-        youtube::percent_encode(sq),
-        sig
-    )
-}
-
 /// Build a signed proxy URL for streaming an entire format file via
 /// byte-range requests. Used by the synthetic DASH manifest where each
 /// `<Representation>` points at a `<BaseURL>` through our proxy.
@@ -152,14 +136,14 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 /// shapes depending on what we know about the upstream mp4:
 ///
 /// 1. **`<SegmentBase indexRange>` + `<Initialization range>`** — when
-///    `box_ranges` contains an entry for the format. dash.js fetches
+///    `box_ranges` contains an entry for the format. the player fetches
 ///    just the `moov`+`sidx` byte range, parses the sidx to learn
 ///    segment timing, then issues per-segment range requests against
 ///    the BaseURL. Each segment is independently cacheable in
 ///    `/api/proxy/format`. This is the preferred shape for adaptive
 ///    bitrate switching and per-segment caching.
 /// 2. **Plain `<BaseURL>`** — when the format hasn't been probed yet
-///    or the probe failed (e.g. raw audio with no sidx). dash.js
+///    or the probe failed (e.g. raw audio with no sidx). the player
 ///    issues whole-file byte-range requests; switching qualities
 ///    abandons in-flight buffer.
 ///
@@ -195,7 +179,7 @@ pub fn synthesize_manifest(
     // - One audio AdaptationSet per language (mimeType="audio/webm")
     //   with opus, which matches the video container.
     // - No AdaptationSet split, no per-container codec mismatch
-    //   (which previously made dash.js parse opus/webm as if it
+    //   (which previously made the player parse opus/webm as if it
     //   were mp4 and ask for byte 440-million in an 8 MB file).
     //
     // Browser support: vp9 and opus are universal in Chrome/Firefox/
@@ -249,7 +233,7 @@ pub fn synthesize_manifest(
     // Deduplicate: yt-dlp's `formats=duplicate` extractor flag returns
     // both `https` (whole-file) and `http_dash_segments` (`*-dashy`)
     // variants of the same underlying media. Keeping both clutters
-    // the manifest and wastes dash.js's startup probe budget. We
+    // the manifest and wastes the player's startup probe budget. We
     // prefer the variant that has BoxRanges available (so it can
     // render as `<SegmentBase>`); when neither has ranges or both do,
     // the first one wins.
@@ -259,7 +243,7 @@ pub fn synthesize_manifest(
     // Muxed formats (both vcodec and acodec set) are excluded entirely
     // — they're a separate "progressive" format from yt-dlp that
     // duplicates content already in the adaptive video/audio
-    // AdaptationSets. Including them confuses dash.js.
+    // AdaptationSets. Including them confuses the player.
     let video_candidates: Vec<&Format> = usable
         .iter()
         .copied()
@@ -278,9 +262,9 @@ pub fn synthesize_manifest(
         })
         .collect();
 
-    // Trim the candidate pools so dash.js doesn't drown in
+    // Trim the candidate pools so the player doesn't drown in
     // Representations during cold-load discovery (without
-    // `<SegmentBase indexRange>`, dash.js has to probe each
+    // `<SegmentBase indexRange>`, the player has to probe each
     // Representation empirically; with too many it never converges
     // and playback stalls).
     let video_formats = trim_video_representations(&video_candidates);
@@ -370,7 +354,7 @@ pub fn synthesize_manifest(
                 lang_attr
             ));
             // Mark the original-language audio as `Role=main` so
-            // dash.js's `prioritizeRoleMain` selects it. Skip when only
+            // the player's `prioritizeRoleMain` selects it. Skip when only
             // one language is present (no ambiguity to resolve).
             if main_lang.as_deref() == Some(lang.as_str()) && lang_groups.len() > 1 {
                 mpd.push_str(
@@ -408,11 +392,11 @@ pub fn synthesize_manifest(
 /// box offsets for this format:
 ///
 /// - **With `BoxRanges`** — `<BaseURL>` + `<SegmentBase indexRange>` +
-///   `<Initialization range>`. dash.js fetches only the moov+sidx
+///   `<Initialization range>`. the player fetches only the moov+sidx
 ///   prefix to bootstrap, then issues per-segment range requests for
 ///   playback. Each segment becomes individually cacheable in the
 ///   format proxy.
-/// - **Without `BoxRanges`** — plain `<BaseURL>`. dash.js performs
+/// - **Without `BoxRanges`** — plain `<BaseURL>`. the player performs
 ///   byte-range fetching against the whole file. Used when probing
 ///   failed (audio formats without sidx, transient network errors).
 fn push_representation(
@@ -430,7 +414,7 @@ fn push_representation(
         escape_xml(&base_url)
     ));
     if let Some(ranges) = box_ranges.get(&f.format_id) {
-        // SegmentBase path. dash.js will issue:
+        // SegmentBase path. the player will issue:
         //   1. Range: bytes=<init.start>-<init.end>  → moov (codec init)
         //   2. Range: bytes=<index.start>-<index.end> → sidx (segment table)
         //   3. Range: bytes=...                       → per-segment fetches
@@ -518,7 +502,7 @@ fn dedupe_prefer_with_ranges<'a>(
 /// First-seen wins per height — yt-dlp orders formats with the
 /// "preferred" variant earlier so that's a reasonable choice.
 ///
-/// We do *not* impose a minimum height. dash.js inside our trimmed
+/// We do *not* impose a minimum height. the player inside our trimmed
 /// manifest gets at most ~8 video Representations (one per height
 /// from 144p to 4K), which is small enough to converge quickly even
 /// without `<SegmentBase indexRange>` data.
@@ -673,22 +657,6 @@ mod tests {
             ("format", "137".into()),
         ];
         assert_eq!(sign_query(secret, &a), sign_query(secret, &b));
-    }
-
-    /// `build_segment_proxy_url` produces a URL that contains the
-    /// signature it would itself verify against.
-    #[test]
-    fn build_segment_proxy_url_round_trip() {
-        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
-        let url = build_segment_proxy_url(secret, "abc", "137", "42");
-        // Find sig=...
-        let (_, sig) = url.rsplit_once("sig=").expect("sig in url");
-        let params: Vec<(&str, String)> = vec![
-            ("video_id", "abc".into()),
-            ("format", "137".into()),
-            ("sq", "42".into()),
-        ];
-        assert!(verify_query(secret, &params, sig));
     }
 
     /// Build a `Format` for the synthesizer tests with the minimum
@@ -881,7 +849,7 @@ mod tests {
     /// When `box_ranges` contains an entry for a format, the
     /// synthesizer renders it as `<BaseURL>` plus `<SegmentBase
     /// indexRange>` plus a child `<Initialization range>`. That tells
-    /// dash.js to fetch only the moov+sidx prefix, parse segment
+    /// the player to fetch only the moov+sidx prefix, parse segment
     /// timing, and then issue per-segment range requests against
     /// `/api/proxy/format`.
     #[test]
@@ -1003,8 +971,8 @@ mod tests {
     /// exist at the same height (e.g. `https` vs `http_dash_segments`
     /// from `formats=duplicate`), the per-height trim collapses them
     /// to a single Representation — first-seen wins. This keeps
-    /// dash.js's discovery overhead bounded on cold load (without
-    /// `<SegmentBase indexRange>`, dash.js probes each Representation
+    /// the player's discovery overhead bounded on cold load (without
+    /// `<SegmentBase indexRange>`, the player probes each Representation
     /// empirically; too many never converges).
     #[test]
     fn synthesize_manifest_picks_one_codec_per_height() {
@@ -1057,7 +1025,7 @@ mod tests {
     /// hotspots in cars (where 144p is a feature, not a bug — it
     /// keeps playback going on a thin pipe). The synthesizer
     /// deliberately imposes no minimum height; ABR tier selection is
-    /// dash.js's job at runtime.
+    /// the player's job at runtime.
     #[test]
     fn synthesize_manifest_keeps_all_resolutions() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1090,7 +1058,7 @@ mod tests {
 
     /// Muxed formats (vcodec AND acodec set, like itag 18) duplicate
     /// content already in the adaptive video/audio AdaptationSets and
-    /// confuse dash.js's track selection. Drop them entirely.
+    /// confuse the player's track selection. Drop them entirely.
     #[test]
     fn synthesize_manifest_drops_muxed_formats() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
