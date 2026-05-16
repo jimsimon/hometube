@@ -1,19 +1,17 @@
 /**
  * <hometube-video-player video-id="...">
  *
- * Wraps a vidstack `<media-player>` (with dash.js + hls.js auto-loaded
- * by vidstack as soon as the manifest type is detected) and adds the
- * HomeTube-specific behaviour:
+ * Wraps a native `<video>` element with shaka-player (Google's
+ * open-source adaptive streaming library) and adds HomeTube-specific
+ * behaviour:
  *
  *   - Loads metadata + DASH-manifest URL from
- *     `/api/videos/:id/stream`. The backend now exposes the rewritten
- *     manifest at `/api/videos/:id/stream/manifest.mpd` so vidstack
- *     can fetch it directly (vidstack/dash.js cannot consume blob:
- *     URLs reliably).
+ *     `/api/videos/:id/stream`. The backend exposes the synthesized
+ *     manifest at `/api/videos/:id/stream/manifest.mpd`.
  *   - Sends a heartbeat every 30s while playing to
  *     `/api/usage/heartbeat`; dispatches `hometube:usage-limit` on a
  *     403.
- *   - Dispatches `hometube:current-time` on every `time-update` and
+ *   - Dispatches `hometube:current-time` on every `timeupdate` and
  *     `hometube:video-ended` on `ended`.
  *   - Hosts the bookmark / sleep-timer / like / subscribe / download
  *     controls in a "chrome" row below the video.
@@ -31,46 +29,42 @@
  *   - Adds a "Download" button when `child_settings.downloads_enabled`
  *     is on; the click handler talks to the offline-downloads service
  *     to pipe the response into the Cache API.
+ *
+ * shaka-player handles DASH (including webm SegmentBase) and HLS
+ * natively. Its built-in UI overlay provides quality switching,
+ * language selection, fullscreen, PiP, and captions.
  */
 
-import { LitElement, html, css, unsafeCSS, nothing } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
-// dashjs and hls.js are dynamically resolved by vidstack when it sees a
-// DASH or HLS source respectively. We side-effect-import them here so
-// they end up in this component's bundle (otherwise Vite would tree-
-// shake them out and the dynamic resolution would 404).
-import "dashjs";
-import "hls.js";
+// shaka-player's pre-built UI bundle (includes player + UI overlay).
+// This is a UMD/global build that puts `shaka` on globalThis.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — shaka-player's UI bundle is UMD, not ESM
+import "shaka-player/dist/shaka-player.ui.js";
+import shakaControlsCss from "shaka-player/dist/controls.css?inline";
 
-// vidstack styles + element registration. The component renders inside
-// a Lit shadow root, so the styles must be adopted into that shadow
-// root (see `static styles` below). However, vidstack *also* portals
-// menu popups (`<media-menu-items>`) out to the light DOM to escape
-// stacking-context traps, and those portaled menus are not reachable
-// from the shadow root's adopted stylesheets. We therefore also
-// inject the same CSS into `document.head` once per page.
-import vidstackTheme from "vidstack/player/styles/default/theme.css?inline";
-import vidstackVideoLayout from "vidstack/player/styles/default/layouts/video.css?inline";
-import "vidstack/player";
-import "vidstack/player/layouts";
-import "vidstack/player/ui";
-
-/**
- * Idempotently inject the vidstack stylesheets into `document.head` so
- * vidstack's portaled menu popups (which live outside the player's
- * shadow root) are styled correctly.
- */
-function ensureVidstackDocumentStyles(): void {
-  const MARKER = "data-hometube-vidstack-styles";
-  if (document.head.querySelector(`style[${MARKER}]`)) return;
-  const style = document.createElement("style");
-  style.setAttribute(MARKER, "");
-  // Concatenated theme + video-layout stylesheets. Selectors match
-  // vidstack's own attribute/class hooks (`[data-media-player]`,
-  // `.vds-menu-items`, etc.) so the same rules work in both contexts.
-  style.textContent = `${vidstackTheme}\n${vidstackVideoLayout}`;
-  document.head.appendChild(style);
+// TypeScript doesn't understand the global `shaka` that the UMD
+// build creates. We declare what we need with `any`-typed
+// constructors — the runtime types are correct.
+declare const shaka: {
+  polyfill: { installAll(): void };
+  Player: new () => ShakaPlayer;
+  ui: { Overlay: new (player: ShakaPlayer, container: HTMLElement, video: HTMLVideoElement) => ShakaUI };
+};
+interface ShakaPlayer {
+  attach(video: HTMLVideoElement): Promise<void>;
+  load(uri: string, startTime?: number, mimeType?: string): Promise<void>;
+  destroy(): Promise<void>;
+  configure(path: string, value: unknown): void;
+  getNetworkingEngine(): { registerRequestFilter(filter: (type: number, request: { allowCrossSiteCredentials: boolean }) => void): void } | null;
+  addEventListener(event: string, handler: (e: Event) => void): void;
+  addTextTrackAsync(uri: string, language: string, kind: string, mimeType: string, codec?: string, label?: string): Promise<unknown>;
+}
+interface ShakaUI {
+  configure(config: Record<string, unknown>): void;
+  destroy(): void;
 }
 
 import { ApiError, api } from "../services/api.js";
@@ -111,23 +105,6 @@ const QUALITY_CAP: Record<string, number> = {
   "1080p": 1080,
 };
 
-/** Minimal subset of the vidstack media-state we read from. */
-interface VidstackMediaState {
-  currentTime: number;
-  duration: number;
-  paused: boolean;
-  ended: boolean;
-}
-
-/** Subset of `<media-player>` we touch programmatically. */
-interface VidstackMediaPlayer extends HTMLElement {
-  src: string | { src: string; type: string };
-  currentTime: number;
-  playbackRate: number;
-  state: VidstackMediaState;
-  subscribe(cb: (state: VidstackMediaState) => void): () => void;
-}
-
 @customElement("hometube-video-player")
 export class VideoPlayer extends LitElement {
   @property({ type: String, attribute: "video-id" })
@@ -161,20 +138,21 @@ export class VideoPlayer extends LitElement {
   /** Set when a download succeeds — collapses to a "downloaded" badge. */
   @state() private downloaded = false;
 
-  @query("media-player") private playerEl!: VidstackMediaPlayer;
+  @query("video") private videoEl!: HTMLVideoElement;
+  @query(".shaka-container") private containerEl!: HTMLElement;
 
   private heartbeatTimer: number | null = null;
   private lastHeartbeatAt = 0;
   /** True after a manual play interaction; resets the autoplay counter. */
   private manualPlayed = false;
-  /** Unsubscribe from the vidstack state subscription. */
-  private mediaUnsub: (() => void) | null = null;
   /** Last currentTime we saw — used to compute heartbeat deltas. */
   private lastSeenTime = 0;
+  /** shaka.Player instance. */
+  private player: ShakaPlayer | null = null;
+  /** shaka.ui.Overlay instance (manages the control bar). */
+  private ui: ShakaUI | null = null;
 
   static styles = [
-    unsafeCSS(vidstackTheme),
-    unsafeCSS(vidstackVideoLayout),
     css`
       :host {
         display: block;
@@ -186,18 +164,26 @@ export class VideoPlayer extends LitElement {
         margin: 0 auto;
         view-transition-name: video-hero;
       }
-      media-player {
+      .shaka-container {
         width: 100%;
         aspect-ratio: 16 / 9;
         background: black;
         border-radius: 0.5rem;
         overflow: hidden;
       }
+      .shaka-container video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
       /* Audio-only mode: replace the player surface with the poster. */
-      :host([data-audio-only]) media-player {
+      :host([data-audio-only]) .shaka-container {
         background-size: cover;
         background-position: center;
         background-repeat: no-repeat;
+      }
+      :host([data-audio-only]) .shaka-container video {
+        opacity: 0;
       }
       .error {
         color: var(--wa-color-danger-fill, #b91c1c);
@@ -296,8 +282,8 @@ export class VideoPlayer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // Style vidstack's portaled menu popups (rendered in light DOM).
-    ensureVidstackDocumentStyles();
+    // Inject shaka's control CSS into the shadow root via adoptedStyleSheets.
+    this.injectShakaStyles();
     if (this.videoId) void this.load();
     document.addEventListener("hometube:sleep-timer-expired", this.onSleepExpired as EventListener);
     document.addEventListener("hometube:bookmarks-loaded", this.onBookmarksLoaded as EventListener);
@@ -313,8 +299,7 @@ export class VideoPlayer extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopHeartbeat();
-    this.mediaUnsub?.();
-    this.mediaUnsub = null;
+    this.destroyPlayer();
     document.removeEventListener(
       "hometube:sleep-timer-expired",
       this.onSleepExpired as EventListener,
@@ -327,6 +312,14 @@ export class VideoPlayer extends LitElement {
       "hometube:autoplay-cap-reached",
       this.onAutoplayCap as EventListener,
     );
+  }
+
+  /** Inject shaka-player's controls.css into this shadow root. */
+  private injectShakaStyles(): void {
+    if (!this.shadowRoot) return;
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(shakaControlsCss);
+    this.shadowRoot.adoptedStyleSheets = [...this.shadowRoot.adoptedStyleSheets, sheet];
   }
 
   private async load(): Promise<void> {
@@ -357,83 +350,118 @@ export class VideoPlayer extends LitElement {
         this.settings = settings;
         this.captionTracks = captions;
       }
-      // Wait for the player element to render before attaching the source.
-      queueMicrotask(() => this.attachSource());
+      // Wait for the element to render before attaching the player.
+      await this.updateComplete;
+      await this.attachSource();
     } catch (err) {
       this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     }
   }
 
-  private attachSource(): void {
-    if (!this.playerEl) return;
+  private async attachSource(): Promise<void> {
+    if (!this.videoEl || !this.containerEl) return;
 
+    // Destroy any existing player instance (e.g. on videoId change).
+    this.destroyPlayer();
+
+    // Install polyfills if needed (no-op in modern browsers).
+    shaka.polyfill.installAll();
+
+    // Create shaka.Player.
+    const player = new shaka.Player();
+    await player.attach(this.videoEl);
+    this.player = player;
+
+    // Configure networking: send cookies with manifest/segment requests.
+    player.getNetworkingEngine()!.registerRequestFilter((_type, request) => {
+      request.allowCrossSiteCredentials = true;
+    });
+
+    // Apply quality cap if set.
+    if (this.settings?.max_quality) {
+      const maxHeight = QUALITY_CAP[this.settings.max_quality];
+      if (maxHeight) {
+        player.configure("abr.restrictions.maxHeight", maxHeight);
+      }
+    }
+
+    // Create UI overlay (controls, quality menu, language menu, etc.).
+    const ui = new shaka.ui.Overlay(player, this.containerEl, this.videoEl);
+    this.ui = ui;
+    const uiConfig: Record<string, unknown> = {};
+    if (this.settings?.playback_speed_locked) {
+      // Hide the playback speed button when locked.
+      uiConfig["overflowMenuButtons"] = [
+        "quality",
+        "language",
+        "captions",
+        "picture_in_picture",
+      ];
+    }
+    ui.configure(uiConfig);
+
+    // Error handling.
+    player.addEventListener("error", (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      console.error("shaka error", detail);
+    });
+
+    // Wire up HTML5 video events.
+    this.videoEl.addEventListener("timeupdate", this.onTimeUpdate);
+    this.videoEl.addEventListener("play", this.onPlay);
+    this.videoEl.addEventListener("pause", this.onPause);
+    this.videoEl.addEventListener("ended", this.onEnded);
+
+    // Load the appropriate source.
     if (this.audioOnly) {
       const audioUrl = this.bestAudioUrl();
       if (audioUrl) {
-        this.playerEl.src = { src: audioUrl, type: "audio/mp4" };
+        await player.load(audioUrl);
       }
     } else {
-      // Pick the right MIME type so vidstack routes to dash.js or
-      // hls.js. The `/stream` JSON tells us which flavour the backend
-      // produced; default to DASH for legacy callers.
-      const manifestType = this.stream?.manifest_type;
-      const type =
-        manifestType === "hls" ? "application/vnd.apple.mpegurl" : "application/dash+xml";
-      this.playerEl.src = {
-        src: `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`,
-        type,
-      };
+      const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      await player.load(manifestUrl);
     }
 
-    if (this.settings?.playback_speed_locked) {
-      this.playerEl.playbackRate = 1;
+    // Add caption tracks.
+    for (const t of this.captionTracks) {
+      const trackUrl = `/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`;
+      await player.addTextTrackAsync(
+        trackUrl,
+        t.lang,
+        "subtitle",
+        "text/vtt",
+        undefined,
+        t.auto_generated ? `${t.lang} (auto)` : t.lang,
+      );
     }
+
+    // Seek to start position if specified.
     if (this.startAt != null && Number.isFinite(this.startAt)) {
-      const target = this.startAt;
-      // Subscribe to wait until duration is known, then seek.
-      const stop = this.playerEl.subscribe((s) => {
-        if (Number.isFinite(s.duration) && s.duration > 0) {
-          try {
-            this.playerEl.currentTime = target;
-          } catch {
-            // ignore
-          }
-          stop();
-        }
-      });
+      this.videoEl.currentTime = this.startAt;
     }
-    this.subscribeToMediaState();
+
+    // Lock playback rate if needed.
+    if (this.settings?.playback_speed_locked) {
+      this.videoEl.playbackRate = 1;
+    }
   }
 
-  /** Subscribe once to vidstack's state stream and dispatch events. */
-  private subscribeToMediaState(): void {
-    if (!this.playerEl || this.mediaUnsub) return;
-    let lastPaused = true;
-    let lastEnded = false;
-    this.mediaUnsub = this.playerEl.subscribe((state) => {
-      // currentTime → outbound event
-      if (state.currentTime !== this.lastSeenTime) {
-        this.lastSeenTime = state.currentTime;
-        document.dispatchEvent(
-          new CustomEvent("hometube:current-time", {
-            detail: { seconds: state.currentTime },
-          }),
-        );
-      }
-      if (lastPaused && !state.paused) {
-        lastPaused = false;
-        this.onPlay();
-      } else if (!lastPaused && state.paused) {
-        lastPaused = true;
-        this.onPause();
-      }
-      if (!lastEnded && state.ended) {
-        lastEnded = true;
-        this.onEnded();
-      } else if (lastEnded && !state.ended) {
-        lastEnded = false;
-      }
-    });
+  private destroyPlayer(): void {
+    if (this.videoEl) {
+      this.videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
+      this.videoEl.removeEventListener("play", this.onPlay);
+      this.videoEl.removeEventListener("pause", this.onPause);
+      this.videoEl.removeEventListener("ended", this.onEnded);
+    }
+    if (this.ui) {
+      this.ui.destroy();
+      this.ui = null;
+    }
+    if (this.player) {
+      void this.player.destroy();
+      this.player = null;
+    }
   }
 
   /** Pick the highest-bitrate audio-only format from the stream list. */
@@ -454,7 +482,20 @@ export class VideoPlayer extends LitElement {
   private toggleAudioOnly = (): void => {
     this.audioOnly = !this.audioOnly;
     setVideoPrefs(this.videoId, { audioOnly: this.audioOnly });
-    queueMicrotask(() => this.attachSource());
+    void this.attachSource();
+  };
+
+  private onTimeUpdate = (): void => {
+    if (!this.videoEl) return;
+    const t = this.videoEl.currentTime;
+    if (t !== this.lastSeenTime) {
+      this.lastSeenTime = t;
+      document.dispatchEvent(
+        new CustomEvent("hometube:current-time", {
+          detail: { seconds: t },
+        }),
+      );
+    }
   };
 
   private onPlay = (): void => {
@@ -531,33 +572,18 @@ export class VideoPlayer extends LitElement {
   };
 
   private onSleepExpired = (): void => {
-    if (!this.playerEl) return;
-    // Vidstack exposes volume on the underlying media element via the
-    // `state` stream; for the fade-out we just touch the host element's
-    // CSS-mediated `--media-volume` and call `pause()` after the fade.
-    const player = this.playerEl as unknown as {
-      volume: number;
-      pause(): void;
-    };
-    const startVolume = player.volume ?? 1;
+    if (!this.videoEl) return;
+    const startVolume = this.videoEl.volume;
     const start = Date.now();
     const fade = (): void => {
       const elapsed = Date.now() - start;
       const ratio = Math.max(0, 1 - elapsed / SLEEP_FADE_MS);
-      try {
-        player.volume = Math.max(0, startVolume * ratio);
-      } catch {
-        // ignore
-      }
+      this.videoEl.volume = Math.max(0, startVolume * ratio);
       if (elapsed < SLEEP_FADE_MS) {
         requestAnimationFrame(fade);
       } else {
-        try {
-          player.pause();
-          player.volume = startVolume;
-        } catch {
-          // ignore
-        }
+        this.videoEl.pause();
+        this.videoEl.volume = startVolume;
       }
     };
     requestAnimationFrame(fade);
@@ -589,16 +615,15 @@ export class VideoPlayer extends LitElement {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    if (!this.playerEl || !this.metadata) return;
+    if (!this.videoEl || !this.metadata) return;
     const now = Date.now();
     const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
     this.lastHeartbeatAt = now;
-    const state = this.playerEl.state;
     try {
       const res = await api.post<HeartbeatResponse>("/api/usage/heartbeat", {
         video_id: this.videoId,
-        position_seconds: Math.floor(state.currentTime ?? 0),
-        duration_seconds: Math.floor(state.duration ?? 0) || null,
+        position_seconds: Math.floor(this.videoEl.currentTime ?? 0),
+        duration_seconds: Math.floor(this.videoEl.duration ?? 0) || null,
         video_title: this.metadata.title,
         video_thumbnail_url: this.metadata.thumbnail_url,
         channel_title: this.metadata.channel_title,
@@ -625,7 +650,7 @@ export class VideoPlayer extends LitElement {
 
   private handleUsageLimit(detail: UsageLimitResponse): void {
     try {
-      (this.playerEl as unknown as { pause(): void }).pause();
+      this.videoEl?.pause();
     } catch {
       // ignore
     }
@@ -640,8 +665,8 @@ export class VideoPlayer extends LitElement {
   }
 
   private renderBookmarkMarkers() {
-    if (!this.playerEl || !this.metadata) return nothing;
-    const duration = Math.max(1, this.playerEl.state?.duration ?? 0);
+    if (!this.videoEl || !this.metadata) return nothing;
+    const duration = Math.max(1, this.videoEl.duration ?? 0);
     if (!isFinite(duration) || duration <= 0) return nothing;
     return html`
       <div class="seek-overlay" aria-hidden="true">
@@ -727,30 +752,12 @@ export class VideoPlayer extends LitElement {
         : "";
     return html`
       <div class="player-shell">
-        <media-player
-          aria-label=${this.metadata?.title ?? "Video player"}
-          style=${posterStyle}
-          .crossOrigin=${"use-credentials"}
-        >
-          <media-provider>
-            ${this.captionTracks.map(
-              (t) =>
-                html`<track
-                  kind="subtitles"
-                  src=${`/api/videos/${encodeURIComponent(this.videoId)}/captions/${encodeURIComponent(t.lang)}`}
-                  srclang=${t.lang}
-                  label=${t.auto_generated ? `${t.lang} (auto)` : t.lang}
-                />`,
-            )}
-            ${this.metadata?.thumbnail_url
-              ? html`<media-poster
-                  src=${this.metadata.thumbnail_url}
-                  class="vds-poster"
-                ></media-poster>`
-              : nothing}
-          </media-provider>
-          <media-video-layout></media-video-layout>
-        </media-player>
+        <div class="shaka-container" style=${posterStyle}>
+          <video
+            autoplay
+            .poster=${this.metadata?.thumbnail_url ?? ""}
+          ></video>
+        </div>
         ${this.continuePromptOpen
           ? html`
               <div
