@@ -95,6 +95,7 @@ import "./error-banner.js";
 
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
+const VOLUME_KEY = "hometube-volume";
 /** How long the audio fade-out lasts when the sleep timer expires. */
 const SLEEP_FADE_MS = 4_000;
 /** Warn the user if free storage is below this (500 MB). */
@@ -428,6 +429,20 @@ export class VideoPlayer extends LitElement {
     this.videoEl.addEventListener("play", this.onPlay);
     this.videoEl.addEventListener("pause", this.onPause);
     this.videoEl.addEventListener("ended", this.onEnded);
+    this.videoEl.addEventListener("volumechange", this.onVolumeChange);
+
+    // Restore persisted volume level.
+    try {
+      const saved = localStorage.getItem(VOLUME_KEY);
+      if (saved != null) {
+        const vol = parseFloat(saved);
+        if (Number.isFinite(vol)) {
+          this.videoEl.volume = Math.max(0, Math.min(1, vol));
+        }
+      }
+    } catch {
+      // localStorage unavailable — use browser default.
+    }
 
     // Load the appropriate source.
     if (this.audioOnly) {
@@ -469,6 +484,15 @@ export class VideoPlayer extends LitElement {
     if (this.settings?.playback_speed_locked) {
       this.videoEl.playbackRate = 1;
     }
+
+    // Autoplay: attempt to start playback immediately. If the browser
+    // blocks it (autoplay policy requires user gesture for unmuted
+    // video), silently fall back to paused — the kid taps play.
+    try {
+      await this.videoEl.play();
+    } catch {
+      // Autoplay blocked — that's fine.
+    }
   }
 
   private destroyPlayer(): void {
@@ -477,6 +501,7 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("play", this.onPlay);
       this.videoEl.removeEventListener("pause", this.onPause);
       this.videoEl.removeEventListener("ended", this.onEnded);
+      this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
     }
     if (this.ui) {
       this.ui.destroy();
@@ -497,6 +522,15 @@ export class VideoPlayer extends LitElement {
     this.audioOnly = !this.audioOnly;
     setVideoPrefs(this.videoId, { audioOnly: this.audioOnly });
     void this.attachSource();
+  };
+
+  private onVolumeChange = (): void => {
+    if (!this.videoEl) return;
+    try {
+      localStorage.setItem(VOLUME_KEY, String(this.videoEl.volume));
+    } catch {
+      // localStorage unavailable.
+    }
   };
 
   private onTimeUpdate = (): void => {
