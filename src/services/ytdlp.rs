@@ -624,11 +624,20 @@ fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
 ///    YouTube's signature cipher; configurable via the
 ///    `YTDLP_JS_RUNTIME` env var (defaults to `node`).
 fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
-    // PO token plugin directory.
+    // PO token plugin directory. Must be absolute because the caller
+    // may set `.current_dir()` to a temp directory for `--write-pages`.
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
         .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string());
-    if std::path::Path::new(&plugin_dir).exists() {
-        cmd.arg("--plugin-dirs").arg(&plugin_dir);
+    let plugin_path = std::path::Path::new(&plugin_dir);
+    let plugin_path_abs = if plugin_path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(plugin_path))
+            .unwrap_or_else(|_| plugin_path.to_path_buf())
+    } else {
+        plugin_path.to_path_buf()
+    };
+    if plugin_path_abs.exists() {
+        cmd.arg("--plugin-dirs").arg(&plugin_path_abs);
     }
 
     // PO token server URL for the bgutil plugin.
