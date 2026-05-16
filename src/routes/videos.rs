@@ -275,21 +275,17 @@ async fn fetch_and_rewrite_manifest(
     // byte-range fetching (whereas PoT-pipelined HLS segments get
     // 403'd by Google's CDN).
     //
-    // Resolve mp4 box ranges first so we can render `<SegmentBase>`
-    // representations (with proper segment-aligned playback + per-
-    // segment caching) instead of plain `<BaseURL>` whole-file
-    // fallbacks. The resolver consults the `format_box_ranges` cache
-    // and only probes upstream for entries it doesn't already have.
-    let probe_inputs: Vec<(String, String)> = result
-        .formats
-        .iter()
-        .filter(|f| {
-            !f.format_id.starts_with("sb")
-                && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
-        })
-        .filter_map(|f| f.url.clone().map(|u| (f.format_id.clone(), u)))
-        .collect();
-    let box_ranges = crate::services::mp4::resolve_all(&state.db, video_id, &probe_inputs).await;
+    // Probing upstream mp4s for `<SegmentBase indexRange>` byte
+    // offsets is currently disabled. The 15-format parallel probe
+    // fan-out at every manifest load was triggering 429 responses
+    // from googlevideo's anti-abuse path, which then cascaded into
+    // failed playback fetches. Until we add a probe budget + rate
+    // limiter, the synthesizer falls back to plain `<BaseURL>` for
+    // every Representation and dash.js drives playback via byte-range
+    // requests against the whole format file. The `mp4` module and
+    // `format_box_ranges` migration stay in place for the future
+    // re-enable.
+    let box_ranges = std::collections::HashMap::new();
 
     if let Some(synthetic) = dash::synthesize_manifest(
         &secret,
