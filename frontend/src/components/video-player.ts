@@ -67,8 +67,8 @@ interface ShakaPlayer {
     codec?: string,
     label?: string,
   ): Promise<unknown>;
-  setTextTrackVisibility(visible: boolean): void;
-  isTextTrackVisible(): boolean;
+  setTextVisibility(visible: boolean): void;
+  isTextVisible(): boolean;
 }
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
@@ -195,28 +195,16 @@ export class VideoPlayer extends LitElement {
         height: 100%;
         object-fit: contain;
       }
-      /* Shaka's text display container renders caption cues in an
-         absolutely-positioned overlay. Ensure it's centered, properly
-         sized, and text wraps naturally. */
-      .shaka-text-container {
-        text-align: center !important;
-        display: flex !important;
-        flex-direction: column !important;
-        justify-content: flex-end !important;
-        align-items: center !important;
-        padding: 0 10% 3rem !important;
-        box-sizing: border-box !important;
-      }
-      .shaka-text-container span {
-        background: rgba(0, 0, 0, 0.75);
-        padding: 0.15em 0.4em;
-        border-radius: 0.2em;
-        font-size: clamp(0.9rem, 2.5vw, 1.3rem);
+      /* Caption styling. Shaka uses native <track> / ::cue rendering
+         via NativeTextDisplayer. The ::cue pseudo-element controls how
+         WebVTT cues appear over the video. */
+      video::cue {
+        background-color: rgba(0, 0, 0, 0.8);
+        color: white;
+        font-size: clamp(0.85rem, 2.2vw, 1.2rem);
         line-height: 1.4;
+        padding: 0.1em 0.3em;
         white-space: pre-wrap;
-        word-wrap: break-word;
-        max-width: 80%;
-        display: inline-block;
       }
       /* Audio-only mode: replace the player surface with the poster. */
       :host([data-audio-only]) .shaka-container {
@@ -518,16 +506,17 @@ export class VideoPlayer extends LitElement {
     // Restore caption visibility from prior session.
     try {
       if (localStorage.getItem(CAPTIONS_KEY) === "true") {
-        player.setTextTrackVisibility(true);
+        player.setTextVisibility(true);
       }
     } catch {
       // localStorage unavailable.
     }
 
-    // Persist caption visibility changes.
-    player.addEventListener("texttrackvisibility", () => {
+    // Persist caption visibility changes. shaka fires "textchanged"
+    // when text track visibility or selection changes.
+    player.addEventListener("textchanged", () => {
       try {
-        localStorage.setItem(CAPTIONS_KEY, String(player.isTextTrackVisible()));
+        localStorage.setItem(CAPTIONS_KEY, String(player.isTextVisible()));
       } catch {
         // localStorage unavailable.
       }

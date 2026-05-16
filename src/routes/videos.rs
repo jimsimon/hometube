@@ -390,9 +390,12 @@ pub async fn get_caption(
     Ok(vtt_response(body))
 }
 
-/// Build the `text/vtt` HTTP response.
+/// Build the `text/vtt` HTTP response. Strips YouTube's inline cue
+/// positioning (`align:start position:0%`) so captions render centered
+/// with default browser placement.
 fn vtt_response(body: String) -> Response {
-    let mut response = (StatusCode::OK, body).into_response();
+    let cleaned = strip_vtt_positioning(&body);
+    let mut response = (StatusCode::OK, cleaned).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         "text/vtt; charset=utf-8".parse().unwrap(),
@@ -404,6 +407,42 @@ fn vtt_response(body: String) -> Response {
         "private, max-age=3600".parse().unwrap(),
     );
     response
+}
+
+/// Remove inline cue settings (e.g. `align:start position:0%`) from
+/// WebVTT timing lines. YouTube's auto-generated captions force
+/// left-alignment and 0% position, which looks off-center in a
+/// standard player. Stripping them lets the browser use the default
+/// centered presentation.
+///
+/// A VTT timing line looks like:
+/// ```text
+/// 00:00:02.950 --> 00:00:05.349 align:start position:0%
+/// ```
+/// We keep the timestamps and drop everything after them.
+fn strip_vtt_positioning(vtt: &str) -> String {
+    let mut out = String::with_capacity(vtt.len());
+    for line in vtt.lines() {
+        if line.contains("-->") {
+            // Timing line: keep only the "START --> END" portion.
+            if let Some(arrow_end) = line.find("-->") {
+                // Find end of the end-timestamp (next space after "-->")
+                let after_arrow = &line[arrow_end + 3..];
+                let end_ts_end = after_arrow
+                    .trim_start()
+                    .find([' ', '\t'])
+                    .map(|i| arrow_end + 3 + after_arrow.len() - after_arrow.trim_start().len() + i)
+                    .unwrap_or(line.len());
+                out.push_str(&line[..end_ts_end]);
+            } else {
+                out.push_str(line);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
