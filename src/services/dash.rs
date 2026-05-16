@@ -473,19 +473,36 @@ pub fn synthesize_manifest(
     // the first one wins.
     let usable = dedupe_prefer_with_ranges(usable, box_ranges);
 
-    let video_formats: Vec<&Format> = usable
+    // Initial split into video-only and audio-only Representations.
+    // Muxed formats (both vcodec and acodec set) are excluded entirely
+    // — they're a separate "progressive" format from yt-dlp that
+    // duplicates content already in the adaptive video/audio
+    // AdaptationSets. Including them confuses dash.js.
+    let video_candidates: Vec<&Format> = usable
         .iter()
         .copied()
-        .filter(|f| f.vcodec.as_deref().unwrap_or("none") != "none" && f.height.is_some())
+        .filter(|f| {
+            f.vcodec.as_deref().unwrap_or("none") != "none"
+                && f.acodec.as_deref().unwrap_or("none") == "none"
+                && f.height.is_some()
+        })
         .collect();
-    let audio_formats: Vec<&Format> = usable
+    let audio_candidates: Vec<&Format> = usable
         .iter()
         .copied()
         .filter(|f| {
             f.acodec.as_deref().unwrap_or("none") != "none"
-                && (f.vcodec.as_deref().unwrap_or("none") == "none" || f.height.is_none())
+                && f.vcodec.as_deref().unwrap_or("none") == "none"
         })
         .collect();
+
+    // Trim the candidate pools so dash.js doesn't drown in
+    // Representations during cold-load discovery (without
+    // `<SegmentBase indexRange>`, dash.js has to probe each
+    // Representation empirically; with too many it never converges
+    // and playback stalls).
+    let video_formats = trim_video_representations(&video_candidates);
+    let audio_formats = trim_audio_representations(&audio_candidates);
 
     if video_formats.is_empty() && audio_formats.is_empty() {
         return None;
@@ -685,6 +702,109 @@ fn dedupe_prefer_with_ranges<'a>(
         .into_iter()
         .filter_map(|k| by_key.remove(&k))
         .collect()
+}
+
+/// Trim the video Representation pool down to a small, dash.js-friendly
+/// list. Without `<SegmentBase indexRange>` dash.js has to discover
+/// each Representation's size empirically by issuing `Range:` requests;
+/// surfacing every codec at every resolution causes it to thrash and
+/// stall before converging on a playable Rep.
+///
+/// Strategy:
+///
+/// 1. Drop heights below 360 — those resolutions are unwatchable on
+///    anything bigger than a phone and dash.js sometimes picks them as
+///    starting quality before bandwidth measurement settles.
+/// 2. Group remaining formats by `height`. For each height bucket pick
+///    one Representation, preferring `avc1`/`H.264` for maximum
+///    browser compatibility, then `vp9`, then `av01`. Within a tied
+///    codec choice the one we saw first wins (yt-dlp's natural
+///    ordering puts the "main" variant earlier).
+fn trim_video_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> {
+    /// Lower codec score = stronger preference.
+    fn codec_pref(vcodec: Option<&str>) -> u8 {
+        match vcodec.unwrap_or("") {
+            c if c.starts_with("avc1") || c.starts_with("h264") => 0,
+            c if c.starts_with("vp9") || c.starts_with("vp09") => 1,
+            c if c.starts_with("av01") || c.starts_with("av1") => 2,
+            _ => 3,
+        }
+    }
+
+    let mut by_height: std::collections::BTreeMap<i64, &Format> = std::collections::BTreeMap::new();
+    for f in candidates {
+        let height = match f.height {
+            Some(h) if h >= 360 => h,
+            _ => continue,
+        };
+        let pref = codec_pref(f.vcodec.as_deref());
+        match by_height.get(&height) {
+            None => {
+                by_height.insert(height, *f);
+            }
+            Some(existing) => {
+                let existing_pref = codec_pref(existing.vcodec.as_deref());
+                if pref < existing_pref {
+                    by_height.insert(height, *f);
+                }
+            }
+        }
+    }
+    by_height.into_values().collect()
+}
+
+/// Trim the audio Representation pool. dash.js handles audio
+/// AdaptationSets less aggressively than video (smaller files, less
+/// adaptive switching), but we still want to limit the count to keep
+/// cold-load discovery cheap.
+///
+/// Strategy:
+///
+/// 1. Drop "DRC" variants (yt-dlp's `*-drc-dashy` formats) — these
+///    are alternate Dynamic Range Compression renditions and dash.js
+///    treats them as duplicate audio tracks.
+/// 2. Group by language. For each language pick one Representation,
+///    preferring `mp4a`/AAC over `opus` for Safari compatibility.
+fn trim_audio_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> {
+    fn codec_pref(acodec: Option<&str>) -> u8 {
+        match acodec.unwrap_or("") {
+            c if c.starts_with("mp4a") || c.starts_with("aac") => 0,
+            c if c.starts_with("opus") => 1,
+            c if c.starts_with("vorbis") => 2,
+            _ => 3,
+        }
+    }
+
+    // BTreeMap so output ordering is stable across calls.
+    let mut by_lang: std::collections::BTreeMap<String, &Format> =
+        std::collections::BTreeMap::new();
+    for f in candidates {
+        // Drop DRC variants. yt-dlp tags them in two ways: a
+        // `*-drc-*` substring in the format_id, or a "DRC" token
+        // somewhere in `format_note`. Catching both is cheap.
+        if f.format_id.contains("-drc")
+            || f.format_note
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase().contains("drc"))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let lang = f.language.clone().unwrap_or_default();
+        let pref = codec_pref(f.acodec.as_deref());
+        match by_lang.get(&lang) {
+            None => {
+                by_lang.insert(lang, *f);
+            }
+            Some(existing) => {
+                let existing_pref = codec_pref(existing.acodec.as_deref());
+                if pref < existing_pref {
+                    by_lang.insert(lang, *f);
+                }
+            }
+        }
+    }
+    by_lang.into_values().collect()
 }
 
 /// Pick the language tag of the audio track that should be marked as
@@ -1311,12 +1431,14 @@ mod tests {
     /// another should produce a manifest with a SegmentBase block on
     /// the probed format and a plain BaseURL on the other. dash.js
     /// handles this fine — each Representation is independent.
+    /// Uses two different heights so the per-height trim doesn't drop
+    /// either Representation.
     #[test]
     fn synthesize_manifest_mixes_segment_base_and_plain_base_url() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
         let formats = vec![
             https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
-            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
+            https_format("136", Some(720), Some("avc1.4d401f"), Some("none"), None),
         ];
         let mut br = std::collections::HashMap::new();
         br.insert("137".to_string(), ranges(32, 511, 512, 4095));
@@ -1363,6 +1485,123 @@ mod tests {
         assert!(
             !mpd.contains(r#"id="137-dashy""#),
             "duplicate dashy variant should be dropped:\n{mpd}"
+        );
+    }
+
+    /// Multiple codecs at the same height should collapse to one
+    /// Representation per height, with avc1 winning over vp9 and
+    /// av01. This keeps dash.js's discovery overhead bounded on cold
+    /// load (when no SegmentBase data is available yet).
+    #[test]
+    fn synthesize_manifest_picks_one_codec_per_height() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            // Three codecs at 1080p; avc1 should win.
+            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
+            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
+            https_format("399", Some(1080), Some("av01.0.08M.08"), Some("none"), None),
+            // Three at 720p; same again.
+            https_format("247", Some(720), Some("vp9"), Some("none"), None),
+            https_format("136", Some(720), Some("avc1.4d401f"), Some("none"), None),
+            https_format("398", Some(720), Some("av01.0.05M.08"), Some("none"), None),
+        ];
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        // One Representation per height = 2 total.
+        let rep_count = mpd.matches("<Representation ").count();
+        assert_eq!(rep_count, 2, "expected 2 video Representations:\n{mpd}");
+        assert!(mpd.contains(r#"id="137""#), "1080p avc1 should win:\n{mpd}");
+        assert!(mpd.contains(r#"id="136""#), "720p avc1 should win:\n{mpd}");
+        // Other codec variants must be dropped.
+        assert!(!mpd.contains(r#"id="248""#), "1080p vp9 dropped:\n{mpd}");
+        assert!(!mpd.contains(r#"id="399""#), "1080p av01 dropped:\n{mpd}");
+        assert!(!mpd.contains(r#"id="247""#), "720p vp9 dropped:\n{mpd}");
+        assert!(!mpd.contains(r#"id="398""#), "720p av01 dropped:\n{mpd}");
+    }
+
+    /// Heights below 360 are unwatchable on modern devices and confuse
+    /// dash.js's startup ABR logic — they get dropped before the
+    /// per-height collapse runs.
+    #[test]
+    fn synthesize_manifest_drops_low_resolutions() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            https_format("160", Some(144), Some("avc1.4d400c"), Some("none"), None),
+            https_format("133", Some(240), Some("avc1.4d4015"), Some("none"), None),
+            https_format("134", Some(360), Some("avc1.4d401e"), Some("none"), None),
+            https_format("136", Some(720), Some("avc1.4d401f"), Some("none"), None),
+        ];
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(!mpd.contains(r#"id="160""#), "144p must be dropped:\n{mpd}");
+        assert!(!mpd.contains(r#"id="133""#), "240p must be dropped:\n{mpd}");
+        assert!(mpd.contains(r#"id="134""#), "360p must survive:\n{mpd}");
+        assert!(mpd.contains(r#"id="136""#), "720p must survive:\n{mpd}");
+    }
+
+    /// Muxed formats (vcodec AND acodec set, like itag 18) duplicate
+    /// content already in the adaptive video/audio AdaptationSets and
+    /// confuse dash.js's track selection. Drop them entirely.
+    #[test]
+    fn synthesize_manifest_drops_muxed_formats() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut muxed = https_format(
+            "18",
+            Some(360),
+            Some("avc1.42001E"),
+            Some("mp4a.40.2"),
+            None,
+        );
+        // Make sure this is genuinely muxed (both codecs set, height
+        // present). yt-dlp tags itag 18 this way.
+        muxed.acodec = Some("mp4a.40.2".into());
+        let formats = vec![
+            muxed,
+            https_format("136", Some(720), Some("avc1.4d401f"), Some("none"), None),
+            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
+        ];
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(!mpd.contains(r#"id="18""#), "muxed format dropped:\n{mpd}");
+        assert!(mpd.contains(r#"id="136""#), "video-only kept:\n{mpd}");
+        assert!(mpd.contains(r#"id="140""#), "audio-only kept:\n{mpd}");
+    }
+
+    /// Audio Representations: prefer mp4a/AAC over opus for the same
+    /// language, and drop DRC variants entirely.
+    #[test]
+    fn synthesize_manifest_picks_one_audio_codec_per_language() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut drc = https_format("251-drc", None, Some("none"), Some("opus"), Some("en"));
+        drc.format_note = Some("DRC, low".into());
+        let formats = vec![
+            // Three English candidates: mp4a should win, drc dropped.
+            https_format("251", None, Some("none"), Some("opus"), Some("en")),
+            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
+            drc,
+            // Spanish has only opus — it should survive even though
+            // it's not mp4a.
+            https_format("251-es", None, Some("none"), Some("opus"), Some("es")),
+        ];
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(
+            mpd.contains(r#"id="140""#),
+            "english AAC should win:\n{mpd}"
+        );
+        assert!(!mpd.contains(r#"id="251""#), "english opus dropped:\n{mpd}");
+        assert!(
+            !mpd.contains(r#"id="251-drc""#),
+            "DRC variant dropped:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"id="251-es""#),
+            "spanish opus survives (only candidate):\n{mpd}"
         );
     }
 
