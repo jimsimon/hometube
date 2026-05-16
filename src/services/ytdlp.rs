@@ -71,34 +71,6 @@ pub struct Format {
     /// when `language_preference` is absent.
     #[serde(default)]
     pub format_note: Option<String>,
-    /// Pre-segmented byte-range fragments for `http_dash_segments`
-    /// formats. Each fragment carries a complete `videoplayback?...&range=START-END`
-    /// URL — yt-dlp has already split the file into ~10 MB chunks
-    /// using HTTP byte-range and produced one URL per chunk. We use
-    /// these to emit a real DASH `<SegmentList>` from the synthesizer
-    /// so each chunk gets cached independently in
-    /// [`/api/proxy/segment`](crate::routes::videos::get_segment).
-    /// Empty (or absent) on `https`/`m3u8_native` formats.
-    #[serde(default)]
-    pub fragments: Vec<Fragment>,
-}
-
-/// One pre-segmented byte-range chunk of a DASH-segmented format.
-///
-/// yt-dlp emits these for `http_dash_segments` formats (notably from
-/// the `ios` player client, which is what we ask for via
-/// `--extractor-args youtube:player_client=ios`). Each fragment URL
-/// is a googlevideo.com URL with a baked-in `&range=START-END`
-/// parameter; fetching the URL verbatim returns just that byte slice
-/// of the underlying file.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Fragment {
-    pub url: String,
-    /// Some yt-dlp versions also emit a `duration` per fragment. Not
-    /// required for correct playback (dash.js infers duration from the
-    /// init segment), but we deserialise it for completeness.
-    #[serde(default)]
-    pub duration: Option<f64>,
 }
 
 /// One thumbnail variant.

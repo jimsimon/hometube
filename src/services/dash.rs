@@ -415,25 +415,27 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 /// This is used when yt-dlp doesn't expose an upstream DASH manifest
 /// (common on videos that only offer HLS or direct-download formats).
 /// The resulting MPD groups video-only and audio-only formats into
-/// separate `<AdaptationSet>`s. Each `<Representation>` is rendered
-/// in one of two ways depending on what yt-dlp surfaced:
+/// separate `<AdaptationSet>`s. Each `<Representation>` renders as a
+/// `<BaseURL>` pointing at `/api/proxy/format`, with one of two
+/// shapes depending on what we know about the upstream mp4:
 ///
-/// 1. **`http_dash_segments`** with non-empty `fragments[]` — emit a
-///    `<SegmentList>` with one `<SegmentURL>` per fragment, pointing
-///    at `/api/proxy/segment` (which already disk-caches by
-///    `(video_id, format_id, sq)`). dash.js fetches each chunk
-///    separately, giving us per-segment caching, true adaptive
-///    bitrate switching, and graceful recovery from per-chunk
-///    failures.
-/// 2. **`https`** with a direct `url` — emit a `<BaseURL>` pointing at
-///    `/api/proxy/format` and let dash.js do byte-range fetching
-///    against the whole file. No per-segment caching but the URLs are
-///    reliable.
+/// 1. **`<SegmentBase indexRange>` + `<Initialization range>`** — when
+///    `box_ranges` contains an entry for the format. dash.js fetches
+///    just the `moov`+`sidx` byte range, parses the sidx to learn
+///    segment timing, then issues per-segment range requests against
+///    the BaseURL. Each segment is independently cacheable in
+///    `/api/proxy/format`. This is the preferred shape for adaptive
+///    bitrate switching and per-segment caching.
+/// 2. **Plain `<BaseURL>`** — when the format hasn't been probed yet
+///    or the probe failed (e.g. raw audio with no sidx). dash.js
+///    issues whole-file byte-range requests; switching qualities
+///    abandons in-flight buffer.
 ///
-/// We deliberately use the on-demand DASH profile (`isoff-on-demand`)
-/// because every Representation is either a single self-contained
-/// file with byte-range support or a small list of pre-segmented
-/// chunks — there is no live `<SegmentTemplate>`-driven workflow.
+/// `box_ranges` maps `format_id → BoxRanges`. Callers are expected to
+/// pre-populate this from [`crate::services::mp4::resolve_all`] which
+/// handles both the cache lookup and the parallel-probe fallback.
+/// Passing an empty map is fine and produces case-2 manifests for
+/// every format.
 ///
 /// Returns `None` if no usable formats are available (degenerate case
 /// — shouldn't happen for normal YouTube videos).
@@ -442,12 +444,14 @@ pub fn synthesize_manifest(
     video_id: &str,
     formats: &[Format],
     duration: Option<f64>,
+    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
 ) -> Option<String> {
-    // Collect formats whose URLs we can actually use. A format is
-    // usable when:
-    //
-    // - It's `http_dash_segments` with at least one fragment URL, OR
-    // - It's `https` with a direct URL.
+    // Collect formats whose URLs we can actually use. We accept both
+    // `https` (whole-file with byte-range) and `http_dash_segments`
+    // (yt-dlp's `-dashy` formats, which also have an un-ranged base
+    // URL in `format.url`). Both protocols play through the same
+    // BaseURL+Range pipeline; the protocol distinction matters only
+    // for dedup.
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
@@ -455,30 +459,19 @@ pub fn synthesize_manifest(
         if f.format_id.starts_with("sb") {
             return false;
         }
-        match f.protocol.as_deref() {
-            Some("http_dash_segments") => {
-                !f.fragments.is_empty() && f.fragments.iter().all(|fr| !fr.url.is_empty())
-            }
-            Some("https") => f.url.is_some(),
-            _ => false,
-        }
+        matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments")) && f.url.is_some()
     };
 
     let usable: Vec<&Format> = formats.iter().filter(is_usable).collect();
 
     // Deduplicate: yt-dlp's `formats=duplicate` extractor flag returns
     // both `https` (whole-file) and `http_dash_segments` (`*-dashy`)
-    // variants of the same underlying media. Keeping both would
-    // confuse dash.js into bouncing between them mid-stream and
-    // doubling our cache footprint. Prefer the segmented variant
-    // because it's both adaptively switchable and cacheable through
-    // `/api/proxy/segment`.
-    //
-    // The dedup key is `(vcodec, acodec, height, width, tbr_bucketed)`.
-    // tbr is bucketed to 1 kbit/s precision because yt-dlp sometimes
-    // reports floating-point bitrates that differ by a hair between
-    // the two variants of the same underlying media.
-    let usable = dedupe_prefer_segmented(usable);
+    // variants of the same underlying media. Keeping both clutters
+    // the manifest and wastes dash.js's startup probe budget. We
+    // prefer the variant that has BoxRanges available (so it can
+    // render as `<SegmentBase>`); when neither has ranges or both do,
+    // the first one wins.
+    let usable = dedupe_prefer_with_ranges(usable, box_ranges);
 
     let video_formats: Vec<&Format> = usable
         .iter()
@@ -527,7 +520,7 @@ pub fn synthesize_manifest(
                 f.height.unwrap_or(0),
                 escape_xml(codecs)
             );
-            push_representation(&mut mpd, f, &attrs, secret, video_id);
+            push_representation(&mut mpd, f, &attrs, secret, video_id, box_ranges);
         }
         mpd.push_str("  </AdaptationSet>\n");
     }
@@ -575,7 +568,7 @@ pub fn synthesize_manifest(
                     bandwidth,
                     escape_xml(codecs)
                 );
-                push_representation(&mut mpd, f, &attrs, secret, video_id);
+                push_representation(&mut mpd, f, &attrs, secret, video_id, box_ranges);
             }
             mpd.push_str("  </AdaptationSet>\n");
         }
@@ -589,45 +582,53 @@ pub fn synthesize_manifest(
 ///
 /// `attrs` is the pre-rendered attribute string for the
 /// `<Representation>` open tag (id, bandwidth, codecs, dimensions).
-/// The body is one of two shapes depending on the format's protocol:
+/// The body is one of two shapes depending on whether we have probed
+/// box offsets for this format:
 ///
-/// - `http_dash_segments` → `<SegmentList>` with one `<SegmentURL>`
-///   per fragment, each pointing at the segmented proxy
-///   (`/api/proxy/segment`) so the existing disk cache picks it up.
-/// - `https` → a single `<BaseURL>` through `/api/proxy/format` for
-///   the whole-file byte-range path.
-fn push_representation(mpd: &mut String, f: &Format, attrs: &str, secret: &[u8], video_id: &str) {
+/// - **With `BoxRanges`** — `<BaseURL>` + `<SegmentBase indexRange>` +
+///   `<Initialization range>`. dash.js fetches only the moov+sidx
+///   prefix to bootstrap, then issues per-segment range requests for
+///   playback. Each segment becomes individually cacheable in the
+///   format proxy.
+/// - **Without `BoxRanges`** — plain `<BaseURL>`. dash.js performs
+///   byte-range fetching against the whole file. Used when probing
+///   failed (audio formats without sidx, transient network errors).
+fn push_representation(
+    mpd: &mut String,
+    f: &Format,
+    attrs: &str,
+    secret: &[u8],
+    video_id: &str,
+    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
+) {
     mpd.push_str(&format!("    <Representation {attrs}>\n"));
-    if !f.fragments.is_empty() {
-        // SegmentList path. Each <SegmentURL> media= attribute points
-        // at /api/proxy/segment with sq=N, where N is the fragment
-        // index in yt-dlp's fragments[] list. The proxy resolves N
-        // back to fragments[N].url at fetch time.
-        mpd.push_str("      <SegmentList timescale=\"1\" duration=\"1\">\n");
-        for (idx, _frag) in f.fragments.iter().enumerate() {
-            let proxy_url =
-                build_segment_proxy_url(secret, video_id, &f.format_id, &idx.to_string());
-            mpd.push_str(&format!(
-                "        <SegmentURL media=\"{}\"/>\n",
-                escape_xml(&proxy_url)
-            ));
-        }
-        mpd.push_str("      </SegmentList>\n");
-    } else {
-        // Whole-file BaseURL path. dash.js will issue byte-range
-        // requests against this URL.
-        let base_url = build_format_proxy_url(secret, video_id, &f.format_id);
+    let base_url = build_format_proxy_url(secret, video_id, &f.format_id);
+    mpd.push_str(&format!(
+        "      <BaseURL>{}</BaseURL>\n",
+        escape_xml(&base_url)
+    ));
+    if let Some(ranges) = box_ranges.get(&f.format_id) {
+        // SegmentBase path. dash.js will issue:
+        //   1. Range: bytes=<init.start>-<init.end>  → moov (codec init)
+        //   2. Range: bytes=<index.start>-<index.end> → sidx (segment table)
+        //   3. Range: bytes=...                       → per-segment fetches
+        // All three go through /api/proxy/format and our byte-range cache.
         mpd.push_str(&format!(
-            "      <BaseURL>{}</BaseURL>\n",
-            escape_xml(&base_url)
+            "      <SegmentBase indexRange=\"{}\" indexRangeExact=\"true\">\n",
+            ranges.index.as_dash()
         ));
+        mpd.push_str(&format!(
+            "        <Initialization range=\"{}\"/>\n",
+            ranges.init.as_dash()
+        ));
+        mpd.push_str("      </SegmentBase>\n");
     }
     mpd.push_str("    </Representation>\n");
 }
 
 /// Drop near-duplicate formats from the usable pool, keeping the
-/// segmented variant when both an `http_dash_segments` and an `https`
-/// variant of the same media exist.
+/// variant for which we have probed box ranges (so it can render as
+/// `<SegmentBase>`) when the choice is otherwise arbitrary.
 ///
 /// "Same media" is decided by the tuple `(vcodec, acodec, height,
 /// width, tbr_kbps_bucket, language)`. tbr is bucketed to integer
@@ -635,9 +636,13 @@ fn push_representation(mpd: &mut String, f: &Format, attrs: &str, secret: &[u8],
 /// differences between the two variants of an otherwise identical
 /// stream.
 ///
-/// Order is preserved: the first format we see for each key wins,
-/// segmented variants override whole-file variants seen earlier.
-fn dedupe_prefer_segmented<'a>(usable: Vec<&'a Format>) -> Vec<&'a Format> {
+/// Order is preserved: the first format we see for each key wins;
+/// later variants only override when they have ranges and the
+/// existing one doesn't.
+fn dedupe_prefer_with_ranges<'a>(
+    usable: Vec<&'a Format>,
+    box_ranges: &std::collections::HashMap<String, crate::services::mp4::BoxRanges>,
+) -> Vec<&'a Format> {
     type Key = (
         Option<String>,
         Option<String>,
@@ -658,20 +663,20 @@ fn dedupe_prefer_segmented<'a>(usable: Vec<&'a Format>) -> Vec<&'a Format> {
             f.tbr.unwrap_or(0.0) as i64,
             f.language.clone(),
         );
-        let is_segmented = f.protocol.as_deref() == Some("http_dash_segments");
+        let has_ranges = box_ranges.contains_key(&f.format_id);
         match by_key.get(&key) {
             None => {
                 by_key.insert(key.clone(), f);
                 order.push(key);
             }
             Some(existing) => {
-                let existing_is_segmented =
-                    existing.protocol.as_deref() == Some("http_dash_segments");
-                if is_segmented && !existing_is_segmented {
+                let existing_has_ranges = box_ranges.contains_key(&existing.format_id);
+                // Promote the new candidate only when it has ranges
+                // and the incumbent doesn't. If both have ranges or
+                // neither does, the first one wins (stable order).
+                if has_ranges && !existing_has_ranges {
                     by_key.insert(key, f);
                 }
-                // else: keep the existing one. Two segmented variants
-                // for the same media is unexpected; first wins.
             }
         }
     }
@@ -789,7 +794,6 @@ fn attr_value(el: &BytesStart<'_>, name: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::ytdlp::Fragment;
 
     #[test]
     fn round_trip_signature() {
@@ -942,7 +946,6 @@ mod tests {
             language: Some(language.into()),
             language_preference: pref,
             format_note: note.map(str::to_owned),
-            fragments: Vec::new(),
         }
     }
 
@@ -1086,7 +1089,6 @@ mod tests {
             language: language.map(str::to_owned),
             language_preference: None,
             format_note: None,
-            fragments: Vec::new(),
         }
     }
 
@@ -1105,7 +1107,9 @@ mod tests {
                 ..https_format("ignored", None, None, None, None)
             },
         ];
-        let mpd = synthesize_manifest(secret, "vid-1", &formats, Some(213.0)).expect("synthesize");
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid-1", &formats, Some(213.0), &br).expect("synthesize");
 
         // Well-formed shell.
         assert!(mpd.starts_with("<?xml"));
@@ -1149,7 +1153,8 @@ mod tests {
             protocol: Some("m3u8_native".into()),
             ..https_format("96", Some(720), Some("avc1"), Some("aac"), None)
         }];
-        assert!(synthesize_manifest(secret, "vid", &formats, None).is_none());
+        let br = std::collections::HashMap::new();
+        assert!(synthesize_manifest(secret, "vid", &formats, None, &br).is_none());
     }
 
     #[test]
@@ -1158,7 +1163,9 @@ mod tests {
         let mut en = https_format("251-en", None, Some("none"), Some("opus"), Some("en"));
         en.format_note = Some("original (default), low".into());
         let es = https_format("251-es", None, Some("none"), Some("opus"), Some("es"));
-        let mpd = synthesize_manifest(secret, "vid", &[en, es], Some(60.0)).expect("synthesize");
+        let br = std::collections::HashMap::new();
+        let mpd =
+            synthesize_manifest(secret, "vid", &[en, es], Some(60.0), &br).expect("synthesize");
 
         // Exactly one Role=main, and it's inside the en AdaptationSet.
         assert_eq!(mpd.matches(r#"value="main""#).count(), 1, "{mpd}");
@@ -1187,7 +1194,8 @@ mod tests {
             Some("opus"),
             Some("en"),
         )];
-        let mpd = synthesize_manifest(secret, "v", &formats, Some(60.0)).expect("synthesize");
+        let br = std::collections::HashMap::new();
+        let mpd = synthesize_manifest(secret, "v", &formats, Some(60.0), &br).expect("synthesize");
         assert!(
             !mpd.contains(r#"value="main""#),
             "unexpected Role=main:\n{mpd}"
@@ -1205,157 +1213,157 @@ mod tests {
         assert!(verify_query(secret, &params, sig));
     }
 
-    /// Build an `http_dash_segments` Format with N pre-segmented
-    /// fragment URLs. yt-dlp produces these from the `ios` player
-    /// client; each fragment URL has a baked-in `&range=START-END`
-    /// parameter pointing at a slice of the underlying file.
-    fn dash_segmented_format(
-        id: &str,
-        height: Option<i64>,
-        vcodec: Option<&str>,
-        acodec: Option<&str>,
-        language: Option<&str>,
-        n_fragments: usize,
-    ) -> Format {
-        let mut f = https_format(id, height, vcodec, acodec, language);
-        f.protocol = Some("http_dash_segments".into());
-        // The `url` is irrelevant once fragments are present — the
-        // synthesizer only consults `fragments[]` for segmented
-        // formats. We leave it set so the format still passes any
-        // future "must have a URL" filter.
-        f.fragments = (0..n_fragments)
-            .map(|i| Fragment {
-                url: format!(
-                    "https://example.googlevideo.com/videoplayback?id={id}&range={lo}-{hi}",
-                    id = id,
-                    lo = i * 10_000_000,
-                    hi = (i + 1) * 10_000_000 - 1
-                ),
-                duration: None,
-            })
-            .collect();
-        f
-    }
-
-    /// `http_dash_segments` formats with non-empty `fragments[]` are
-    /// rendered as `<SegmentList>` blocks with one `<SegmentURL>` per
-    /// fragment. Each `media=` attribute points at our segmented
-    /// proxy with `sq=N` matching the fragment index.
-    #[test]
-    fn synthesize_manifest_emits_segment_list_for_dash_fragments() {
-        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
-        let formats = vec![
-            // 1080p video with 8 fragments (mirroring real Rick Astley
-            // metadata from yt-dlp 2026.03.17 with player_client=ios).
-            dash_segmented_format(
-                "137-dashy",
-                Some(1080),
-                Some("avc1.640028"),
-                Some("none"),
-                None,
-                8,
-            ),
-            // Single-fragment audio.
-            dash_segmented_format("251-dashy", None, Some("none"), Some("opus"), Some("en"), 1),
-        ];
-        let mpd = synthesize_manifest(secret, "vid-1", &formats, Some(213.0)).expect("synthesize");
-
-        // Both Representations render via SegmentList, not BaseURL.
-        assert!(
-            mpd.contains("<SegmentList"),
-            "SegmentList missing from synth output:\n{mpd}"
-        );
-        assert!(
-            !mpd.contains("<BaseURL>"),
-            "BaseURL should not appear when all formats are segmented:\n{mpd}"
-        );
-
-        // Each fragment becomes a SegmentURL pointing at /api/proxy/segment.
-        // 8 video fragments + 1 audio fragment = 9 SegmentURLs.
-        assert_eq!(
-            mpd.matches("<SegmentURL ").count(),
-            9,
-            "wrong SegmentURL count:\n{mpd}"
-        );
-        assert!(
-            mpd.contains("/api/proxy/segment?"),
-            "segment proxy URL missing:\n{mpd}"
-        );
-
-        // Sequence numbers should be 0..8 for the video format.
-        for sq in 0..8 {
-            assert!(
-                mpd.contains(&format!("&amp;sq={sq}&amp;")),
-                "missing sq={sq} in:\n{mpd}"
-            );
+    /// Build a `BoxRanges` for tests that pre-populate the box-range
+    /// map. The exact byte values don't matter for rendering — they
+    /// just need to round-trip through the manifest.
+    fn ranges(
+        init_start: u64,
+        init_end: u64,
+        idx_start: u64,
+        idx_end: u64,
+    ) -> super::super::mp4::BoxRanges {
+        super::super::mp4::BoxRanges {
+            init: super::super::mp4::ByteRange {
+                start: init_start,
+                end: init_end,
+            },
+            index: super::super::mp4::ByteRange {
+                start: idx_start,
+                end: idx_end,
+            },
         }
     }
 
-    /// When both a segmented (`http_dash_segments`) and a whole-file
-    /// (`https`) variant of the same media are present, the
-    /// synthesizer keeps the segmented one and drops the duplicate.
-    /// Two Representations with the same underlying stream would
-    /// confuse dash.js's adaptive logic and double our cache
-    /// footprint; the segmented variant wins because it's both
-    /// adaptively switchable and cacheable through `/api/proxy/segment`.
+    /// When `box_ranges` contains an entry for a format, the
+    /// synthesizer renders it as `<BaseURL>` plus `<SegmentBase
+    /// indexRange>` plus a child `<Initialization range>`. That tells
+    /// dash.js to fetch only the moov+sidx prefix, parse segment
+    /// timing, and then issue per-segment range requests against
+    /// `/api/proxy/format`.
     #[test]
-    fn synthesize_manifest_dedupes_to_segmented_variant() {
+    fn synthesize_manifest_emits_segment_base_when_ranges_known() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
-        // `137-dashy` and `137` cover the same underlying media (same
-        // vcodec/height/width/tbr) but expose it via different
-        // protocols. The dedupe should drop the whole-file variant.
-        let formats = vec![
-            dash_segmented_format(
-                "137-dashy",
-                Some(1080),
-                Some("avc1.640028"),
-                Some("none"),
-                None,
-                4,
-            ),
-            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
-            // Distinct media (different vcodec) survives alongside.
-            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
-        ];
-        let mpd = synthesize_manifest(secret, "vid", &formats, Some(60.0)).expect("synthesize");
+        let formats = vec![https_format(
+            "137",
+            Some(1080),
+            Some("avc1.640028"),
+            Some("none"),
+            None,
+        )];
+        let mut br = std::collections::HashMap::new();
+        br.insert("137".to_string(), ranges(32, 511, 512, 4095));
 
-        assert!(mpd.contains("<SegmentList"), "SegmentList missing:\n{mpd}");
+        let mpd =
+            synthesize_manifest(secret, "vid-1", &formats, Some(213.0), &br).expect("synthesize");
+
+        assert!(mpd.contains("<BaseURL>"), "BaseURL always emitted:\n{mpd}");
         assert!(
-            mpd.contains(r#"id="137-dashy""#),
-            "segmented variant missing:\n{mpd}"
+            mpd.contains(r#"<SegmentBase indexRange="512-4095""#),
+            "indexRange missing:\n{mpd}"
         );
         assert!(
-            !mpd.contains(r#"id="137" "#),
-            "whole-file dupe should have been dropped:\n{mpd}"
+            mpd.contains(r#"indexRangeExact="true""#),
+            "indexRangeExact missing:\n{mpd}"
         );
         assert!(
-            mpd.contains(r#"id="248""#),
-            "distinct vp9 format should survive:\n{mpd}"
+            mpd.contains(r#"<Initialization range="32-511""#),
+            "Initialization range missing:\n{mpd}"
         );
-        // 4 fragments from -dashy + 1 BaseURL from 248 = MPD has both
-        // shapes.
-        assert_eq!(mpd.matches("<SegmentURL ").count(), 4);
-        assert_eq!(mpd.matches("<BaseURL>").count(), 1);
+        // Empty SegmentList — the previous incarnation of this code
+        // emitted that path; verify we no longer do.
+        assert!(
+            !mpd.contains("<SegmentList"),
+            "SegmentList must not appear in modern synthesizer output:\n{mpd}"
+        );
     }
 
-    /// Fragments with empty URLs disqualify the format from being
-    /// surfaced — better to omit it than emit a SegmentURL pointing at
-    /// nothing, which would just produce 400s on every segment fetch.
+    /// When `box_ranges` is missing for a format, the synthesizer
+    /// falls back to plain `<BaseURL>` (no `<SegmentBase>`). dash.js
+    /// will then byte-range-fetch the entire file. Used for formats
+    /// where the probe failed or hasn't run yet (audio with no sidx,
+    /// transient probe errors).
     #[test]
-    fn synthesize_manifest_skips_dash_format_with_empty_fragment_urls() {
+    fn synthesize_manifest_falls_back_to_base_url_when_ranges_unknown() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut bad = dash_segmented_format(
+        let formats = vec![https_format(
+            "137",
+            Some(1080),
+            Some("avc1.640028"),
+            Some("none"),
+            None,
+        )];
+        let br = std::collections::HashMap::new();
+
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(mpd.contains("<BaseURL>"), "BaseURL always emitted:\n{mpd}");
+        assert!(
+            !mpd.contains("<SegmentBase"),
+            "SegmentBase only when ranges are known:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains("<Initialization"),
+            "Initialization only when ranges are known:\n{mpd}"
+        );
+    }
+
+    /// Mixed format pools: ranges available for one format but not
+    /// another should produce a manifest with a SegmentBase block on
+    /// the probed format and a plain BaseURL on the other. dash.js
+    /// handles this fine — each Representation is independent.
+    #[test]
+    fn synthesize_manifest_mixes_segment_base_and_plain_base_url() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
+            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
+        ];
+        let mut br = std::collections::HashMap::new();
+        br.insert("137".to_string(), ranges(32, 511, 512, 4095));
+
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert_eq!(mpd.matches("<BaseURL>").count(), 2, "two BaseURLs:\n{mpd}");
+        assert_eq!(
+            mpd.matches("<SegmentBase ").count(),
+            1,
+            "one SegmentBase (only 137 was probed):\n{mpd}"
+        );
+    }
+
+    /// Dedupe: when both `https` and `http_dash_segments` variants of
+    /// the same media exist, the variant that has BoxRanges wins.
+    /// This mirrors yt-dlp's actual output with `formats=duplicate`
+    /// where every video has both a `137` and `137-dashy` entry.
+    #[test]
+    fn synthesize_manifest_dedupes_prefers_variant_with_ranges() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut dashy = https_format(
             "137-dashy",
             Some(1080),
             Some("avc1.640028"),
             Some("none"),
             None,
-            3,
         );
-        bad.fragments[1].url = String::new();
-        let formats = vec![bad];
-        // No video formats survived → no AdaptationSet → None.
-        assert!(synthesize_manifest(secret, "v", &formats, None).is_none());
+        dashy.protocol = Some("http_dash_segments".into());
+        let formats = vec![
+            // Plain https variant first, with ranges.
+            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
+            dashy,
+        ];
+        let mut br = std::collections::HashMap::new();
+        br.insert("137".to_string(), ranges(0, 511, 512, 4095));
+
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(
+            mpd.contains(r#"id="137""#),
+            "ranges-bearing 137 should win:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="137-dashy""#),
+            "duplicate dashy variant should be dropped:\n{mpd}"
+        );
     }
 
     /// Custom (non-`urn:mpeg:dash:role:*`) Role schemes must round-trip

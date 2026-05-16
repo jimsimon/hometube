@@ -18,6 +18,7 @@ pub mod access;
 pub mod cron;
 pub mod dash;
 pub mod hls;
+pub mod mp4;
 pub mod notifications;
 pub mod oauth;
 pub mod setup;
