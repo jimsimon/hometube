@@ -422,7 +422,10 @@ export class VideoPlayer extends LitElement {
       }
     } else {
       const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
-      await player.load(manifestUrl);
+      // Explicitly specify the MIME type so shaka doesn't have to guess
+      // from the URL or Content-Type header (which may be text/xml or
+      // application/octet-stream depending on the server config).
+      await player.load(manifestUrl, undefined, "application/dash+xml");
     }
 
     // Add caption tracks.
