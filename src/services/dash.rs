@@ -414,36 +414,71 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 ///
 /// This is used when yt-dlp doesn't expose an upstream DASH manifest
 /// (common on videos that only offer HLS or direct-download formats).
-/// The resulting MPD groups video-only and audio-only `https`-protocol
-/// formats into separate `<AdaptationSet>`s, each with a `<BaseURL>`
-/// pointing at our signed `/api/proxy/format` endpoint. dash.js then
-/// issues byte-range requests against those URLs and our proxy
-/// streams them through from YouTube's CDN.
+/// The resulting MPD groups video-only and audio-only formats into
+/// separate `<AdaptationSet>`s. Each `<Representation>` is rendered
+/// in one of two ways depending on what yt-dlp surfaced:
+///
+/// 1. **`http_dash_segments`** with non-empty `fragments[]` — emit a
+///    `<SegmentList>` with one `<SegmentURL>` per fragment, pointing
+///    at `/api/proxy/segment` (which already disk-caches by
+///    `(video_id, format_id, sq)`). dash.js fetches each chunk
+///    separately, giving us per-segment caching, true adaptive
+///    bitrate switching, and graceful recovery from per-chunk
+///    failures.
+/// 2. **`https`** with a direct `url` — emit a `<BaseURL>` pointing at
+///    `/api/proxy/format` and let dash.js do byte-range fetching
+///    against the whole file. No per-segment caching but the URLs are
+///    reliable.
 ///
 /// We deliberately use the on-demand DASH profile (`isoff-on-demand`)
-/// rather than the live profile so the player understands every
-/// `<Representation>` is a self-contained file fetched with `Range:`
-/// headers — there are no segments and no SegmentTemplate.
+/// because every Representation is either a single self-contained
+/// file with byte-range support or a small list of pre-segmented
+/// chunks — there is no live `<SegmentTemplate>`-driven workflow.
 ///
-/// Returns `None` if there are no usable `https`-protocol formats with
-/// URLs (degenerate case — shouldn't happen for normal YouTube videos).
+/// Returns `None` if no usable formats are available (degenerate case
+/// — shouldn't happen for normal YouTube videos).
 pub fn synthesize_manifest(
     secret: &[u8],
     video_id: &str,
     formats: &[Format],
     duration: Option<f64>,
 ) -> Option<String> {
-    // Collect only `https`-protocol formats that have a direct URL.
-    // Storyboard formats (`sb0`..`sb3`) are excluded — they're image
-    // sprite-sheets, not playable media.
-    let usable: Vec<&Format> = formats
-        .iter()
-        .filter(|f| {
-            f.protocol.as_deref() == Some("https")
-                && f.url.is_some()
-                && !f.format_id.starts_with("sb")
-        })
-        .collect();
+    // Collect formats whose URLs we can actually use. A format is
+    // usable when:
+    //
+    // - It's `http_dash_segments` with at least one fragment URL, OR
+    // - It's `https` with a direct URL.
+    //
+    // Storyboard formats (`sb*`) are excluded — they're image sprite
+    // sheets, not playable media.
+    let is_usable = |f: &&Format| -> bool {
+        if f.format_id.starts_with("sb") {
+            return false;
+        }
+        match f.protocol.as_deref() {
+            Some("http_dash_segments") => {
+                !f.fragments.is_empty() && f.fragments.iter().all(|fr| !fr.url.is_empty())
+            }
+            Some("https") => f.url.is_some(),
+            _ => false,
+        }
+    };
+
+    let usable: Vec<&Format> = formats.iter().filter(is_usable).collect();
+
+    // Deduplicate: yt-dlp's `formats=duplicate` extractor flag returns
+    // both `https` (whole-file) and `http_dash_segments` (`*-dashy`)
+    // variants of the same underlying media. Keeping both would
+    // confuse dash.js into bouncing between them mid-stream and
+    // doubling our cache footprint. Prefer the segmented variant
+    // because it's both adaptively switchable and cacheable through
+    // `/api/proxy/segment`.
+    //
+    // The dedup key is `(vcodec, acodec, height, width, tbr_bucketed)`.
+    // tbr is bucketed to 1 kbit/s precision because yt-dlp sometimes
+    // reports floating-point bitrates that differ by a hair between
+    // the two variants of the same underlying media.
+    let usable = dedupe_prefer_segmented(usable);
 
     let video_formats: Vec<&Format> = usable
         .iter()
@@ -478,29 +513,21 @@ pub fn synthesize_manifest(
     if !video_formats.is_empty() {
         mpd.push_str("  <AdaptationSet mimeType=\"video/mp4\" contentType=\"video\" segmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">\n");
         for f in &video_formats {
-            let id = &f.format_id;
-            let width = f.width.unwrap_or(0);
-            let height = f.height.unwrap_or(0);
             let bandwidth = f
                 .tbr
                 .or(f.vbr)
                 .map(|b| (b * 1000.0) as u64)
                 .unwrap_or(500_000);
             let codecs = f.vcodec.as_deref().unwrap_or("avc1.4d401f");
-            let base_url = build_format_proxy_url(secret, video_id, id);
-            mpd.push_str(&format!(
-                "    <Representation id=\"{}\" bandwidth=\"{}\" width=\"{}\" height=\"{}\" codecs=\"{}\">\n",
-                escape_xml(id),
+            let attrs = format!(
+                "id=\"{}\" bandwidth=\"{}\" width=\"{}\" height=\"{}\" codecs=\"{}\"",
+                escape_xml(&f.format_id),
                 bandwidth,
-                width,
-                height,
+                f.width.unwrap_or(0),
+                f.height.unwrap_or(0),
                 escape_xml(codecs)
-            ));
-            mpd.push_str(&format!(
-                "      <BaseURL>{}</BaseURL>\n",
-                escape_xml(&base_url)
-            ));
-            mpd.push_str("    </Representation>\n");
+            );
+            push_representation(&mut mpd, f, &attrs, secret, video_id);
         }
         mpd.push_str("  </AdaptationSet>\n");
     }
@@ -536,25 +563,19 @@ pub fn synthesize_manifest(
                 );
             }
             for f in group {
-                let id = &f.format_id;
                 let bandwidth = f
                     .tbr
                     .or(f.abr)
                     .map(|b| (b * 1000.0) as u64)
                     .unwrap_or(128_000);
                 let codecs = f.acodec.as_deref().unwrap_or("mp4a.40.2");
-                let base_url = build_format_proxy_url(secret, video_id, id);
-                mpd.push_str(&format!(
-                    "    <Representation id=\"{}\" bandwidth=\"{}\" codecs=\"{}\">\n",
-                    escape_xml(id),
+                let attrs = format!(
+                    "id=\"{}\" bandwidth=\"{}\" codecs=\"{}\"",
+                    escape_xml(&f.format_id),
                     bandwidth,
                     escape_xml(codecs)
-                ));
-                mpd.push_str(&format!(
-                    "      <BaseURL>{}</BaseURL>\n",
-                    escape_xml(&base_url)
-                ));
-                mpd.push_str("    </Representation>\n");
+                );
+                push_representation(&mut mpd, f, &attrs, secret, video_id);
             }
             mpd.push_str("  </AdaptationSet>\n");
         }
@@ -562,6 +583,103 @@ pub fn synthesize_manifest(
 
     mpd.push_str("</Period>\n</MPD>\n");
     Some(mpd)
+}
+
+/// Render one `<Representation>` inside the synthesized manifest.
+///
+/// `attrs` is the pre-rendered attribute string for the
+/// `<Representation>` open tag (id, bandwidth, codecs, dimensions).
+/// The body is one of two shapes depending on the format's protocol:
+///
+/// - `http_dash_segments` → `<SegmentList>` with one `<SegmentURL>`
+///   per fragment, each pointing at the segmented proxy
+///   (`/api/proxy/segment`) so the existing disk cache picks it up.
+/// - `https` → a single `<BaseURL>` through `/api/proxy/format` for
+///   the whole-file byte-range path.
+fn push_representation(mpd: &mut String, f: &Format, attrs: &str, secret: &[u8], video_id: &str) {
+    mpd.push_str(&format!("    <Representation {attrs}>\n"));
+    if !f.fragments.is_empty() {
+        // SegmentList path. Each <SegmentURL> media= attribute points
+        // at /api/proxy/segment with sq=N, where N is the fragment
+        // index in yt-dlp's fragments[] list. The proxy resolves N
+        // back to fragments[N].url at fetch time.
+        mpd.push_str("      <SegmentList timescale=\"1\" duration=\"1\">\n");
+        for (idx, _frag) in f.fragments.iter().enumerate() {
+            let proxy_url =
+                build_segment_proxy_url(secret, video_id, &f.format_id, &idx.to_string());
+            mpd.push_str(&format!(
+                "        <SegmentURL media=\"{}\"/>\n",
+                escape_xml(&proxy_url)
+            ));
+        }
+        mpd.push_str("      </SegmentList>\n");
+    } else {
+        // Whole-file BaseURL path. dash.js will issue byte-range
+        // requests against this URL.
+        let base_url = build_format_proxy_url(secret, video_id, &f.format_id);
+        mpd.push_str(&format!(
+            "      <BaseURL>{}</BaseURL>\n",
+            escape_xml(&base_url)
+        ));
+    }
+    mpd.push_str("    </Representation>\n");
+}
+
+/// Drop near-duplicate formats from the usable pool, keeping the
+/// segmented variant when both an `http_dash_segments` and an `https`
+/// variant of the same media exist.
+///
+/// "Same media" is decided by the tuple `(vcodec, acodec, height,
+/// width, tbr_kbps_bucket, language)`. tbr is bucketed to integer
+/// kbit/s because yt-dlp sometimes reports tiny floating-point
+/// differences between the two variants of an otherwise identical
+/// stream.
+///
+/// Order is preserved: the first format we see for each key wins,
+/// segmented variants override whole-file variants seen earlier.
+fn dedupe_prefer_segmented<'a>(usable: Vec<&'a Format>) -> Vec<&'a Format> {
+    type Key = (
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        Option<String>,
+    );
+    let mut by_key: std::collections::BTreeMap<Key, &'a Format> = std::collections::BTreeMap::new();
+    let mut order: Vec<Key> = Vec::with_capacity(usable.len());
+
+    for f in usable {
+        let key: Key = (
+            f.vcodec.clone(),
+            f.acodec.clone(),
+            f.height,
+            f.width,
+            f.tbr.unwrap_or(0.0) as i64,
+            f.language.clone(),
+        );
+        let is_segmented = f.protocol.as_deref() == Some("http_dash_segments");
+        match by_key.get(&key) {
+            None => {
+                by_key.insert(key.clone(), f);
+                order.push(key);
+            }
+            Some(existing) => {
+                let existing_is_segmented =
+                    existing.protocol.as_deref() == Some("http_dash_segments");
+                if is_segmented && !existing_is_segmented {
+                    by_key.insert(key, f);
+                }
+                // else: keep the existing one. Two segmented variants
+                // for the same media is unexpected; first wins.
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|k| by_key.remove(&k))
+        .collect()
 }
 
 /// Pick the language tag of the audio track that should be marked as
@@ -671,6 +789,7 @@ fn attr_value(el: &BytesStart<'_>, name: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::ytdlp::Fragment;
 
     #[test]
     fn round_trip_signature() {
@@ -823,6 +942,7 @@ mod tests {
             language: Some(language.into()),
             language_preference: pref,
             format_note: note.map(str::to_owned),
+            fragments: Vec::new(),
         }
     }
 
@@ -966,6 +1086,7 @@ mod tests {
             language: language.map(str::to_owned),
             language_preference: None,
             format_note: None,
+            fragments: Vec::new(),
         }
     }
 
@@ -1082,6 +1203,159 @@ mod tests {
         let params: Vec<(&str, String)> =
             vec![("video_id", "abc".into()), ("format", "137".into())];
         assert!(verify_query(secret, &params, sig));
+    }
+
+    /// Build an `http_dash_segments` Format with N pre-segmented
+    /// fragment URLs. yt-dlp produces these from the `ios` player
+    /// client; each fragment URL has a baked-in `&range=START-END`
+    /// parameter pointing at a slice of the underlying file.
+    fn dash_segmented_format(
+        id: &str,
+        height: Option<i64>,
+        vcodec: Option<&str>,
+        acodec: Option<&str>,
+        language: Option<&str>,
+        n_fragments: usize,
+    ) -> Format {
+        let mut f = https_format(id, height, vcodec, acodec, language);
+        f.protocol = Some("http_dash_segments".into());
+        // The `url` is irrelevant once fragments are present — the
+        // synthesizer only consults `fragments[]` for segmented
+        // formats. We leave it set so the format still passes any
+        // future "must have a URL" filter.
+        f.fragments = (0..n_fragments)
+            .map(|i| Fragment {
+                url: format!(
+                    "https://example.googlevideo.com/videoplayback?id={id}&range={lo}-{hi}",
+                    id = id,
+                    lo = i * 10_000_000,
+                    hi = (i + 1) * 10_000_000 - 1
+                ),
+                duration: None,
+            })
+            .collect();
+        f
+    }
+
+    /// `http_dash_segments` formats with non-empty `fragments[]` are
+    /// rendered as `<SegmentList>` blocks with one `<SegmentURL>` per
+    /// fragment. Each `media=` attribute points at our segmented
+    /// proxy with `sq=N` matching the fragment index.
+    #[test]
+    fn synthesize_manifest_emits_segment_list_for_dash_fragments() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            // 1080p video with 8 fragments (mirroring real Rick Astley
+            // metadata from yt-dlp 2026.03.17 with player_client=ios).
+            dash_segmented_format(
+                "137-dashy",
+                Some(1080),
+                Some("avc1.640028"),
+                Some("none"),
+                None,
+                8,
+            ),
+            // Single-fragment audio.
+            dash_segmented_format("251-dashy", None, Some("none"), Some("opus"), Some("en"), 1),
+        ];
+        let mpd = synthesize_manifest(secret, "vid-1", &formats, Some(213.0)).expect("synthesize");
+
+        // Both Representations render via SegmentList, not BaseURL.
+        assert!(
+            mpd.contains("<SegmentList"),
+            "SegmentList missing from synth output:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains("<BaseURL>"),
+            "BaseURL should not appear when all formats are segmented:\n{mpd}"
+        );
+
+        // Each fragment becomes a SegmentURL pointing at /api/proxy/segment.
+        // 8 video fragments + 1 audio fragment = 9 SegmentURLs.
+        assert_eq!(
+            mpd.matches("<SegmentURL ").count(),
+            9,
+            "wrong SegmentURL count:\n{mpd}"
+        );
+        assert!(
+            mpd.contains("/api/proxy/segment?"),
+            "segment proxy URL missing:\n{mpd}"
+        );
+
+        // Sequence numbers should be 0..8 for the video format.
+        for sq in 0..8 {
+            assert!(
+                mpd.contains(&format!("&amp;sq={sq}&amp;")),
+                "missing sq={sq} in:\n{mpd}"
+            );
+        }
+    }
+
+    /// When both a segmented (`http_dash_segments`) and a whole-file
+    /// (`https`) variant of the same media are present, the
+    /// synthesizer keeps the segmented one and drops the duplicate.
+    /// Two Representations with the same underlying stream would
+    /// confuse dash.js's adaptive logic and double our cache
+    /// footprint; the segmented variant wins because it's both
+    /// adaptively switchable and cacheable through `/api/proxy/segment`.
+    #[test]
+    fn synthesize_manifest_dedupes_to_segmented_variant() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        // `137-dashy` and `137` cover the same underlying media (same
+        // vcodec/height/width/tbr) but expose it via different
+        // protocols. The dedupe should drop the whole-file variant.
+        let formats = vec![
+            dash_segmented_format(
+                "137-dashy",
+                Some(1080),
+                Some("avc1.640028"),
+                Some("none"),
+                None,
+                4,
+            ),
+            https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
+            // Distinct media (different vcodec) survives alongside.
+            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
+        ];
+        let mpd = synthesize_manifest(secret, "vid", &formats, Some(60.0)).expect("synthesize");
+
+        assert!(mpd.contains("<SegmentList"), "SegmentList missing:\n{mpd}");
+        assert!(
+            mpd.contains(r#"id="137-dashy""#),
+            "segmented variant missing:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="137" "#),
+            "whole-file dupe should have been dropped:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"id="248""#),
+            "distinct vp9 format should survive:\n{mpd}"
+        );
+        // 4 fragments from -dashy + 1 BaseURL from 248 = MPD has both
+        // shapes.
+        assert_eq!(mpd.matches("<SegmentURL ").count(), 4);
+        assert_eq!(mpd.matches("<BaseURL>").count(), 1);
+    }
+
+    /// Fragments with empty URLs disqualify the format from being
+    /// surfaced — better to omit it than emit a SegmentURL pointing at
+    /// nothing, which would just produce 400s on every segment fetch.
+    #[test]
+    fn synthesize_manifest_skips_dash_format_with_empty_fragment_urls() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut bad = dash_segmented_format(
+            "137-dashy",
+            Some(1080),
+            Some("avc1.640028"),
+            Some("none"),
+            None,
+            3,
+        );
+        bad.fragments[1].url = String::new();
+        let formats = vec![bad];
+        // No video formats survived → no AdaptationSet → None.
+        assert!(synthesize_manifest(secret, "v", &formats, None).is_none());
     }
 
     /// Custom (non-`urn:mpeg:dash:role:*`) Role schemes must round-trip

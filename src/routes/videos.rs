@@ -1130,12 +1130,35 @@ fn pick_thumbnail(result: &ExtractResult) -> Option<String> {
         .map(|t| t.url.clone())
 }
 
+/// Resolve `(format_id, sq)` to an upstream googlevideo.com URL.
+///
+/// Two strategies are tried in priority order:
+///
+/// 1. **Fragment lookup.** When the format has a non-empty
+///    `fragments[]` (yt-dlp's `http_dash_segments` protocol), `sq` is
+///    treated as the fragment *index* into that list and we return
+///    the fragment's URL verbatim. Each fragment URL has its own
+///    pre-baked `&range=START-END` parameter, so fetching it returns
+///    just that byte slice of the underlying file.
+/// 2. **Legacy `sq=` substitution.** Older yt-dlp output (pre-`ios`
+///    client adoption) handed back a single URL with an in-place
+///    `sq=<n>` query-string parameter that the caller was expected to
+///    rewrite. Kept as a fallback for the rare case yt-dlp returns
+///    that shape today.
+///
+/// Returns `None` when neither strategy applies — the caller should
+/// surface a 400 BadRequest at that point.
 fn build_upstream_segment_url(result: &ExtractResult, format_id: &str, sq: &str) -> Option<String> {
     let format = result.formats.iter().find(|f| f.format_id == format_id)?;
 
+    // Strategy 1: fragment-list lookup. Treat sq as the index.
+    if !format.fragments.is_empty() {
+        let idx: usize = sq.parse().ok()?;
+        return format.fragments.get(idx).map(|f| f.url.clone());
+    }
+
+    // Strategy 2: legacy sq= substitution on the format's single URL.
     if let Some(url) = &format.url {
-        // Replace `&sq=<old>` with `&sq=<new>` if it's there; otherwise
-        // append.
         if url.contains("sq=") {
             let mut out = String::with_capacity(url.len() + sq.len());
             let mut iter = url.split('&');
@@ -1520,6 +1543,7 @@ mod tests {
                 language: None,
                 language_preference: None,
                 format_note: None,
+                fragments: Vec::new(),
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
@@ -1583,12 +1607,48 @@ mod tests {
                 language: None,
                 language_preference: None,
                 format_note: None,
+                fragments: Vec::new(),
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
             manifest_url: None,
         };
         assert_eq!(build_upstream_segment_url(&result, "137", "0"), None);
+    }
+
+    /// When a format has `http_dash_segments` `fragments[]`, `sq` is
+    /// treated as the fragment *index* and we return the fragment's
+    /// URL verbatim — yt-dlp pre-baked a `&range=START-END` parameter
+    /// into each fragment URL so no rewriting is needed.
+    #[test]
+    fn upstream_url_uses_fragment_lookup_when_available() {
+        let mut result = make_result_with_format("137", "https://unused.example/legacy");
+        result.formats[0].protocol = Some("http_dash_segments".into());
+        result.formats[0].fragments = vec![
+            crate::services::ytdlp::Fragment {
+                url: "https://rr.example.com/seg?range=0-9999".into(),
+                duration: None,
+            },
+            crate::services::ytdlp::Fragment {
+                url: "https://rr.example.com/seg?range=10000-19999".into(),
+                duration: None,
+            },
+        ];
+        // sq=0 → first fragment URL verbatim.
+        assert_eq!(
+            build_upstream_segment_url(&result, "137", "0"),
+            Some("https://rr.example.com/seg?range=0-9999".into())
+        );
+        // sq=1 → second fragment URL verbatim.
+        assert_eq!(
+            build_upstream_segment_url(&result, "137", "1"),
+            Some("https://rr.example.com/seg?range=10000-19999".into())
+        );
+        // Out-of-range index returns None rather than wrapping or
+        // panicking; the caller (handler) surfaces this as 400.
+        assert_eq!(build_upstream_segment_url(&result, "137", "99"), None);
+        // Non-numeric sq with a fragmented format is also a 400.
+        assert_eq!(build_upstream_segment_url(&result, "137", "abc"), None);
     }
 
     // -----------------------------------------------------------------------
@@ -1624,6 +1684,7 @@ mod tests {
                     language: None,
                     language_preference: None,
                     format_note: None,
+                    fragments: Vec::new(),
                 },
                 Format {
                     format_id: "251".into(),
@@ -1643,6 +1704,7 @@ mod tests {
                     language: None,
                     language_preference: None,
                     format_note: None,
+                    fragments: Vec::new(),
                 },
                 Format {
                     format_id: "137".into(),
@@ -1662,6 +1724,7 @@ mod tests {
                     language: None,
                     language_preference: None,
                     format_note: None,
+                    fragments: Vec::new(),
                 },
             ],
             subtitles: Default::default(),
@@ -1699,6 +1762,7 @@ mod tests {
                 language: None,
                 language_preference: None,
                 format_note: None,
+                fragments: Vec::new(),
             }],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
