@@ -61,7 +61,7 @@ pub struct Format {
     pub language: Option<String>,
     /// yt-dlp's heuristic preference for this language. The "original"
     /// audio for a video typically scores `10`, with auto-dubs ranking
-    /// lower. Used by [`crate::services::dash::rewrite_manifest`] to
+    /// lower. Used by [`crate::services::dash::synthesize_manifest`] to
     /// pick the AdaptationSet to mark as `Role=main`.
     #[serde(default)]
     pub language_preference: Option<i64>,

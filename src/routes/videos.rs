@@ -11,6 +11,7 @@
 //! - `GET /api/videos/:videoId/captions` — caption track list
 //! - `GET /api/videos/:videoId/captions/:lang` — WebVTT track
 //! - `GET /api/proxy/segment` — signed DASH segment proxy
+//! - `GET /api/proxy/format` — signed format byte-range proxy
 //! - `GET /api/proxy/audio` — audio-only stream proxy
 //! - `GET /api/proxy/thumbnail/:videoId` — thumbnail proxy
 
@@ -38,7 +39,6 @@ use crate::middleware::auth::CurrentAccount;
 use crate::models::account::AccountType;
 use crate::services::access::can_child_view;
 use crate::services::dash;
-use crate::services::hls::{self, HlsProxyKind};
 use crate::services::video_cache::VideoCache;
 use crate::services::ytdlp::{ExtractResult, Format};
 use crate::state::AppState;
@@ -57,32 +57,23 @@ pub struct VideoMetadata {
     pub thumbnail_url: Option<String>,
 }
 
-/// Wire-format string identifying the manifest flavour returned in
-/// [`StreamResponse::manifest`]. The frontend uses this to pick the
-/// right vidstack source `type` (and therefore which provider — dash.js
-/// or hls.js — handles playback).
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ManifestType {
-    /// MPEG-DASH (`application/dash+xml`).
-    Dash,
-    /// HLS master playlist (`application/vnd.apple.mpegurl`).
-    Hls,
-}
-
 #[derive(Debug, Serialize)]
 pub struct StreamResponse {
     pub video_id: String,
-    /// Rewritten manifest text. For DASH this is the rewritten MPD XML;
-    /// for HLS it's the rewritten master playlist. Both reference our
-    /// proxy endpoints rather than `*.googlevideo.com` directly.
+    /// Rewritten DASH manifest XML. References our proxy endpoints
+    /// rather than `*.googlevideo.com` directly.
     pub manifest: Option<String>,
-    /// Which manifest flavour `manifest` is, when present. Only set
-    /// when `manifest` is `Some(_)`.
+    /// Always `"dash"` when `manifest` is present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub manifest_type: Option<ManifestType>,
+    pub manifest_type: Option<&'static str>,
     /// Filtered list of progressive formats (max-quality cap applied).
     pub formats: Vec<Format>,
+    /// Pre-signed proxy URL for audio-only mode. Points at the
+    /// highest-bitrate opus audio-only format (excluding DRC
+    /// variants). The frontend uses this directly without needing to
+    /// generate an HMAC signature client-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_proxy_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,11 +147,10 @@ pub async fn get_stream(
         .cloned()
         .collect();
 
-    // Fetch + rewrite the manifest (DASH or HLS, depending on what
-    // yt-dlp surfaced for this video).
+    // Fetch + rewrite the manifest (always DASH).
     let (manifest, manifest_type) =
         match fetch_and_rewrite_manifest(&state, &video_id, &result).await {
-            Ok(Some((body, ty))) => (Some(body), Some(ty)),
+            Ok(Some(body)) => (Some(body), Some("dash")),
             Ok(None) => (None, None),
             Err(err) => {
                 warn!(%video_id, %err, "failed to fetch upstream manifest");
@@ -168,11 +158,19 @@ pub async fn get_stream(
             }
         };
 
+    // Pick the best audio-only format and generate a pre-signed proxy URL.
+    let audio_proxy_url = {
+        let secret = dash::ensure_proxy_secret(&state.db).await?;
+        best_audio_format(&formats)
+            .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
+    };
+
     Ok(Json(StreamResponse {
         video_id,
         manifest,
         manifest_type,
         formats,
+        audio_proxy_url,
     }))
 }
 
@@ -181,12 +179,9 @@ pub async fn get_stream(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
-/// manifest body directly. vidstack fetches this URL to bootstrap
+/// DASH manifest body directly. vidstack fetches this URL to bootstrap
 /// playback; we cannot reuse the JSON `/stream` endpoint because that
-/// embeds the manifest text inside a JSON envelope. The actual content
-/// type may be DASH XML *or* HLS m3u8 depending on what yt-dlp
-/// surfaced — the `Content-Type` response header tells the player which
-/// provider to engage.
+/// embeds the manifest text inside a JSON envelope.
 pub async fn get_stream_manifest(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -198,114 +193,47 @@ pub async fn get_stream_manifest(
         .await?;
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let (body, ty) = fetch_and_rewrite_manifest(&state, &video_id, &result)
+    let body = fetch_and_rewrite_manifest(&state, &video_id, &result)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let content_type = match ty {
-        ManifestType::Dash => "application/dash+xml",
-        ManifestType::Hls => "application/vnd.apple.mpegurl",
-    };
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/dash+xml".parse().unwrap(),
+    );
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-/// Fetch the upstream manifest URL surfaced by yt-dlp, sniff whether
-/// it's DASH or HLS, and return the rewritten body together with the
-/// flavour. `Ok(None)` means yt-dlp didn't expose any manifest at all
-/// for this video.
-/// Resolve the playable manifest for a video.
+/// Resolve the playable DASH manifest for a video.
 ///
-/// The selection cascade prefers manifests whose segment URLs we can
-/// actually fetch reliably:
+/// Builds a synthesized MPD from the `https`-protocol per-format URLs
+/// in `result.formats[]`. Each `<Representation>` points at a
+/// `<BaseURL>` through `/api/proxy/format`. The player drives playback
+/// via byte-range requests.
 ///
-/// 1. **Upstream DASH** — if yt-dlp surfaced a `manifest_url` and the
-///    body parses as DASH, rewrite it (existing behaviour). DASH
-///    segment URLs are the most reliable path because they're
-///    individually signed and *not* PoT-pipelined.
-/// 2. **Synthesized DASH** — build an MPD from the `https`-protocol
-///    per-format URLs in `result.formats[]`. Each `<Representation>`
-///    points at a `<BaseURL>` through `/api/proxy/format`. dash.js
-///    drives playback via byte-range requests, sidestepping the
-///    upstream HLS path entirely.
-/// 3. **Upstream HLS** — last resort. Used only if synthesis returned
-///    `None` (no usable `https` formats) *and* the upstream manifest
-///    parsed as HLS. Kept around because some videos may legitimately
-///    only expose this flavour, even though Google's CDN often
-///    rejects PoT-pipelined HLS segments with 403.
+/// For each Representation we surface, we emit a `<SegmentBase
+/// indexRange>` block — that lets the player learn every
+/// Representation's segment layout from a single small byte-range
+/// fetch instead of empirically probing each one.
+///
+/// Primary source: `result.segment_ranges` — parsed from the
+/// innertube `/player` API dump at extract time. These are keyed by
+/// itag (integer) so we resolve each format's itag and look it up.
+/// The result is cached in `format_box_ranges` so subsequent
+/// manifest loads skip re-extraction entirely.
+///
+/// Fallback: `format_box_ranges` SQLite table (populated on prior
+/// extractions or by the legacy background-probe path).
+///
+/// Returns `Ok(None)` when no manifest can be produced.
 async fn fetch_and_rewrite_manifest(
     state: &AppState,
     video_id: &str,
     result: &ExtractResult,
-) -> AppResult<Option<(String, ManifestType)>> {
+) -> AppResult<Option<String>> {
     let secret = dash::ensure_proxy_secret(&state.db).await?;
-
-    // Step 1: try upstream DASH manifest if yt-dlp surfaced one.
-    let upstream_url = result
-        .manifest_url
-        .clone()
-        .or_else(|| result.formats.iter().find_map(|f| f.manifest_url.clone()));
-    let mut upstream_hls_body: Option<String> = None;
-
-    if let Some(url) = upstream_url {
-        match reqwest::get(&url).await {
-            Ok(res) if res.status().is_success() => match res.text().await {
-                Ok(body) => {
-                    if hls::is_hls_manifest(&body) {
-                        // Defer the HLS path until after synthesis fails.
-                        upstream_hls_body = Some(body);
-                    } else {
-                        let rewritten =
-                            dash::rewrite_manifest(&secret, video_id, &body, &result.formats)?;
-                        return Ok(Some((rewritten, ManifestType::Dash)));
-                    }
-                }
-                Err(err) => warn!(%url, %err, "failed to read upstream manifest body"),
-            },
-            Ok(res) => warn!(%url, status = %res.status(), "non-2xx fetching upstream manifest"),
-            Err(err) => warn!(%url, %err, "failed to fetch upstream manifest"),
-        }
-    }
-
-    // Step 2: synthesize DASH from `https`-protocol formats. This is
-    // the preferred path for videos that don't expose a real DASH
-    // manifest because the per-format `https` URLs work reliably with
-    // byte-range fetching (whereas PoT-pipelined HLS segments get
-    // 403'd by Google's CDN).
-    //
-    // For each Representation we surface, we'd like to emit a
-    // `<SegmentBase indexRange>` block — that lets dash.js learn
-    // every Representation's segment layout from a single small
-    // byte-range fetch instead of empirically probing each one,
-    // which on a fresh manifest fan-outs into hundreds of /api/proxy/format
-    // requests as dash.js measures sizes/bandwidths.
-    //
-    // The byte offsets needed for indexRange aren't in yt-dlp's JSON
-    // — they're inside the upstream mp4 file. We learn them by
-    // fetching the first 64 KB of each format URL and walking the
-    // top-level box list.
-    //
-    // Doing all those probes synchronously fan-out per manifest load
-    // tripped googlevideo's anti-abuse rate limit. So instead, this
-    // request only consults the cache and spawns a background task
-    // for any misses. The first-ever manifest for a video gets a
-    // BaseURL-only fallback (and dash.js's full probe spam); the
-    // second load — typically tens of seconds later, after the
-    // background probes have populated the cache — gets a proper
-    // SegmentBase manifest. The cache is permanent: box offsets
-    // describe file structure, not URL state.
-    // Build the SegmentBase byte-range map for the DASH synthesizer.
-    //
-    // Primary source: `result.segment_ranges` — parsed from the
-    // innertube `/player` API dump at extract time. These are keyed by
-    // itag (integer) so we resolve each format's itag and look it up.
-    // The result is cached in `format_box_ranges` so subsequent
-    // manifest loads skip re-extraction entirely.
-    //
-    // Fallback: `format_box_ranges` SQLite table (populated on prior
-    // extractions or by the legacy background-probe path).
     let box_ranges = resolve_segment_ranges(&state.db, video_id, result).await;
 
     if let Some(synthetic) = dash::synthesize_manifest(
@@ -315,14 +243,7 @@ async fn fetch_and_rewrite_manifest(
         result.duration,
         &box_ranges,
     ) {
-        return Ok(Some((synthetic, ManifestType::Dash)));
-    }
-
-    // Step 3: fall back to upstream HLS if we have it. May 403 on
-    // segment fetches but it's better than failing playback outright.
-    if let Some(body) = upstream_hls_body {
-        let rewritten = hls::rewrite_playlist(&secret, video_id, &body, HlsProxyKind::Playlist);
-        return Ok(Some((rewritten, ManifestType::Hls)));
+        return Ok(Some(synthetic));
     }
 
     Ok(None)
@@ -622,168 +543,6 @@ pub async fn get_segment(
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     Ok(response)
-}
-
-// ---------------------------------------------------------------------------
-// /api/proxy/hls
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct HlsProxyQuery {
-    pub video_id: String,
-    pub kind: String,
-    pub url: String,
-    pub sig: String,
-}
-
-/// `GET /api/proxy/hls` — proxy an HLS playlist or segment URL signed
-/// by [`crate::services::hls::build_proxy_url`].
-///
-/// `kind=playlist` fetches a media playlist, rewrites every segment URL
-/// in it with another signed proxy URL (so the browser doesn't try to
-/// fetch googlevideo.com directly), and returns the rewritten playlist.
-///
-/// `kind=segment` fetches the upstream segment and streams it through
-/// to the client unchanged.
-pub async fn get_hls_proxy(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<HlsProxyQuery>,
-) -> AppResult<Response> {
-    let secret = dash::ensure_proxy_secret(&state.db).await?;
-    let kind: HlsProxyKind = q
-        .kind
-        .parse()
-        .map_err(|_| AppError::BadRequest(format!("invalid kind: {}", q.kind)))?;
-    if !hls::verify_proxy_params(&secret, &q.video_id, kind, &q.url, &q.sig) {
-        return Err(AppError::Forbidden);
-    }
-    if !is_allowed_hls_host(&q.url) {
-        warn!(url = %q.url, "rejecting HLS proxy fetch for non-allowlisted host");
-        return Err(AppError::Forbidden);
-    }
-
-    let mut req = reqwest::Client::new().get(&q.url);
-    if matches!(kind, HlsProxyKind::Segment) {
-        if let Some(range) = headers.get(header::RANGE) {
-            if let Ok(s) = range.to_str() {
-                req = req.header(header::RANGE, s);
-            }
-        }
-    }
-    let res = req.send().await.map_err(AppError::Http)?;
-    let status = res.status();
-    if !status.is_success() {
-        warn!(url = %q.url, %status, "upstream HLS fetch returned non-2xx");
-    }
-
-    let upstream_content_type = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
-    match kind {
-        HlsProxyKind::Playlist => {
-            // Only attempt URL rewriting on a successful response — an
-            // error body (HTML 404 page, JSON error, etc.) is *not* a
-            // valid m3u8 and feeding it through `rewrite_playlist`
-            // would mangle whatever debugging info upstream sent. On
-            // non-2xx pass the body through verbatim with the upstream
-            // status so callers can see what went wrong.
-            let body = res.bytes().await.map_err(AppError::Http)?;
-            if !status.is_success() {
-                let mut response = Response::new(Body::from(body));
-                *response.status_mut() = status;
-                response
-                    .headers_mut()
-                    .insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
-                return Ok(response);
-            }
-            let body_str = std::str::from_utf8(&body).map_err(|e| {
-                AppError::Other(anyhow::anyhow!("upstream playlist not UTF-8: {e}"))
-            })?;
-            let rewritten =
-                hls::rewrite_playlist(&secret, &q.video_id, body_str, HlsProxyKind::Segment);
-            let mut response = Response::new(Body::from(rewritten));
-            *response.status_mut() = status;
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                "application/vnd.apple.mpegurl".parse().unwrap(),
-            );
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-            Ok(response)
-        }
-        HlsProxyKind::Segment => {
-            // Stream the segment bytes through unchanged. Range
-            // requests are honoured (passed through above). Non-2xx
-            // bodies are also passed through so the browser sees the
-            // upstream status.
-            let stream = res.bytes_stream().map_err(std::io::Error::other);
-            let body = Body::from_stream(stream);
-            let mut response = Response::new(body);
-            *response.status_mut() = status;
-            response
-                .headers_mut()
-                .insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
-            Ok(response)
-        }
-    }
-}
-
-/// Defense-in-depth host allowlist for the HLS proxy. The HMAC signature
-/// alone already prevents an unauthenticated attacker from constructing
-/// proxy URLs to arbitrary upstreams, but if the proxy secret were ever
-/// leaked HomeTube would become a credentialed open proxy / SSRF tool.
-/// Refuse anything that doesn't look like a YouTube CDN host.
-///
-/// yt-dlp's HLS manifests for YouTube only ever emit URLs at
-/// `manifest.googlevideo.com` (master/media playlists) and
-/// `*.googlevideo.com` (segments). Legitimate traffic is unaffected.
-fn is_allowed_hls_host(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    if parsed.scheme() != "https" {
-        return false;
-    }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    host == "googlevideo.com"
-        || host.ends_with(".googlevideo.com")
-        || host == "youtube.com"
-        || host.ends_with(".youtube.com")
-}
-
-#[cfg(test)]
-mod hls_host_tests {
-    use super::is_allowed_hls_host;
-
-    #[test]
-    fn accepts_googlevideo_subdomains() {
-        assert!(is_allowed_hls_host(
-            "https://manifest.googlevideo.com/api/manifest/hls_playlist/foo"
-        ));
-        assert!(is_allowed_hls_host(
-            "https://rr1---sn-bvvbaxivnuxq5uu-vgqz.googlevideo.com/videoplayback/seg.ts"
-        ));
-        assert!(is_allowed_hls_host("https://www.youtube.com/"));
-    }
-
-    #[test]
-    fn rejects_other_hosts() {
-        assert!(!is_allowed_hls_host("https://example.com/"));
-        assert!(!is_allowed_hls_host("https://googlevideo.com.evil.com/"));
-        assert!(!is_allowed_hls_host("https://evil.com/?googlevideo.com"));
-        assert!(!is_allowed_hls_host("http://manifest.googlevideo.com/"));
-        assert!(!is_allowed_hls_host("https://169.254.169.254/"));
-        assert!(!is_allowed_hls_host("not a url"));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,6 +1001,25 @@ async fn resolve_segment_ranges(
     out
 }
 
+/// Pick the best audio-only format for the audio-only playback mode.
+/// Prefers the highest-bitrate opus format, excluding DRC variants.
+fn best_audio_format(formats: &[Format]) -> Option<&Format> {
+    formats
+        .iter()
+        .filter(|f| {
+            let acodec = f.acodec.as_deref().unwrap_or("none");
+            let vcodec = f.vcodec.as_deref().unwrap_or("none");
+            let is_audio_only = acodec != "none" && vcodec == "none";
+            let is_drc = f.format_id.contains("-drc")
+                || f.format_note
+                    .as_deref()
+                    .map(|s| s.to_ascii_lowercase().contains("drc"))
+                    .unwrap_or(false);
+            is_audio_only && acodec.starts_with("opus") && !is_drc
+        })
+        .max_by_key(|f| f.abr.map(|b| (b * 1000.0) as u64).unwrap_or(0))
+}
+
 /// Extract the leading integer itag from a yt-dlp format_id.
 ///
 /// yt-dlp names formats like `"303"`, `"303-dashy"`, `"251-drc"`,
@@ -1257,12 +1035,8 @@ fn parse_itag_from_format_id(format_id: &str) -> Option<i64> {
 
 /// Resolve `(format_id, sq)` to an upstream googlevideo.com URL.
 ///
-/// Used by the legacy DASH manifest path (`rewrite_manifest`) which
-/// rewrites `<SegmentURL media="...sq=N...">` into proxy URLs and
-/// then resolves them back here at fetch time. The synthesized DASH
-/// path doesn't go through `sq`-keyed lookup any more — it uses
-/// SegmentBase byte ranges resolved against `/api/proxy/format`
-/// directly.
+/// Used by the segment proxy (`/api/proxy/segment`) and audio proxy
+/// (`/api/proxy/audio`) when serving DASH segments by sequence number.
 ///
 /// The function performs in-place substitution of the `sq=<n>` query
 /// parameter on `format.url`. Returns `None` when the format has no

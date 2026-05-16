@@ -53,9 +53,6 @@ anyhow = "1"
 # Date / Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# XML Parsing (DASH manifest rewriting)
-quick-xml = "0.40"
-
 # Utilities
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }

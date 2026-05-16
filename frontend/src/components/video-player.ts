@@ -488,19 +488,9 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  /** Pick the highest-bitrate audio-only format from the stream list. */
+  /** Pre-signed audio-only proxy URL from the stream response. */
   private bestAudioUrl(): string | null {
-    if (!this.stream) return null;
-    const audio = this.stream.formats
-      .filter((f) => (f.vcodec === "none" || f.height == null) && f.acodec !== "none")
-      .sort((a, b) => (b.format_id?.length ?? 0) - (a.format_id?.length ?? 0));
-    const chosen = audio[0];
-    if (!chosen) return null;
-    const params = new URLSearchParams({
-      video_id: this.videoId,
-      format: chosen.format_id,
-    });
-    return `/api/proxy/audio?${params.toString()}`;
+    return this.stream?.audio_proxy_url ?? null;
   }
 
   private toggleAudioOnly = (): void => {
