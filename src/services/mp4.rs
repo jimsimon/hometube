@@ -211,71 +211,132 @@ pub async fn store(pool: &SqlitePool, video_id: &str, format_id: &str, ranges: B
     }
 }
 
-/// Resolve box ranges for every entry of `(format_id, url)`.
+/// Pure cache lookup for box ranges across a list of formats.
 ///
-/// First tries the `format_box_ranges` cache; misses are probed in
-/// parallel with a single shared HTTP client. Successful probes are
-/// persisted before the function returns. Any combination of cache
-/// hits and probe failures is returned as a `HashMap` keyed by
-/// `format_id` — entries that failed to probe simply don't appear in
-/// the map and the caller should fall back to plain `<BaseURL>`
-/// rendering for those formats.
+/// Never touches the network. Missing entries are simply absent from
+/// the result map; the caller is expected to fall back to plain
+/// `<BaseURL>` rendering for those formats and (usually) call
+/// [`spawn_background_probes`] to fill in the cache for next time.
 ///
-/// The probes share a single `reqwest::Client`, which gives us
-/// connection pooling and bounded TLS handshake cost. The number of
-/// concurrent probes equals the input length; for typical YouTube
-/// extractions that's ~15 after dedup, well under any reasonable
-/// per-host connection limit.
-pub async fn resolve_all(
+/// `formats` is an iterator of `(format_id, _url)` pairs; the URL is
+/// ignored here and exists only to match the input shape of
+/// [`spawn_background_probes`] for callers that pass the same slice
+/// to both.
+pub async fn lookup_all(
     pool: &SqlitePool,
     video_id: &str,
     formats: &[(String, String)],
 ) -> HashMap<String, BoxRanges> {
     let mut out = HashMap::with_capacity(formats.len());
+    for (format_id, _) in formats {
+        if let Some(ranges) = lookup(pool, video_id, format_id).await {
+            out.insert(format_id.clone(), ranges);
+        }
+    }
+    out
+}
 
-    // Cache pass: collect everything we already have.
-    let mut to_probe: Vec<&(String, String)> = Vec::new();
-    for entry in formats {
-        if let Some(ranges) = lookup(pool, video_id, &entry.0).await {
-            out.insert(entry.0.clone(), ranges);
-        } else {
-            to_probe.push(entry);
+/// Default delay between sequential probes. Tunable via the
+/// `HOMETUBE_PROBE_INTERVAL_MS` env var. Two seconds is conservative
+/// — well below googlevideo's anti-abuse thresholds in practice
+/// while still completing a cold-load probe sequence (~15 formats)
+/// within ~30 seconds.
+const DEFAULT_PROBE_INTERVAL_MS: u64 = 2_000;
+
+/// Track which `video_id`s currently have a probe task running, so
+/// concurrent manifest loads of the same video don't spawn duplicate
+/// background workers. Inserted on spawn, removed when the worker
+/// finishes (or panics — but the lock is held only briefly during
+/// insert/remove, so panic poisoning is recovered transparently).
+static PROBES_IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn probes_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    PROBES_IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Spawn a background tokio task that probes each format
+/// sequentially, with a configurable inter-request delay, and writes
+/// the results to `format_box_ranges` as they come in. Idempotent
+/// per `video_id`: if a probe task is already running for the same
+/// video, the call is a no-op.
+///
+/// The task does its own cache-skip-if-already-present check before
+/// each probe, so a pair of overlapping calls (e.g. two viewers
+/// loading the same video at the same time) wastes at most one
+/// duplicate request — the second worker would fail the
+/// in-flight-set guard, and a re-probe of an already-stored format
+/// is short-circuited by the in-loop cache lookup.
+///
+/// Probes that fail (404, 429, network timeout) are *not* recorded;
+/// the next manifest load will retry them. We don't backoff or
+/// negative-cache because the failure modes are usually transient
+/// (rate limiting, expired URL).
+pub fn spawn_background_probes(pool: SqlitePool, video_id: String, formats: Vec<(String, String)>) {
+    if formats.is_empty() {
+        return;
+    }
+    {
+        let mut set = match probes_in_flight().lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !set.insert(video_id.clone()) {
+            // Already being probed — drop this call as a no-op.
+            return;
         }
     }
 
-    if to_probe.is_empty() {
-        return out;
-    }
+    let interval_ms = std::env::var("HOMETUBE_PROBE_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PROBE_INTERVAL_MS);
+    let interval = std::time::Duration::from_millis(interval_ms);
 
-    // Parallel probe pass: one HTTP request per missing format,
-    // bounded only by the natural fan-out of the format list.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
-    let probes = to_probe.iter().map(|(format_id, url)| {
-        let client = &client;
-        async move {
-            let ranges = probe(client, url).await;
-            (format_id.clone(), ranges)
+        for (format_id, url) in formats {
+            // Race guard: another task may have probed this format
+            // (e.g. via a different video_id pointing at the same
+            // upstream URL — rare but possible).
+            if lookup(&pool, &video_id, &format_id).await.is_some() {
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+
+            if let Some(ranges) = probe(&client, &url).await {
+                store(&pool, &video_id, &format_id, ranges).await;
+            }
+
+            tokio::time::sleep(interval).await;
+        }
+
+        if let Ok(mut set) = probes_in_flight().lock() {
+            set.remove(&video_id);
         }
     });
-    let results = futures_util::future::join_all(probes).await;
-
-    for (format_id, maybe_ranges) in results {
-        if let Some(ranges) = maybe_ranges {
-            store(pool, video_id, &format_id, ranges).await;
-            out.insert(format_id, ranges);
-        }
-    }
-
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spin up an in-memory SQLite database with all migrations
+    /// applied. The pool is single-connection so the schema we create
+    /// is visible to subsequent queries on the same handle.
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
 
     /// Build a synthetic mp4 byte stream containing the requested
     /// top-level boxes in document order. Each `(kind, size)` pair
@@ -423,5 +484,89 @@ mod tests {
     fn empty_buffer_returns_none() {
         assert_eq!(parse_box_ranges(b""), None);
         assert_eq!(parse_box_ranges(b"abc"), None);
+    }
+
+    fn sample_ranges() -> BoxRanges {
+        BoxRanges {
+            init: ByteRange {
+                start: 32,
+                end: 511,
+            },
+            index: ByteRange {
+                start: 512,
+                end: 4095,
+            },
+        }
+    }
+
+    /// `lookup_all` reports cache hits as a populated map and cache
+    /// misses as absent entries — never blocks on the network.
+    #[tokio::test]
+    async fn lookup_all_returns_only_cached_entries() {
+        let pool = test_pool().await;
+        store(&pool, "vid", "137", sample_ranges()).await;
+
+        let inputs = vec![
+            ("137".into(), "https://example/137".into()),
+            ("248".into(), "https://example/248".into()),
+        ];
+        let map = lookup_all(&pool, "vid", &inputs).await;
+        assert!(map.contains_key("137"));
+        assert!(!map.contains_key("248"));
+    }
+
+    /// `store` is idempotent: the unique constraint on
+    /// `(video_id, format_id)` doesn't cause errors when re-storing
+    /// the same row.
+    #[tokio::test]
+    async fn store_is_idempotent() {
+        let pool = test_pool().await;
+        store(&pool, "vid", "137", sample_ranges()).await;
+        store(&pool, "vid", "137", sample_ranges()).await; // re-store
+        let r = lookup(&pool, "vid", "137").await.expect("present");
+        assert_eq!(r, sample_ranges());
+    }
+
+    /// `spawn_background_probes` is a no-op when no formats are
+    /// passed — never spawns a task and never registers in the
+    /// in-flight set.
+    #[tokio::test]
+    async fn spawn_with_empty_formats_is_noop() {
+        let pool = test_pool().await;
+        spawn_background_probes(pool, "vid".into(), vec![]);
+        // Hand back to the runtime briefly so any spurious task would
+        // run; we then verify nothing was registered.
+        tokio::task::yield_now().await;
+        let set = probes_in_flight().lock().unwrap();
+        assert!(!set.contains("vid"));
+    }
+
+    /// Repeated `spawn_background_probes` calls for the same video
+    /// while a worker is in-flight collapse to one — the second
+    /// call's input list is dropped on the floor and the existing
+    /// task continues.
+    #[tokio::test]
+    async fn spawn_dedupes_concurrent_calls_per_video() {
+        // Insert the video into the in-flight set manually to
+        // simulate "task already running."
+        probes_in_flight().lock().unwrap().insert("busy-vid".into());
+
+        let pool = test_pool().await;
+        // This call must short-circuit; if it didn't, it'd start a
+        // probe of an example.com URL which would likely produce a
+        // non-2xx and a panic in the worker. We just verify it
+        // returns synchronously without affecting the set.
+        spawn_background_probes(
+            pool,
+            "busy-vid".into(),
+            vec![("137".into(), "https://example.com/never-fetched".into())],
+        );
+        // The set entry we put there manually should still be there
+        // — i.e. the new call didn't blow up the bookkeeping.
+        let set = probes_in_flight().lock().unwrap();
+        assert!(set.contains("busy-vid"));
+        // Cleanup so we don't leak state to other tests.
+        drop(set);
+        probes_in_flight().lock().unwrap().remove("busy-vid");
     }
 }
