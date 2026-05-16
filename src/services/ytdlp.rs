@@ -486,6 +486,33 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
             .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
     }
 
+    // YouTube extractor tuning. We deliberately request multiple player
+    // clients so yt-dlp returns the *union* of formats they expose:
+    //
+    // - `default` keeps yt-dlp's built-in client list as a baseline.
+    // - `ios` returns DASH-segmented formats *without* requiring a PO
+    //   token — those URLs are the most reliable path for playback
+    //   because Google's CDN doesn't 403 them the way it 403s
+    //   PoT-pipelined HLS segments.
+    // - `web` is the canonical client; it surfaces DASH manifests when
+    //   it can authenticate via cookies + the bgutil PoT plugin, and
+    //   gives us the richest format pool.
+    //
+    // `formats=duplicate` asks yt-dlp to keep adaptive *and*
+    // progressive variants in the output, even when they overlap. That
+    // gives `synthesize_manifest` more `https`-protocol formats to
+    // pick from when no upstream DASH manifest is available, and lets
+    // the rewriter prefer real DASH when it is.
+    //
+    // Configurable via the `YTDLP_PLAYER_CLIENT` env var so production
+    // deployments can pin to a single client if they discover one
+    // works better for their cookie set / IP geolocation.
+    let player_clients =
+        std::env::var("YTDLP_PLAYER_CLIENT").unwrap_or_else(|_| "default,ios,web".to_string());
+    cmd.arg("--extractor-args").arg(format!(
+        "youtube:player_client={player_clients};formats=duplicate"
+    ));
+
     // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
     // doesn't erode the canonical jar. Snapshot the cookie names from
     // the *tempfile we just wrote* (not the canonical source) so the
