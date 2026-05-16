@@ -356,7 +356,15 @@ export class VideoPlayer extends LitElement {
       await this.updateComplete;
       await this.attachSource();
     } catch (err) {
-      this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
+      if (err instanceof ApiError) {
+        this.error = String(err.body);
+      } else if (err && typeof err === "object" && "code" in err && "category" in err) {
+        // shaka.util.Error: surface the code, category, and data for debugging.
+        const se = err as { code: number; category: number; data: unknown[] };
+        this.error = `Shaka Error ${se.category}.${se.code}: ${JSON.stringify(se.data)}`;
+      } else {
+        this.error = (err as Error).message ?? String(err);
+      }
     }
   }
 
