@@ -9,7 +9,6 @@ export type AccountType = "parent" | "child";
 
 export interface Account {
   id: number;
-  email: string;
   display_name: string;
   avatar_url: string | null;
   account_type: AccountType;
@@ -17,7 +16,6 @@ export interface Account {
 
 export interface AccountSummary {
   id: number;
-  email: string;
   display_name: string;
   avatar_url: string | null;
   account_type: "parent" | "child";

@@ -2,9 +2,9 @@
  * <hometube-add-member-dialog>
  *
  * Modal form (Web Awesome `<wa-dialog>`) used by
- * `<hometube-family-manager>` to gather the role + optional display
- * name for a new family member, then `POST /api/family/members` and
- * navigate the browser to the returned `login_url`.
+ * `<hometube-family-manager>` to gather the role + display name (and
+ * PIN for parents) for a new family member, then
+ * `POST /api/family/members`.
  *
  * Toggle visibility via the `open` attribute (or `.open` property);
  * the component dispatches `add-member-cancelled` when the user closes
@@ -122,28 +122,39 @@ export class AddMemberDialog extends LitElement {
     const data = new FormData(form);
     const role = String(data.get("role") ?? "child");
     const display_name = String(data.get("display_name") ?? "").trim();
+    const pin = String(data.get("pin") ?? "").trim();
+
+    // Client-side validation for parents.
+    if (role === "parent") {
+      if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+        this.error = "PIN must be 4-6 numeric digits.";
+        return;
+      }
+      const pinConfirm = String(data.get("pin_confirm") ?? "").trim();
+      if (pin !== pinConfirm) {
+        this.error = "PINs do not match.";
+        return;
+      }
+    }
+
     this.busy = true;
     this.error = "";
     try {
-      const res = await api.post<{ login_url?: string }>("/api/family/members", {
+      await api.post("/api/family/members", {
         role,
         display_name: display_name || undefined,
+        pin: role === "parent" ? pin : undefined,
       });
-      if (res.login_url) {
-        // Parent account — send through the OAuth flow.
-        window.location.href = res.login_url;
-      } else {
-        // Child account created locally — close the dialog and
-        // tell the parent component to refresh.
-        this.open = false;
-        this.dispatchEvent(
-          new CustomEvent("family-changed", {
-            bubbles: true,
-            composed: true,
-          }),
-        );
-        this.busy = false;
-      }
+      // Account created locally — close the dialog and
+      // tell the parent component to refresh.
+      this.open = false;
+      this.dispatchEvent(
+        new CustomEvent("family-changed", {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      this.busy = false;
     } catch (err) {
       this.error = this.errorMessage(err);
       this.busy = false;
@@ -154,10 +165,6 @@ export class AddMemberDialog extends LitElement {
     return html`
       <wa-dialog label="Add a family member" ?open=${this.open} @wa-after-hide=${this.close}>
         <form @submit=${this.onSubmit}>
-          <p>
-            Children are created as local profiles — no Google account needed. You can optionally
-            link a YouTube account later. Parents require a Google sign-in.
-          </p>
           <label>
             Role
             <select name="role" required @change=${this.onRoleChange}>
@@ -171,23 +178,47 @@ export class AddMemberDialog extends LitElement {
               name="display_name"
               type="text"
               autocomplete="off"
-              placeholder=${this.selectedRole === "parent"
-                ? "Optional — defaults to their Google name"
-                : "Required — pick a name for this profile"}
-              ?required=${this.selectedRole === "child"}
+              placeholder="Pick a name for this profile"
+              required
             />
           </label>
+          ${this.selectedRole === "parent"
+            ? html`
+                <label>
+                  PIN (4-6 digits)
+                  <input
+                    name="pin"
+                    type="password"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    minlength="4"
+                    maxlength="6"
+                    autocomplete="new-password"
+                    required
+                  />
+                </label>
+                <label>
+                  Confirm PIN
+                  <input
+                    name="pin_confirm"
+                    type="password"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    minlength="4"
+                    maxlength="6"
+                    autocomplete="new-password"
+                    required
+                  />
+                </label>
+              `
+            : null}
           ${this.error
             ? html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`
             : null}
           <div class="actions">
             <button type="button" @click=${this.close} ?disabled=${this.busy}>Cancel</button>
             <button type="submit" class="primary" ?disabled=${this.busy}>
-              ${this.busy
-                ? "Working…"
-                : this.selectedRole === "parent"
-                  ? "Continue with Google"
-                  : "Create profile"}
+              ${this.busy ? "Working…" : "Create profile"}
             </button>
           </div>
         </form>

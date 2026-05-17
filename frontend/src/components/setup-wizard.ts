@@ -7,52 +7,40 @@
  *
  * Steps:
  *   1. Welcome
- *   2. Google Cloud credentials (delegates to `<hometube-setup-credentials-form>`)
- *   3. Sign in with Google (full-page redirect to `/api/auth/login?role=parent`)
- *   4. Set PIN (delegates to `<hometube-setup-pin-input>`)
- *   5. Optional: invite additional accounts
- *   6. Complete (calls `POST /api/setup/complete` and reloads to `/`)
+ *   2. Create parent account (name + PIN)
+ *   3. Optional: invite additional accounts
+ *   4. Complete (calls `POST /api/setup/complete` and reloads to `/`)
  *
  * On load, the component fetches `/api/setup/status` so a partially-
- * completed wizard resumes at the right step (e.g., after the OAuth
- * callback redirects back to `/setup`).
+ * completed wizard resumes at the right step.
  */
 
 import { LitElement, html, css } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, state } from "lit/decorators.js";
 
-import { ApiError, api } from "../services/api.js";
+import { api, ApiError } from "../services/api.js";
 
-import "./setup-credentials-form.js";
 import "./setup-pin-input.js";
 
-type Step = "welcome" | "credentials" | "sign-in" | "pin" | "invite" | "complete";
+type Step = "welcome" | "create-parent" | "invite" | "complete";
 
 interface SetupStatus {
   complete: boolean;
-  has_credentials: boolean;
   has_first_parent: boolean;
-}
-
-interface CurrentAccount {
-  id: number;
-  display_name: string;
-  email: string;
-  avatar_url: string | null;
-  account_type: "parent" | "child";
-  has_pin: boolean;
 }
 
 @customElement("hometube-setup-wizard")
 export class SetupWizard extends LitElement {
-  /** Auto-detected default redirect URI from the server. */
-  @property({ type: String, attribute: "suggested-redirect-uri" })
-  suggestedRedirectUri = "";
-
   @state() private step: Step = "welcome";
-  @state() private currentAccount: CurrentAccount | null = null;
   @state() private completing = false;
   @state() private completeError = "";
+
+  // Create-parent form state
+  @state() private parentName = "";
+  @state() private parentPin = "";
+  @state() private parentPinConfirm = "";
+  @state() private registerBusy = false;
+  @state() private registerError = "";
 
   static styles = css`
     :host {
@@ -100,52 +88,50 @@ export class SetupWizard extends LitElement {
     .status.error {
       color: var(--wa-color-danger-fill, #b91c1c);
     }
+    form {
+      display: grid;
+      gap: 1rem;
+      max-width: 24rem;
+    }
+    label {
+      display: grid;
+      gap: 0.25rem;
+      font-weight: 500;
+    }
+    input {
+      padding: 0.5rem;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      border-radius: 0.375rem;
+      font: inherit;
+      background: var(--wa-color-surface-default);
+      color: var(--wa-color-text-normal);
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.refreshStatus();
-    this.addEventListener("setup-credentials-saved", () => {
-      this.step = "sign-in";
-      void this.refreshStatus();
-    });
-    this.addEventListener("setup-pin-saved", () => {
-      this.step = "invite";
-    });
   }
 
   private async refreshStatus(): Promise<void> {
     try {
       const status = await api.get<SetupStatus>("/api/setup/status");
 
-      // Check if there's an active session (user just came back from
-      // OAuth). 401 simply means "not signed in".
-      try {
-        const me = await api.get<CurrentAccount>("/api/auth/me");
-        this.currentAccount = me;
-      } catch (err) {
-        if (!(err instanceof ApiError) || err.status !== 401) throw err;
-        this.currentAccount = null;
-      }
-
-      // Pick the step with the lowest unfinished prerequisite. The
-      // welcome screen is shown only when nothing is configured yet
-      // *and* no step has been advanced past in this session.
+      // Pick the step with the lowest unfinished prerequisite.
       if (status.complete) {
         this.step = "complete";
-      } else if (!status.has_credentials) {
-        // Keep welcome unless the user has already moved past it.
-        if (this.step === "complete") this.step = "welcome";
       } else if (!status.has_first_parent) {
-        this.step = "sign-in";
-      } else if (this.currentAccount && !this.currentAccount.has_pin) {
-        this.step = "pin";
-      } else if (this.step !== "invite" && this.step !== "complete" && this.step !== "welcome") {
+        // No parent yet — stay on welcome or create-parent (don't
+        // regress from create-parent back to welcome on refresh).
+        if (this.step === "complete" || this.step === "invite") {
+          this.step = "welcome";
+        }
+      } else {
+        // Parent exists but setup not yet marked complete — go to the
+        // family/invite step.
         this.step = "invite";
       }
     } catch (err) {
-      // Network errors are non-fatal at this step; the user can still
-      // try to advance manually.
       this.completeError = `Could not load setup status: ${this.errorMessage(err)}`;
     }
   }
@@ -159,8 +145,36 @@ export class SetupWizard extends LitElement {
     return "Unknown error";
   }
 
-  private startOAuth(role: "parent" | "child"): void {
-    window.location.href = `/api/auth/login?role=${role}`;
+  private async onRegisterParent(e: Event): Promise<void> {
+    e.preventDefault();
+    const name = this.parentName.trim();
+    if (!name) {
+      this.registerError = "Name is required.";
+      return;
+    }
+    if (this.parentPin.length < 4 || this.parentPin.length > 6) {
+      this.registerError = "PIN must be 4-6 digits.";
+      return;
+    }
+    if (this.parentPin !== this.parentPinConfirm) {
+      this.registerError = "PINs do not match.";
+      return;
+    }
+    this.registerBusy = true;
+    this.registerError = "";
+    try {
+      await api.post("/api/auth/register", {
+        display_name: name,
+        pin: this.parentPin,
+        role: "parent",
+      });
+      this.step = "invite";
+      void this.refreshStatus();
+    } catch (err) {
+      this.registerError = this.errorMessage(err);
+    } finally {
+      this.registerBusy = false;
+    }
   }
 
   private async finish(): Promise<void> {
@@ -178,9 +192,7 @@ export class SetupWizard extends LitElement {
   private renderStepNav() {
     const steps: { key: Step; label: string }[] = [
       { key: "welcome", label: "Welcome" },
-      { key: "credentials", label: "Credentials" },
-      { key: "sign-in", label: "Sign in" },
-      { key: "pin", label: "PIN" },
+      { key: "create-parent", label: "Parent" },
       { key: "invite", label: "Family" },
       { key: "complete", label: "Done" },
     ];
@@ -204,45 +216,76 @@ export class SetupWizard extends LitElement {
           <section aria-labelledby="welcome-heading">
             <h2 id="welcome-heading">Let's get you set up</h2>
             <p>
-              HomeTube needs a Google Cloud project to talk to YouTube on behalf of your kids. The
-              next step has step-by-step instructions and a "Test connection" button.
+              You'll create a parent profile with a name and a PIN. The PIN is used to sign in and
+              protects parent access.
             </p>
             <div class="actions">
-              <button @click=${() => (this.step = "credentials")}>Begin</button>
+              <button @click=${() => (this.step = "create-parent")}>Begin</button>
             </div>
           </section>
         `;
 
-      case "credentials":
+      case "create-parent":
         return html`
-          <section aria-labelledby="credentials-heading">
-            <h2 id="credentials-heading">Google Cloud credentials</h2>
-            <hometube-setup-credentials-form
-              suggested-redirect-uri=${this.suggestedRedirectUri}
-            ></hometube-setup-credentials-form>
-          </section>
-        `;
-
-      case "sign-in":
-        return html`
-          <section aria-labelledby="signin-heading">
-            <h2 id="signin-heading">Sign in with Google</h2>
-            <p>
-              Sign in with the Google account you want to use as the first <strong>parent</strong>.
-              After signing in you'll be brought back here to set a PIN.
-            </p>
-            <div class="actions">
-              <button @click=${() => this.startOAuth("parent")}>Continue with Google</button>
-              <button class="secondary" @click=${() => (this.step = "credentials")}>Back</button>
-            </div>
-          </section>
-        `;
-
-      case "pin":
-        return html`
-          <section aria-labelledby="pin-heading">
-            <h2 id="pin-heading">Set a parent PIN</h2>
-            <hometube-setup-pin-input></hometube-setup-pin-input>
+          <section aria-labelledby="parent-heading">
+            <h2 id="parent-heading">Create your parent profile</h2>
+            <form @submit=${this.onRegisterParent} novalidate>
+              <label>
+                Your name
+                <input
+                  type="text"
+                  autocomplete="name"
+                  required
+                  .value=${this.parentName}
+                  @input=${(e: Event) => (this.parentName = (e.target as HTMLInputElement).value)}
+                />
+              </label>
+              <label>
+                PIN (4-6 digits)
+                <input
+                  type="password"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  minlength="4"
+                  maxlength="6"
+                  autocomplete="new-password"
+                  required
+                  .value=${this.parentPin}
+                  @input=${(e: Event) => (this.parentPin = (e.target as HTMLInputElement).value)}
+                />
+              </label>
+              <label>
+                Confirm PIN
+                <input
+                  type="password"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  minlength="4"
+                  maxlength="6"
+                  autocomplete="new-password"
+                  required
+                  .value=${this.parentPinConfirm}
+                  @input=${(e: Event) =>
+                    (this.parentPinConfirm = (e.target as HTMLInputElement).value)}
+                />
+              </label>
+              ${this.registerError
+                ? html`<p class="status error" role="alert">${this.registerError}</p>`
+                : null}
+              <div class="actions">
+                <button type="submit" ?disabled=${this.registerBusy}>
+                  ${this.registerBusy ? "Creating…" : "Create profile"}
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  @click=${() => (this.step = "welcome")}
+                  ?disabled=${this.registerBusy}
+                >
+                  Back
+                </button>
+              </div>
+            </form>
           </section>
         `;
 
@@ -255,12 +298,6 @@ export class SetupWizard extends LitElement {
               parent dashboard.
             </p>
             <div class="actions">
-              <button class="secondary" @click=${() => this.startOAuth("parent")}>
-                Add another parent
-              </button>
-              <button class="secondary" @click=${() => this.startOAuth("child")}>
-                Add a child
-              </button>
               <button ?disabled=${this.completing} @click=${() => this.finish()}>
                 ${this.completing ? "Finishing…" : "Finish setup"}
               </button>

@@ -5,7 +5,6 @@
 
 use askama::Template;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
@@ -46,29 +45,13 @@ impl VideoCardData {
 
 #[derive(Template)]
 #[template(path = "pages/setup-wizard.html")]
-struct SetupWizardTemplate {
-    suggested_redirect_uri: String,
-}
+struct SetupWizardTemplate {}
 
 /// `GET /setup` — server-rendered shell for the multi-step setup wizard.
 pub async fn setup_wizard(
     State(_state): State<AppState>,
-    headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:3000");
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.") {
-        "http"
-    } else {
-        "https"
-    };
-    let suggested_redirect_uri = format!("{scheme}://{host}/api/auth/callback");
-
-    let tpl = SetupWizardTemplate {
-        suggested_redirect_uri,
-    };
+    let tpl = SetupWizardTemplate {};
     Ok(Html(tpl.render()?))
 }
 
@@ -76,10 +59,8 @@ pub async fn setup_wizard(
 /// route the user to the parent or child home page based on their
 /// signed-in role.
 ///
-/// Anonymous users are sent to `/login` when there are zero accounts
-/// (so a freshly-installed app shows a real "Sign in with Google"
-/// landing instead of an empty profile grid), or `/profiles`
-/// otherwise.
+/// Anonymous users are sent to `/profiles` so they can pick a profile
+/// and enter their PIN.
 pub async fn root_or_setup(
     State(state): State<AppState>,
     current: Option<CurrentAccount>,
@@ -94,115 +75,15 @@ pub async fn root_or_setup(
         Some(c) if matches!(c.account_type, AccountType::Child) => {
             Ok(Redirect::to("/child/home").into_response())
         }
-        _ => {
-            let total = crate::models::account::total_count(&state.db)
-                .await
-                .unwrap_or(0);
-            if total == 0 {
-                Ok(Redirect::to("/login").into_response())
-            } else {
-                Ok(Redirect::to("/profiles").into_response())
-            }
-        }
+        _ => Ok(Redirect::to("/profiles").into_response()),
     }
 }
 
-#[derive(Template)]
-#[template(path = "pages/login.html")]
-struct LoginTemplate {
-    /// `/api/auth/login` URL with optional `role` and `context`
-    /// query parameters preserved from the request.
-    login_href: String,
-    /// `Some(message)` when the request reached the login page after
-    /// an OAuth callback failure (or any other error code we want to
-    /// surface). The template renders this in an error banner.
-    error_message: Option<String>,
-    /// `true` when the database has at least one account, so the
-    /// template can show the "Switch profile" link.
-    has_existing_accounts: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LoginQuery {
-    /// `parent` or `child` — preserved through the OAuth flow so the
-    /// callback knows what role to assign on first login.
-    #[serde(default)]
-    pub role: Option<String>,
-    /// Pass-through context for the OAuth flow (e.g.
-    /// `add_member`, `reauth`).
-    #[serde(default)]
-    pub context: Option<String>,
-    /// Error code surfaced after a failed OAuth callback. Mapped to
-    /// a user-friendly string in [`error_code_to_message`].
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-fn error_code_to_message(code: &str) -> String {
-    match code {
-        "oauth_callback_failed" => "Sign-in didn't complete. Please try again.".to_string(),
-        "access_denied" => "You declined the Google sign-in prompt.".to_string(),
-        "youtube_scope_missing" => {
-            "YouTube access was not granted. This can happen if the YouTube \
-             permission was unchecked on the consent screen, or if this is a \
-             supervised (Family Link) child account — Google does not allow \
-             YouTube API access for supervised accounts. Try with a \
-             non-supervised Google account, or use a local-only child profile."
-                .to_string()
-        }
-        other => format!("Sign-in error: {other}"),
-    }
-}
-
-/// `GET /login` — landing page for anonymous users. Renders a
-/// "Sign in with Google" button that POSTs to the OAuth start
-/// endpoint, plus a "Switch profile" link when at least one account
-/// already exists.
-pub async fn login(
-    State(state): State<AppState>,
-    Query(q): Query<LoginQuery>,
-) -> AppResult<Response> {
-    // Both `role` and `context` come from a small alphanumeric
-    // whitelist (`parent`, `child`, `add_member`, `reauth`); we
-    // sanitise to be safe and skip any value containing a character
-    // outside that set rather than depending on a percent-encoder.
-    fn safe(value: &str) -> Option<&str> {
-        if value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    let role = q.role.as_deref().and_then(safe);
-    let context = q.context.as_deref().and_then(safe);
-    let pairs: Vec<(&str, &str)> = [("role", role), ("context", context)]
-        .into_iter()
-        .filter_map(|(k, v)| v.map(|val| (k, val)))
-        .collect();
-    let mut login_href = "/api/auth/login".to_string();
-    if !pairs.is_empty() {
-        let qs = pairs
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        login_href.push('?');
-        login_href.push_str(&qs);
-    }
-
-    let total = crate::models::account::total_count(&state.db)
-        .await
-        .unwrap_or(0);
-
-    let tpl = LoginTemplate {
-        login_href,
-        error_message: q.error.as_deref().map(error_code_to_message),
-        has_existing_accounts: total > 0,
-    };
-    Ok(Html(tpl.render()?).into_response())
+/// `GET /login` — redirects to the profile picker. The login page is no
+/// longer needed since authentication is handled via PINs at the profile
+/// picker.
+pub async fn login() -> Response {
+    Redirect::to("/profiles").into_response()
 }
 
 #[derive(Template)]

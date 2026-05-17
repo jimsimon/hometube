@@ -404,10 +404,10 @@ async fn family_update_member_renames() {
 }
 
 #[tokio::test]
-async fn family_add_member_returns_login_url() {
+async fn family_add_member_creates_accounts_locally() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
 
-    // Adding a child creates a local-only account immediately.
+    // Adding a child creates a local account immediately.
     let res = app
         .server
         .post("/api/family/members")
@@ -417,17 +417,29 @@ async fn family_add_member_returns_login_url() {
     let body: serde_json::Value = res.json();
     assert_eq!(body["display_name"].as_str().unwrap(), "Kiddo");
     assert_eq!(body["account_type"].as_str().unwrap(), "child");
-    // Adding a parent still returns a login URL for the OAuth flow.
+
+    // Adding a parent also creates locally — requires a PIN.
     let res = app
         .server
         .post("/api/family/members")
-        .json(&json!({ "role": "parent", "display_name": "Mom" }))
+        .json(&json!({ "role": "parent", "display_name": "Mom", "pin": "1234" }))
         .await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
-    let url = body["login_url"].as_str().unwrap();
-    assert!(url.contains("role=parent"));
-    assert!(url.contains("context=add_member"));
+    assert_eq!(body["display_name"].as_str().unwrap(), "Mom");
+    assert_eq!(body["account_type"].as_str().unwrap(), "parent");
+}
+
+#[tokio::test]
+async fn family_add_parent_requires_pin() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    // Adding a parent without a PIN should fail.
+    let res = app
+        .server
+        .post("/api/family/members")
+        .json(&json!({ "role": "parent", "display_name": "Dad" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -491,29 +503,6 @@ async fn family_delete_child_succeeds() {
         .delete(&format!("/api/family/members/{child_id}"))
         .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
-async fn family_reauth_returns_login_url() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let parent_id = app.parent_id.unwrap();
-    let res = app
-        .server
-        .post(&format!("/api/family/members/{parent_id}/reauth"))
-        .await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    assert!(body["login_url"]
-        .as_str()
-        .unwrap()
-        .contains("context=reauth"));
-}
-
-#[tokio::test]
-async fn family_reauth_404_for_missing() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let res = app.server.post("/api/family/members/9999/reauth").await;
-    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

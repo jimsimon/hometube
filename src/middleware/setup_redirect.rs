@@ -3,8 +3,8 @@
 //! Until `setup_complete` flips to `true` in `app_config`, every page
 //! request that isn't part of the setup flow itself is redirected to
 //! `/setup`. The allow-list mirrors the routes the wizard needs to
-//! function: the wizard page, its API endpoints, the OAuth callback
-//! (so the "Sign in with Google" step can finish), and static assets.
+//! function: the wizard page, its API endpoints, the auth API (so
+//! account registration can complete during setup), and static assets.
 
 use axum::{
     extract::State,
@@ -17,11 +17,10 @@ use crate::services::setup;
 use crate::state::AppState;
 
 /// Path prefixes that are always reachable, even before setup is
-/// complete. The `/api/auth` prefix is allowed so the OAuth flow can
-/// finish (the `Sign in with Google` button in the wizard kicks off
-/// `/api/auth/login` and Google redirects back to `/api/auth/callback`),
-/// and so the wizard can ask `/api/auth/me` whether the parent has
-/// already signed in.
+/// complete. The `/api/auth` prefix is allowed so the registration
+/// endpoint (`/api/auth/register`) works during setup, and so the
+/// wizard can ask `/api/auth/me` whether the parent has already
+/// created their account.
 const ALLOWED_PREFIXES: &[&str] = &[
     "/setup",
     "/api/setup",

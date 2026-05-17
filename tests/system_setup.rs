@@ -3,7 +3,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{boot, boot_with_parent_and_child, seed_credentials};
+use common::{boot, boot_with_parent_and_child};
 use hometube::models::account::AccountType;
 use serde_json::json;
 
@@ -18,17 +18,6 @@ async fn setup_status_reflects_fresh_state() {
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["complete"], false);
-    assert_eq!(body["has_credentials"], false);
-    assert_eq!(body["has_first_parent"], false);
-}
-
-#[tokio::test]
-async fn setup_status_after_credentials() {
-    let app = boot().await;
-    seed_credentials(&app.pool).await;
-    let res = app.server.get("/api/setup/status").await;
-    let body: serde_json::Value = res.json();
-    assert_eq!(body["has_credentials"], true);
     assert_eq!(body["has_first_parent"], false);
 }
 
@@ -40,98 +29,8 @@ async fn setup_complete_rejects_without_prerequisites() {
 }
 
 #[tokio::test]
-async fn save_credentials_rejects_empty_client_id() {
-    let app = boot().await;
-    let res = app
-        .server
-        .post("/api/setup/credentials")
-        .json(&json!({
-            "google_client_id": "",
-            "google_client_secret": "sec",
-            "redirect_uri": "http://localhost:3000/api/auth/callback"
-        }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn save_credentials_rejects_empty_secret() {
-    let app = boot().await;
-    let res = app
-        .server
-        .post("/api/setup/credentials")
-        .json(&json!({
-            "google_client_id": "id",
-            "google_client_secret": "   ",
-            "redirect_uri": "http://localhost:3000/api/auth/callback"
-        }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn save_credentials_accepts_missing_api_key() {
-    // The credentials endpoint only requires client_id, client_secret,
-    // and redirect_uri. No YouTube API key is needed.
-    let app = boot().await;
-
-    // The real validation will fail because Google's discovery document
-    // is unreachable from the test harness, but the request should be
-    // accepted structurally (only failing on the Google reachability
-    // probe, not on missing fields).
-    let res = app
-        .server
-        .post("/api/setup/credentials")
-        .json(&json!({
-            "google_client_id": "id",
-            "google_client_secret": "sec",
-            "redirect_uri": "http://localhost:3000/api/auth/callback"
-        }))
-        .await;
-    // A 400 from the Google reachability check is acceptable; a 422
-    // from missing required fields would indicate a regression.
-    let status = res.status_code();
-    assert_ne!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "all required fields should be present"
-    );
-}
-
-#[tokio::test]
-async fn save_credentials_rejects_bad_redirect_uri() {
-    let app = boot().await;
-    let res = app
-        .server
-        .post("/api/setup/credentials")
-        .json(&json!({
-            "google_client_id": "id",
-            "google_client_secret": "sec",
-            "redirect_uri": "ftp://bad"
-        }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn test_credentials_rejects_same_validation() {
-    let app = boot().await;
-    let res = app
-        .server
-        .post("/api/setup/test-credentials")
-        .json(&json!({
-            "google_client_id": "id",
-            "google_client_secret": "",
-            "redirect_uri": "http://localhost:3000/cb"
-        }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
 async fn complete_rejects_without_parent() {
     let app = boot().await;
-    seed_credentials(&app.pool).await;
     let res = app.server.post("/api/setup/complete").await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
     let body = res.text();

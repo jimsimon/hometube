@@ -166,10 +166,6 @@ pub fn router(state: AppState) -> Router {
             "/api/family/members/{id}",
             put(family::update_member).delete(family::delete_member),
         )
-        .route(
-            "/api/family/members/{id}/reauth",
-            post(family::reauth_member),
-        )
         // Cache management
         .route("/api/cache/stats", get(cache::stats))
         .route(
@@ -399,8 +395,7 @@ pub fn router(state: AppState) -> Router {
     // Sub-router: auth + setup
     // -----------------------------------------------------------------
     let auth_routes = Router::new()
-        .route("/api/auth/login", get(auth::login))
-        .route("/api/auth/callback", get(auth::callback))
+        .route("/api/auth/register", post(auth::register))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/profiles", get(auth::profiles))
@@ -409,8 +404,6 @@ pub fn router(state: AppState) -> Router {
 
     let setup_routes = Router::new()
         .route("/api/setup/status", get(setup::status))
-        .route("/api/setup/credentials", post(setup::save_credentials))
-        .route("/api/setup/test-credentials", post(setup::test_credentials))
         .route("/api/setup/complete", post(setup::complete));
 
     // -----------------------------------------------------------------

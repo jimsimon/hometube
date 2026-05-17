@@ -184,55 +184,19 @@ async fn parent_accessing_child_search_redirects() {
 }
 
 // ===========================================================================
-// Login page variations
+// Login page (now redirects to /profiles)
 // ===========================================================================
 
 #[tokio::test]
-async fn login_page_with_context_param() {
+async fn login_page_redirects_to_profiles() {
     let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-    let res = app
-        .server
-        .get("/login?role=child&context=add_member")
-        .clear_cookies()
-        .await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn login_page_with_youtube_scope_error() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-    let res = app
-        .server
-        .get("/login?error=youtube_scope_missing")
-        .clear_cookies()
-        .await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-    let body = res.text();
-    assert!(body.contains("YouTube"));
-}
-
-#[tokio::test]
-async fn login_page_with_access_denied_error() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-    let res = app
-        .server
-        .get("/login?error=access_denied")
-        .clear_cookies()
-        .await;
-    assert!(res.status_code().is_success());
-}
-
-#[tokio::test]
-async fn login_page_with_unknown_error() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-    let res = app
-        .server
-        .get("/login?error=some_unknown_error")
-        .clear_cookies()
-        .await;
-    assert!(res.status_code().is_success());
+    let res = app.server.get("/login").clear_cookies().await;
+    assert!(
+        res.status_code().is_redirection(),
+        "got {}",
+        res.status_code()
+    );
+    assert_eq!(res.headers().get("location").unwrap(), "/profiles");
 }
 
 // ===========================================================================

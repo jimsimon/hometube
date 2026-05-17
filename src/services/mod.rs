@@ -1,7 +1,5 @@
 //! Business-logic services.
 //!
-//! - [`oauth`]: Google OAuth2 client construction, token exchange + refresh,
-//!   and userinfo fetch
 //! - [`setup`]: small typed helpers for reading/writing the `app_config`
 //!   table (used by the wizard and the setup-redirect middleware)
 //! - [`youtube`]: Content discovery client backed by the youtubei.js
@@ -18,7 +16,6 @@ pub mod access;
 pub mod cron;
 pub mod dash;
 pub mod notifications;
-pub mod oauth;
 pub mod segment_ranges;
 pub mod setup;
 pub mod video_cache;

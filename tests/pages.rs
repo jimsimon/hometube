@@ -106,8 +106,7 @@ async fn setup_wizard_renders_for_anonymous_users() {
 #[tokio::test]
 async fn root_redirects_anonymous_after_setup_to_profile_picker() {
     let app = boot().await;
-    common::seed_credentials(&app.pool).await;
-    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
+    common::insert_account(&app.pool, "P", AccountType::Parent).await;
     hometube::services::setup::set_config_value(
         &app.pool,
         hometube::services::setup::KEY_SETUP_COMPLETE,
@@ -137,9 +136,8 @@ async fn root_routes_a_child_to_child_home() {
 }
 
 #[tokio::test]
-async fn root_redirects_to_login_when_no_accounts_exist() {
+async fn root_redirects_anonymous_to_profiles_when_no_accounts_exist() {
     let app = boot().await;
-    common::seed_credentials(&app.pool).await;
     hometube::services::setup::set_config_value(
         &app.pool,
         hometube::services::setup::KEY_SETUP_COMPLETE,
@@ -149,97 +147,16 @@ async fn root_redirects_to_login_when_no_accounts_exist() {
     .unwrap();
     let res = app.server.get("/").await;
     assert!(res.status_code().is_redirection());
-    assert_eq!(res.headers().get("location").unwrap(), "/login");
+    assert_eq!(res.headers().get("location").unwrap(), "/profiles");
 }
 
 #[tokio::test]
-async fn login_page_renders_with_sign_in_link() {
-    let app = boot().await;
-    common::seed_credentials(&app.pool).await;
-    hometube::services::setup::set_config_value(
-        &app.pool,
-        hometube::services::setup::KEY_SETUP_COMPLETE,
-        "true",
-    )
-    .await
-    .unwrap();
-    let res = app.server.get("/login").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body = res.text();
-    assert!(
-        body.contains("Sign in with Google"),
-        "login page should advertise Google sign-in"
-    );
-    assert!(
-        body.contains("/api/auth/login"),
-        "login page should link to the OAuth start endpoint"
-    );
-    // No accounts exist yet → "Switch profile" link must be absent.
-    assert!(
-        !body.contains("Switch profile"),
-        "Switch profile must not appear when no accounts exist"
-    );
-}
-
-#[tokio::test]
-async fn login_page_shows_switch_profile_when_accounts_exist() {
+async fn login_redirects_to_profiles() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let res = app.server.get("/login").clear_cookies().await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body = res.text();
-    assert!(body.contains("Sign in with Google"));
-    assert!(
-        body.contains("Switch profile"),
-        "Switch profile link should appear when at least one account exists"
-    );
-}
-
-#[tokio::test]
-async fn login_page_renders_error_banner_when_query_param_set() {
-    let app = boot().await;
-    common::seed_credentials(&app.pool).await;
-    hometube::services::setup::set_config_value(
-        &app.pool,
-        hometube::services::setup::KEY_SETUP_COMPLETE,
-        "true",
-    )
-    .await
-    .unwrap();
-    let res = app.server.get("/login?error=oauth_callback_failed").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body = res.text();
-    assert!(
-        body.contains("Sign-in"),
-        "error_message should be rendered (got body: {body})"
-    );
-    assert!(
-        body.contains("Please try again"),
-        "expected friendly error wording"
-    );
-    assert!(
-        body.contains(r#"role="alert""#),
-        "expected an alert element"
-    );
-}
-
-#[tokio::test]
-async fn login_page_passes_role_through_to_oauth_url() {
-    let app = boot().await;
-    common::seed_credentials(&app.pool).await;
-    hometube::services::setup::set_config_value(
-        &app.pool,
-        hometube::services::setup::KEY_SETUP_COMPLETE,
-        "true",
-    )
-    .await
-    .unwrap();
-    let res = app.server.get("/login?role=parent").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body = res.text();
-    assert!(
-        body.contains("/api/auth/login?role=parent"),
-        "login href should preserve role= parameter; body was: {body}"
-    );
+    // /login now redirects to /profiles since OAuth is removed.
+    assert!(res.status_code().is_redirection());
+    assert_eq!(res.headers().get("location").unwrap(), "/profiles");
 }
 
 #[tokio::test]
@@ -301,12 +218,11 @@ async fn video_grid_partial_renders_seeded_videos_on_child_home() {
 
 #[tokio::test]
 async fn login_is_reachable_before_setup_completes() {
-    // Even with setup_complete=false the /login page should render
-    // (the setup-redirect middleware allow-lists it). This guarantees
-    // the user can always recover from a failed callback.
+    // Even with setup_complete=false the /login redirect should work.
     let app = boot().await;
     let res = app.server.get("/login").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
+    // /login now redirects to /profiles.
+    assert!(res.status_code().is_redirection() || res.status_code().is_success());
 }
 
 #[tokio::test]

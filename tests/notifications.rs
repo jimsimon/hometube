@@ -102,14 +102,8 @@ async fn mark_read_404_for_other_parents_row() {
     // Insert a real second parent so the foreign-key passes, then
     // attach the notification to *that* parent. The active session
     // (the harness's first parent) should not be able to mark it read.
-    let other_parent_id = common::insert_account(
-        &app.pool,
-        "google-other-parent",
-        "other@example.test",
-        "Other Parent",
-        AccountType::Parent,
-    )
-    .await;
+    let other_parent_id =
+        common::insert_account(&app.pool, "Other Parent", AccountType::Parent).await;
     sqlx::query(
         "INSERT INTO parent_notifications (parent_account_id, notification_type, title, message) \
          VALUES (?, ?, 'x', 'y')",

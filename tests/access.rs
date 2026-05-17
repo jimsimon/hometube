@@ -19,8 +19,8 @@ use hometube::services::access::can_child_view;
 #[tokio::test]
 async fn allowlisted_video_is_allowed() {
     let app = boot().await;
-    let child_id = insert_account(&app.pool, "g1", "c@e.t", "C", AccountType::Child).await;
-    let parent_id = insert_account(&app.pool, "g2", "p@e.t", "P", AccountType::Parent).await;
+    let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
+    let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
     sqlx::query(
         "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
@@ -41,8 +41,8 @@ async fn allowlisted_video_is_allowed() {
 #[tokio::test]
 async fn allowlisted_channel_is_allowed() {
     let app = boot().await;
-    let child_id = insert_account(&app.pool, "g1", "c@e.t", "C", AccountType::Child).await;
-    let parent_id = insert_account(&app.pool, "g2", "p@e.t", "P", AccountType::Parent).await;
+    let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
+    let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
     sqlx::query(
         "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
@@ -63,8 +63,8 @@ async fn allowlisted_channel_is_allowed() {
 #[tokio::test]
 async fn allowlisted_playlist_is_allowed() {
     let app = boot().await;
-    let child_id = insert_account(&app.pool, "g1", "c@e.t", "C", AccountType::Child).await;
-    let parent_id = insert_account(&app.pool, "g2", "p@e.t", "P", AccountType::Parent).await;
+    let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
+    let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
     sqlx::query(
         "INSERT INTO allowlisted_playlists (child_account_id, playlist_id, playlist_title, added_by) \
@@ -85,8 +85,8 @@ async fn allowlisted_playlist_is_allowed() {
 #[tokio::test]
 async fn blocked_overrides_allowlist() {
     let app = boot().await;
-    let child_id = insert_account(&app.pool, "g1", "c@e.t", "C", AccountType::Child).await;
-    let parent_id = insert_account(&app.pool, "g2", "p@e.t", "P", AccountType::Parent).await;
+    let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
+    let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
     // Allowlisted via direct video AND channel...
     sqlx::query(
@@ -131,7 +131,7 @@ async fn blocked_overrides_allowlist() {
 #[tokio::test]
 async fn unrelated_video_is_denied() {
     let app = boot().await;
-    let child_id = insert_account(&app.pool, "g1", "c@e.t", "C", AccountType::Child).await;
+    let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
 
     let allowed = can_child_view(
         &app.pool,

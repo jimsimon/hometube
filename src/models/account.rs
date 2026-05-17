@@ -1,9 +1,9 @@
 //! `accounts` table model.
 //!
 //! HomeTube stores both parents and children in a single `accounts`
-//! table — they are distinguished by [`Account::account_type`]. OAuth
-//! tokens are persisted alongside the account so that background sync
-//! jobs can act on the user's behalf.
+//! table — they are distinguished by [`Account::account_type`].
+//! Authentication is handled entirely via PINs (Argon2-hashed) and the
+//! session cookie; no external identity provider is required.
 
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -36,29 +36,13 @@ impl AccountType {
 }
 
 /// Full row from the `accounts` table.
-///
-/// `access_token` and `refresh_token` are intentionally `pub` so internal
-/// services can use them, but the JSON-serialised view used by handlers
-/// excludes them via [`AccountSummary`]. The `#[allow(dead_code)]`
-/// markers reflect that those fields are loaded by sqlx for token
-/// refresh paths even though the current code doesn't read them
-/// directly via the struct (the OAuth refresh service issues its own
-/// queries against the `accounts` table).
 #[derive(Debug, Clone)]
 pub struct Account {
     pub id: i64,
-    /// NULL for local-only accounts, non-empty for Google-linked ones.
-    pub google_id: Option<String>,
-    pub email: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub account_type: String,
     pub pin_hash: Option<String>,
-    #[allow(dead_code)]
-    pub access_token: String,
-    #[allow(dead_code)]
-    pub refresh_token: String,
-    pub token_expires_at: i64,
     pub created_at: i64,
     #[allow(dead_code)]
     pub updated_at: i64,
@@ -70,12 +54,10 @@ impl Account {
     }
 }
 
-/// Public-facing JSON view of an account — never includes tokens or the
-/// PIN hash.
+/// Public-facing JSON view of an account — never includes the PIN hash.
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountSummary {
     pub id: i64,
-    pub email: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub account_type: String,
@@ -87,7 +69,6 @@ impl From<&Account> for AccountSummary {
     fn from(a: &Account) -> Self {
         Self {
             id: a.id,
-            email: a.email.clone(),
             display_name: a.display_name.clone(),
             avatar_url: a.avatar_url.clone(),
             account_type: a.account_type.clone(),
@@ -108,35 +89,24 @@ pub struct ProfileSummary {
 }
 
 const COLS: &str =
-    "id, google_id, email, display_name, avatar_url, account_type, pin_hash, access_token, \
-     refresh_token, token_expires_at, created_at, updated_at";
+    "id, display_name, avatar_url, account_type, pin_hash, created_at, updated_at";
 
 fn map_account(row: AccountRow) -> Account {
     let AccountRow {
         id,
-        google_id,
-        email,
         display_name,
         avatar_url,
         account_type,
         pin_hash,
-        access_token,
-        refresh_token,
-        token_expires_at,
         created_at,
         updated_at,
     } = row;
     Account {
         id,
-        google_id,
-        email,
         display_name,
         avatar_url,
         account_type,
         pin_hash,
-        access_token,
-        refresh_token,
-        token_expires_at,
         created_at,
         updated_at,
     }
@@ -145,15 +115,10 @@ fn map_account(row: AccountRow) -> Account {
 #[derive(sqlx::FromRow)]
 struct AccountRow {
     id: i64,
-    google_id: Option<String>,
-    email: String,
     display_name: String,
     avatar_url: Option<String>,
     account_type: String,
     pin_hash: Option<String>,
-    access_token: String,
-    refresh_token: String,
-    token_expires_at: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -163,16 +128,6 @@ pub async fn find_by_id(pool: &SqlitePool, id: i64) -> AppResult<Option<Account>
     let row: Option<AccountRow> =
         sqlx::query_as(&format!("SELECT {COLS} FROM accounts WHERE id = ?"))
             .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(map_account))
-}
-
-/// Find an account by Google subject ID (`sub` claim from userinfo).
-pub async fn find_by_google_id(pool: &SqlitePool, google_id: &str) -> AppResult<Option<Account>> {
-    let row: Option<AccountRow> =
-        sqlx::query_as(&format!("SELECT {COLS} FROM accounts WHERE google_id = ?"))
-            .bind(google_id)
             .fetch_optional(pool)
             .await?;
     Ok(row.map(map_account))
@@ -195,101 +150,25 @@ pub async fn total_count(pool: &SqlitePool) -> AppResult<i64> {
     Ok(row.0)
 }
 
-/// Inserts a brand-new Google-linked account row. Returns the new ID.
-#[allow(clippy::too_many_arguments)]
-pub async fn insert(
+/// Insert a new local account (parent or child). Returns the new ID.
+pub async fn insert_local(
     pool: &SqlitePool,
-    google_id: &str,
-    email: &str,
     display_name: &str,
     avatar_url: Option<&str>,
     account_type: AccountType,
-    access_token: &str,
-    refresh_token: &str,
-    token_expires_at: i64,
 ) -> AppResult<i64> {
     let row: (i64,) = sqlx::query_as(
         "INSERT INTO accounts \
-         (google_id, email, display_name, avatar_url, account_type, access_token, refresh_token, \
-          token_expires_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         (display_name, avatar_url, account_type) \
+         VALUES (?, ?, ?) \
          RETURNING id",
     )
-    .bind(google_id)
-    .bind(email)
     .bind(display_name)
     .bind(avatar_url)
     .bind(account_type.as_str())
-    .bind(access_token)
-    .bind(refresh_token)
-    .bind(token_expires_at)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
-}
-
-/// Create a local-only child account (no Google sign-in). YouTube sync
-/// can be linked later via the family management screen.
-///
-/// `google_id` is set to NULL so the existing UNIQUE constraint (which
-/// treats each NULL as distinct) naturally allows multiple local-only
-/// accounts.
-pub async fn insert_local_child(
-    pool: &SqlitePool,
-    display_name: &str,
-    avatar_url: Option<&str>,
-) -> AppResult<i64> {
-    let row: (i64,) = sqlx::query_as(
-        "INSERT INTO accounts \
-         (google_id, email, display_name, avatar_url, account_type, \
-          access_token, refresh_token, token_expires_at) \
-         VALUES (NULL, '', ?, ?, 'child', '', '', 0) \
-         RETURNING id",
-    )
-    .bind(display_name)
-    .bind(avatar_url)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.0)
-}
-
-/// Bag of fields that change on every successful OAuth callback. Kept
-/// as a struct (rather than a positional argument list) to satisfy
-/// clippy's `too_many_arguments` lint and to make call sites readable.
-#[derive(Debug, Clone)]
-pub struct ProfileUpdate<'a> {
-    pub email: &'a str,
-    pub display_name: &'a str,
-    pub avatar_url: Option<&'a str>,
-    pub access_token: &'a str,
-    pub refresh_token: &'a str,
-    pub token_expires_at: i64,
-}
-
-/// Refresh tokens / display name / avatar for an existing account on
-/// repeat OAuth login.
-pub async fn update_profile_and_tokens(
-    pool: &SqlitePool,
-    id: i64,
-    update: ProfileUpdate<'_>,
-) -> AppResult<()> {
-    sqlx::query(
-        "UPDATE accounts SET \
-            email = ?, display_name = ?, avatar_url = ?, \
-            access_token = ?, refresh_token = ?, token_expires_at = ?, \
-            updated_at = unixepoch() \
-         WHERE id = ?",
-    )
-    .bind(update.email)
-    .bind(update.display_name)
-    .bind(update.avatar_url)
-    .bind(update.access_token)
-    .bind(update.refresh_token)
-    .bind(update.token_expires_at)
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 /// List every account in the database (parents first, then by created_at).
@@ -399,15 +278,10 @@ mod tests {
     fn typed_falls_back_to_child_for_garbage() {
         let acct = Account {
             id: 1,
-            google_id: Some("g".into()),
-            email: "e".into(),
             display_name: "n".into(),
             avatar_url: None,
             account_type: "garbage".into(),
             pin_hash: None,
-            access_token: "a".into(),
-            refresh_token: "r".into(),
-            token_expires_at: 0,
             created_at: 0,
             updated_at: 0,
         };
@@ -415,29 +289,22 @@ mod tests {
     }
 
     #[test]
-    fn account_summary_strips_tokens() {
+    fn account_summary_strips_pin_hash() {
         let acct = Account {
             id: 7,
-            google_id: Some("g".into()),
-            email: "e@e".into(),
             display_name: "Display".into(),
             avatar_url: Some("http://avatar".into()),
             account_type: "parent".into(),
             pin_hash: Some("hash".into()),
-            access_token: "secret-access".into(),
-            refresh_token: "secret-refresh".into(),
-            token_expires_at: 0,
             created_at: 100,
             updated_at: 200,
         };
         let summary = AccountSummary::from(&acct);
         assert_eq!(summary.id, 7);
-        assert_eq!(summary.email, "e@e");
         assert_eq!(summary.display_name, "Display");
         assert!(summary.has_pin);
-        // Re-serialise and confirm tokens never leak.
+        // Re-serialise and confirm PIN hash never leaks.
         let json = serde_json::to_string(&summary).unwrap();
-        assert!(!json.contains("secret-access"));
-        assert!(!json.contains("secret-refresh"));
+        assert!(!json.contains("hash"));
     }
 }

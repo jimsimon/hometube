@@ -69,8 +69,6 @@ async fn cleanup_keeps_directly_allowlisted_video() {
     // Create a child and allowlist the video.
     let child_id = common::insert_account(
         &app.pool,
-        "g-child",
-        "c@t.com",
         "Kid",
         hometube::models::account::AccountType::Child,
     )
@@ -129,8 +127,6 @@ async fn cleanup_keeps_channel_allowlisted_video() {
     // Allowlist the channel.
     let child_id = common::insert_account(
         &app.pool,
-        "g-child",
-        "c@t.com",
         "Kid",
         hometube::models::account::AccountType::Child,
     )
@@ -164,8 +160,6 @@ async fn lru_eviction_when_over_limit() {
     // (We fake the sizes — no real files needed for the DB logic.)
     let child_id = common::insert_account(
         &app.pool,
-        "g-child",
-        "c@t.com",
         "Kid",
         hometube::models::account::AccountType::Child,
     )

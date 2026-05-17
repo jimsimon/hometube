@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, seed_credentials};
+use common::boot;
 use hometube::services::ytdlp::{ExtractResult, Format, SubtitleTrack, Thumbnail};
 
 // ---------------------------------------------------------------------------
@@ -226,7 +226,6 @@ fn sync_cookies_to_disk_writes_and_removes() {
 #[tokio::test]
 async fn check_for_update_touches_last_checked_at() {
     let app = boot().await;
-    seed_credentials(&app.pool).await;
 
     // Seed the ytdlp_info row.
     let cfg = hometube::config::Config::from_env().unwrap();
