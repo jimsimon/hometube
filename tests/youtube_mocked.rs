@@ -670,7 +670,9 @@ async fn preview_channel_not_found_is_404() {
 
     Mock::given(method("GET"))
         .and(path("/channels/UCmissing"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "channel not found"})))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"error": "channel not found"})),
+        )
         .mount(&mock_server)
         .await;
 
@@ -685,7 +687,9 @@ async fn preview_playlist_not_found_is_404() {
 
     Mock::given(method("GET"))
         .and(path("/playlists/PLmissing"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "playlist not found"})))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"error": "playlist not found"})),
+        )
         .mount(&mock_server)
         .await;
 
@@ -705,7 +709,9 @@ async fn add_channel_discovery_404_returns_bad_request() {
 
     Mock::given(method("GET"))
         .and(path_regex("/channels/.*"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "channel not found"})))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"error": "channel not found"})),
+        )
         .mount(&mock_server)
         .await;
 

@@ -340,11 +340,10 @@ impl YoutubeClient {
             path.push_str(&format!("&pageToken={}", percent_encode(tok)));
         }
         let body = self.get_json(&path).await?;
-        let page: Page<PlaylistItem> =
-            serde_json::from_value(body).unwrap_or_else(|_| Page {
-                items: Vec::new(),
-                next_page_token: None,
-            });
+        let page: Page<PlaylistItem> = serde_json::from_value(body).unwrap_or_else(|_| Page {
+            items: Vec::new(),
+            next_page_token: None,
+        });
         Ok(page)
     }
 
@@ -364,11 +363,10 @@ impl YoutubeClient {
             path.push_str(&format!("&pageToken={}", percent_encode(tok)));
         }
         let body = self.get_json(&path).await?;
-        let page: Page<PlaylistItem> =
-            serde_json::from_value(body).unwrap_or_else(|_| Page {
-                items: Vec::new(),
-                next_page_token: None,
-            });
+        let page: Page<PlaylistItem> = serde_json::from_value(body).unwrap_or_else(|_| Page {
+            items: Vec::new(),
+            next_page_token: None,
+        });
         Ok(page)
     }
 }

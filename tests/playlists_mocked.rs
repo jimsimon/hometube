@@ -121,9 +121,7 @@ async fn child_playlist_add_video_not_found() {
 
     Mock::given(method("GET"))
         .and(path_regex("/videos/.*"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({"error": "video not found"})),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "video not found"})))
         .mount(&mock_server)
         .await;
 
