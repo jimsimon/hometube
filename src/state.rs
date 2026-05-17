@@ -11,6 +11,7 @@
 //! held inside an `Option` so unit tests can construct an `AppState`
 //! without spinning up the full scheduler.
 
+use reqwest::Client;
 use sqlx::SqlitePool;
 use tower_cookies::Key;
 
@@ -30,6 +31,8 @@ pub struct AppState {
     pub cookie_key: Key,
     /// Optional cron-scheduler handle (Phase 12). `None` in tests.
     pub scheduler: Option<Scheduler>,
+    /// Shared HTTP client for upstream requests (connection-pooled).
+    pub http_client: Client,
 }
 
 impl AppState {
@@ -39,6 +42,7 @@ impl AppState {
             db,
             cookie_key,
             scheduler: None,
+            http_client: Client::new(),
         }
     }
 

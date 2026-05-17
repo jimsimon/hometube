@@ -101,7 +101,8 @@ ENV STATIC_DIR=/app/static \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
     YTDLP_COOKIES_PATH=/app/data/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
-    DATABASE_PATH=/app/data/app.db
+    DATABASE_PATH=/app/data/app.db \
+    CACHE_DIR=/app/data/segment_cache
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health || exit 1
