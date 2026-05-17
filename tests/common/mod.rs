@@ -52,6 +52,9 @@ pub struct TestApp {
     /// it was asked to provide and any peers it had to seed first.
     pub parent_id: Option<i64>,
     pub child_id: Option<i64>,
+    /// Per-test temp directory used as `cache_dir`. Automatically cleaned
+    /// up when the `TestApp` is dropped.
+    pub cache_dir: tempfile::TempDir,
 }
 
 /// A signed `hometube_session` cookie value, ready to be added to the
@@ -76,10 +79,13 @@ pub async fn boot() -> TestApp {
     let key_bytes = test_key_bytes();
     let cookie_key = TowerKey::from(&key_bytes[..]);
 
+    let cache_dir = tempfile::tempdir().expect("create temp cache dir");
+
     let mut cfg = Config::from_env().expect("config");
     // Make sure no on-disk paths leak between tests.
     cfg.database_url = "sqlite::memory:".to_string();
     cfg.static_dir = "./frontend/dist".to_string();
+    cfg.cache_dir = cache_dir.path().to_str().unwrap().to_string();
 
     // Point yt-dlp cookies to a writable temp location so tests that
     // exercise the cookies API don't fail on missing `/data/`.
@@ -106,6 +112,7 @@ pub async fn boot() -> TestApp {
         key: cookie_key,
         parent_id: None,
         child_id: None,
+        cache_dir,
     }
 }
 

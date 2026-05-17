@@ -3,6 +3,9 @@
 //! These tests seed cached chunks on disk + DB, then issue signed Range
 //! requests and verify the handler serves bytes directly from cache
 //! without touching any upstream service.
+//!
+//! Each test gets its own `TempDir` via `TestApp::cache_dir`, so there
+//! is no shared state and no cleanup required.
 
 mod common;
 
@@ -69,11 +72,7 @@ async fn cache_hit_serves_bytes_from_disk() {
 
     let video_id = "test-vid-1";
     let format_id = "137";
-
-    // The app's Config::from_env defaults cache_dir to "./data/segment_cache".
-    // We write chunks there so the handler can find them.
-    let cfg_cache_dir = "./data/segment_cache";
-    std::fs::create_dir_all(cfg_cache_dir).ok();
+    let cache_dir = app.cache_dir.path().to_str().unwrap();
 
     // Seed metadata so the handler can look up the format.
     seed_metadata(&app.pool, video_id, format_id).await;
@@ -81,16 +80,9 @@ async fn cache_hit_serves_bytes_from_disk() {
 
     // Store a complete chunk on disk + DB.
     let chunk_data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
-    store_chunk(
-        &app.pool,
-        cfg_cache_dir,
-        video_id,
-        format_id,
-        0,
-        &chunk_data,
-    )
-    .await
-    .unwrap();
+    store_chunk(&app.pool, cache_dir, video_id, format_id, 0, &chunk_data)
+        .await
+        .unwrap();
 
     // Build a valid signed proxy URL.
     let secret = ensure_proxy_secret(&app.pool).await.unwrap();
@@ -118,9 +110,6 @@ async fn cache_hit_serves_bytes_from_disk() {
     assert_eq!(body[0], 0);
     assert_eq!(body[100], 100);
     assert_eq!(body[255], 255);
-
-    // Cleanup.
-    let _ = std::fs::remove_dir_all(cfg_cache_dir);
 }
 
 #[tokio::test]
@@ -159,24 +148,16 @@ async fn cache_hit_partial_range_within_chunk() {
 
     let video_id = "partial-vid";
     let format_id = "251";
-    let cfg_cache_dir = "./data/segment_cache";
-    std::fs::create_dir_all(cfg_cache_dir).ok();
+    let cache_dir = app.cache_dir.path().to_str().unwrap();
 
     seed_metadata(&app.pool, video_id, format_id).await;
     seed_total_bytes(&app.pool, video_id, format_id, CHUNK_SIZE as i64).await;
 
     // Store chunk 0 with known data.
     let chunk_data: Vec<u8> = vec![42u8; CHUNK_SIZE as usize];
-    store_chunk(
-        &app.pool,
-        cfg_cache_dir,
-        video_id,
-        format_id,
-        0,
-        &chunk_data,
-    )
-    .await
-    .unwrap();
+    store_chunk(&app.pool, cache_dir, video_id, format_id, 0, &chunk_data)
+        .await
+        .unwrap();
 
     let secret = ensure_proxy_secret(&app.pool).await.unwrap();
     let url = hometube::services::dash::build_format_proxy_url(&secret, video_id, format_id);
@@ -194,6 +175,4 @@ async fn cache_hit_partial_range_within_chunk() {
     let body = res.as_bytes();
     assert_eq!(body.len(), 100);
     assert!(body.iter().all(|&b| b == 42));
-
-    let _ = std::fs::remove_dir_all(cfg_cache_dir);
 }
