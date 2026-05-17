@@ -277,7 +277,7 @@ async function handleGetVideo(videoId) {
   });
 }
 
-/** GET /channel-videos/:channelId?maxResults=N&pageToken=... */
+/** GET /channel-videos/:channelId?maxResults=N */
 async function handleChannelVideos(channelId, url) {
   const maxResults = Math.min(
     parseInt(url.searchParams.get("maxResults") || "30", 10),
@@ -313,42 +313,43 @@ async function handleChannelVideos(channelId, url) {
     }
   }
 
-  // Check if there are more results
-  const hasMore = videosTab?.has_continuation || false;
-
+  // Channel video listings are single-page — callers (new-videos feed,
+  // up-next, preview) only ever request one page with small maxResults.
+  // youtubei.js continuations are stateful objects that can't be
+  // serialized across HTTP requests, so we don't expose pagination here.
   return jsonOk({
     items,
-    next_page_token: hasMore ? "continuation" : null,
+    next_page_token: null,
   });
 }
 
-/** GET /playlist-items/:playlistId?maxResults=N&pageToken=... */
+/** GET /playlist-items/:playlistId?maxResults=N
+ *
+ * Fetches ALL items from the playlist by looping through youtubei.js
+ * continuations internally. The Rust consumer (`populate_playlist_videos`)
+ * used to paginate via `next_page_token`, but youtubei.js continuation
+ * objects are stateful and can't be serialized across HTTP requests.
+ * Instead we gather everything server-side and return it in one response.
+ *
+ * The `maxResults` parameter caps the returned items (default 50, max 500).
+ */
 async function handlePlaylistItems(playlistId, url) {
   const maxResults = Math.min(
     parseInt(url.searchParams.get("maxResults") || "50", 10),
-    50
+    500
   );
-  const pageToken = url.searchParams.get("pageToken");
 
   const client = await getClient();
-  const playlist = await client.getPlaylist(playlistId);
-  if (!playlist) return jsonError(404, "playlist not found");
-
-  // If pageToken is provided and there's a continuation, load more
-  let currentPage = playlist;
-  if (pageToken && playlist.has_continuation) {
-    try {
-      currentPage = await playlist.getContinuation();
-    } catch {
-      // Fall through with the initial page
-    }
-  }
+  let page = await client.getPlaylist(playlistId);
+  if (!page) return jsonError(404, "playlist not found");
 
   const items = [];
-  if (currentPage.items) {
-    for (const item of currentPage.items) {
+
+  // Loop through all continuation pages to gather every item.
+  while (page) {
+    for (const item of page.items || []) {
       if (items.length >= maxResults) break;
-      // PlaylistVideo type
+
       const videoId = item.id || item.video_id;
       if (!videoId) continue;
 
@@ -362,13 +363,23 @@ async function handlePlaylistItems(playlistId, url) {
         position: item.index != null ? parseInt(textToString(item.index), 10) || null : null,
       });
     }
-  }
 
-  const hasMore = currentPage.has_continuation || false;
+    if (items.length >= maxResults) break;
+
+    if (page.has_continuation) {
+      try {
+        page = await page.getContinuation();
+      } catch {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
 
   return jsonOk({
     items,
-    next_page_token: hasMore ? "continuation" : null,
+    next_page_token: null,
   });
 }
 
@@ -463,7 +474,8 @@ async function handleRequest(req) {
     // Re-create the client on errors (may be stale session)
     yt = null;
 
-    return jsonError(502, `upstream error: ${err.message}`);
+    const msg = (err.message || "unknown error").substring(0, 200);
+    return jsonError(502, `upstream error: ${msg}`);
   }
 }
 

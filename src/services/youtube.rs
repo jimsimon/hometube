@@ -236,16 +236,22 @@ impl YoutubeClient {
         }
 
         let res = self.http.get(&url).send().await.map_err(AppError::Http)?;
-        if !res.status().is_success() {
-            let status = res.status();
+        let status = res.status();
+        if !status.is_success() && status.as_u16() != 404 {
+            // Non-success, non-404 → hard error.
             let body = res.text().await.unwrap_or_default();
             return Err(AppError::Other(anyhow::anyhow!(
                 "Discovery sidecar {status}: {body}"
             )));
         }
+        // 2xx and 404 are parsed as JSON — callers inspect the `error`
+        // field to distinguish "resource not found" from success.
+        let is_not_found = status.as_u16() == 404;
         let body: serde_json::Value = res.json().await.map_err(AppError::Http)?;
 
-        {
+        // Only cache successful responses — a transient 404 shouldn't
+        // stick around for the full TTL.
+        if !is_not_found {
             let mut cache = self.cache.lock().await;
             cache.insert(
                 url,
