@@ -46,12 +46,27 @@ local_resource(
     labels=['deps'],
 )
 
+# Discovery sidecar: youtubei.js-powered search/metadata service.
+local_resource(
+    'discovery',
+    serve_cmd='node server.js',
+    serve_dir='sidecar/discovery',
+    serve_env={'PORT': '3001'},
+    deps=['sidecar/discovery/server.js', 'sidecar/discovery/package.json'],
+    labels=['server'],
+    readiness_probe=probe(
+        period_secs=2,
+        http_get=http_get_action(port=3001, path="/health"),
+    ),
+)
+
 # Backend: rebuild and restart on Rust source or template changes.
 local_resource(
     'backend',
     serve_cmd='cargo watch -w src -w templates -w migrations -x run',
     serve_env={
         'POT_SERVER_URL': 'http://127.0.0.1:4416',
+        'DISCOVERY_SIDECAR_URL': 'http://127.0.0.1:3001',
         'YTDLP_COOKIES_PATH': './data/cookies.txt',
         # Point yt-dlp at the locally-installed bgutil plugin. The
         # path matches the one created by the `ytdlp-pot-plugin`
@@ -60,7 +75,7 @@ local_resource(
         'YTDLP_PLUGIN_DIR': './yt-dlp-plugins',
     },
     deps=['src/', 'templates/', 'Cargo.toml', 'migrations/'],
-    resource_deps=['ytdlp-pot-plugin'],
+    resource_deps=['ytdlp-pot-plugin', 'discovery'],
     labels=['server'],
     readiness_probe=probe(
         period_secs=2,

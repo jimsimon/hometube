@@ -20,7 +20,6 @@ async function getClient() {
     yt = await Innertube.create({
       lang: "en",
       location: "US",
-      retrieve_player: false,
     });
   }
   return yt;
@@ -298,7 +297,9 @@ async function handleChannelVideos(channelId, url) {
   }
 
   const items = [];
-  if (videosTab?.videos) {
+
+  // Try the legacy .videos getter first (returns Video/GridVideo nodes).
+  if (videosTab?.videos?.length > 0) {
     for (const video of videosTab.videos) {
       if (items.length >= maxResults) break;
       items.push({
@@ -308,6 +309,43 @@ async function handleChannelVideos(channelId, url) {
         channel_title: video.author?.name || null,
         thumbnails: mapThumbnails(video.thumbnails),
         published_at: textToString(video.published) || null,
+        position: null,
+      });
+    }
+  }
+
+  // YouTube now returns LockupView nodes inside RichItem containers on
+  // the videos tab. When .videos is empty, extract from the tab content.
+  // Note: uses `channel` from getChannel() above for metadata fallback.
+  if (items.length === 0 && videosTab?.current_tab?.content?.contents) {
+    for (const entry of videosTab.current_tab.content.contents) {
+      if (items.length >= maxResults) break;
+      const lockup = entry.content || entry;
+      if (lockup.type !== "LockupView" || lockup.content_type !== "VIDEO") continue;
+
+      const videoId = lockup.content_id;
+      if (!videoId) continue;
+
+      const title = textToString(lockup.metadata?.title);
+      const thumbnails = lockup.content_image?.image || [];
+
+      // Metadata rows contain "views • time ago" style parts.
+      let publishedAt = null;
+      const metaRows = lockup.metadata?.metadata?.metadata_rows;
+      if (metaRows?.length > 0) {
+        const parts = metaRows[0].metadata_parts;
+        if (parts?.length >= 2) {
+          publishedAt = textToString(parts[1].text) || null;
+        }
+      }
+
+      items.push({
+        video_id: videoId,
+        title,
+        channel_id: channelId,
+        channel_title: channel.metadata?.title || null,
+        thumbnails: mapThumbnails(thumbnails),
+        published_at: publishedAt,
         position: null,
       });
     }
