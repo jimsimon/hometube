@@ -644,12 +644,11 @@ mod tests {
         touch_chunks(&pool, "vid1", "137", 0, 0).await;
 
         // Verify last_accessed_at was updated (it should be recent).
-        let row: (i64,) = sqlx::query_as(
-            "SELECT last_accessed_at FROM segment_cache WHERE video_id = 'vid1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (i64,) =
+            sqlx::query_as("SELECT last_accessed_at FROM segment_cache WHERE video_id = 'vid1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let now = chrono::Utc::now().timestamp();
         assert!((now - row.0).abs() < 5);
     }
