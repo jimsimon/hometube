@@ -149,6 +149,28 @@ pub async fn total_count(pool: &SqlitePool) -> AppResult<i64> {
     Ok(row.0)
 }
 
+/// Atomically insert the first account if and only if no accounts exist
+/// yet. Returns `Ok(Some(id))` on success, `Ok(None)` if the table
+/// already contains rows (race lost). The caller should treat `None` as
+/// a 400 "already set up" error.
+pub async fn insert_first_account(
+    pool: &SqlitePool,
+    display_name: &str,
+    account_type: AccountType,
+) -> AppResult<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO accounts (display_name, avatar_url, account_type) \
+         SELECT ?, NULL, ? \
+         WHERE NOT EXISTS (SELECT 1 FROM accounts) \
+         RETURNING id",
+    )
+    .bind(display_name)
+    .bind(account_type.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
+}
+
 /// Insert a new local account (parent or child). Returns the new ID.
 pub async fn insert_local(
     pool: &SqlitePool,

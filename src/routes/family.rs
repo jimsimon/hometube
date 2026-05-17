@@ -103,7 +103,8 @@ pub async fn add_member(
     let display_name = body
         .display_name
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::BadRequest("display_name is required".into()))?;
 
     // Parents must supply a valid PIN.

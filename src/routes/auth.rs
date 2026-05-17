@@ -84,43 +84,35 @@ pub async fn register(
     cookies: Cookies,
     Json(body): Json<RegisterBody>,
 ) -> AppResult<Response> {
-    let total = account::total_count(&state.db).await?;
-    if total > 0 {
-        return Err(AppError::BadRequest(
-            "registration is only available during initial setup; \
-             use the family management screen to add accounts"
-                .into(),
-        ));
-    }
-
     let display_name = body.display_name.trim().to_string();
     if display_name.is_empty() {
         return Err(AppError::BadRequest("display_name is required".into()));
     }
 
-    // First account is always a parent.
-    let role = AccountType::Parent;
-
-    // Parents must provide a PIN.
-    if matches!(role, AccountType::Parent) {
-        let pin = body.pin.as_deref().unwrap_or("");
-        if !is_valid_pin(pin) {
-            return Err(AppError::BadRequest(
-                "PIN must be 4-6 numeric digits".into(),
-            ));
-        }
+    let pin = body.pin.as_deref().unwrap_or("");
+    if !is_valid_pin(pin) {
+        return Err(AppError::BadRequest(
+            "PIN must be 4-6 numeric digits".into(),
+        ));
     }
 
-    let id = account::insert_local(&state.db, &display_name, None, role).await?;
-    info!(account_id = id, %display_name, role = %role.as_str(), "registered new account");
+    // Atomically insert the first parent account. The INSERT succeeds
+    // only if the accounts table is empty, eliminating the TOCTOU race
+    // between a count check and the insert.
+    let id = account::insert_first_account(&state.db, &display_name, AccountType::Parent)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "registration is only available during initial setup; \
+                 use the family management screen to add accounts"
+                    .into(),
+            )
+        })?;
+    info!(account_id = id, %display_name, "registered first parent account");
 
-    // Hash and persist the PIN for parent accounts.
-    if matches!(role, AccountType::Parent) {
-        if let Some(ref pin) = body.pin {
-            let hashed = hash_pin(pin)?;
-            account::set_pin_hash(&state.db, id, &hashed).await?;
-        }
-    }
+    // Hash and persist the PIN.
+    let hashed = hash_pin(pin)?;
+    account::set_pin_hash(&state.db, id, &hashed).await?;
 
     let sess = session::create(&state.db, id).await?;
     let signed = cookies.signed(&state.cookie_key);
