@@ -68,6 +68,7 @@ axum-test = "20"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 wiremock = "0.6.5"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

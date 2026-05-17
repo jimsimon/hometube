@@ -527,4 +527,225 @@ mod tests {
         let p = chunk_path("/data/cache", "X", "251", 0);
         assert_eq!(p, PathBuf::from("/data/cache/X/X/251_000000.chunk"));
     }
+
+    #[test]
+    fn shard_prefix_ascii() {
+        assert_eq!(shard_prefix("dQw4w9WgXcQ"), "dQ");
+        assert_eq!(shard_prefix("AB"), "AB");
+        assert_eq!(shard_prefix("A"), "A");
+        assert_eq!(shard_prefix(""), "");
+    }
+
+    #[test]
+    fn shard_prefix_multibyte_safe() {
+        // Multi-byte chars: 'ñ' is 2 bytes in UTF-8, '日' is 3 bytes.
+        // Should not panic — returns the first 2 *characters*.
+        assert_eq!(shard_prefix("ñoño"), "ño");
+        assert_eq!(shard_prefix("日本語"), "日本");
+    }
+
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn store_and_read_chunk_round_trip() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+        let data = vec![42u8; CHUNK_SIZE as usize];
+
+        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+            .await
+            .unwrap();
+
+        // Verify file was written.
+        let path = chunk_path(cache_dir, "vid1", "137", 0);
+        assert!(path.exists());
+
+        // Read back.
+        let result = read_range_from_cache(cache_dir, "vid1", "137", 0, CHUNK_SIZE - 1)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), CHUNK_SIZE as usize);
+        assert!(result.iter().all(|&b| b == 42));
+    }
+
+    #[tokio::test]
+    async fn range_fully_cached_reports_correctly() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        // No chunks cached yet.
+        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE - 1)
+            .await
+            .unwrap();
+        assert!(!cached);
+
+        // Store chunk 0.
+        let data = vec![1u8; CHUNK_SIZE as usize];
+        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+            .await
+            .unwrap();
+
+        // Now chunk 0 range is cached.
+        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE - 1)
+            .await
+            .unwrap();
+        assert!(cached);
+
+        // But a range spanning chunks 0-1 is not fully cached.
+        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE * 2 - 1)
+            .await
+            .unwrap();
+        assert!(!cached);
+    }
+
+    #[tokio::test]
+    async fn read_range_slices_within_chunks() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        // Store a chunk with sequential bytes.
+        let data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
+        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+            .await
+            .unwrap();
+
+        // Read a slice from the middle.
+        let result = read_range_from_cache(cache_dir, "vid1", "137", 100, 199)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 100);
+        assert_eq!(result[0], 100);
+        assert_eq!(result[99], 199);
+    }
+
+    #[tokio::test]
+    async fn touch_chunks_updates_last_accessed() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        let data = vec![0u8; CHUNK_SIZE as usize];
+        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+            .await
+            .unwrap();
+
+        // Touch the chunk.
+        touch_chunks(&pool, "vid1", "137", 0, 0).await;
+
+        // Verify last_accessed_at was updated (it should be recent).
+        let row: (i64,) = sqlx::query_as(
+            "SELECT last_accessed_at FROM segment_cache WHERE video_id = 'vid1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert!((now - row.0).abs() < 5);
+    }
+
+    #[tokio::test]
+    async fn store_chunk_atomic_write() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        let data = vec![99u8; CHUNK_SIZE as usize];
+        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+            .await
+            .unwrap();
+
+        // Verify no .tmp file remains.
+        let tmp_path = chunk_path(cache_dir, "vid1", "137", 0).with_extension("chunk.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn get_and_set_format_total_bytes() {
+        let pool = test_pool().await;
+
+        // No row exists — returns None.
+        assert_eq!(get_format_total_bytes(&pool, "vid1", "137").await, None);
+
+        // Set without existing row — no-op (UPDATE on non-existent row).
+        set_format_total_bytes(&pool, "vid1", "137", 5000).await;
+        assert_eq!(get_format_total_bytes(&pool, "vid1", "137").await, None);
+
+        // Insert a real row first (simulating the box-range probe).
+        sqlx::query(
+            "INSERT INTO format_box_ranges (video_id, format_id, init_start, init_end, index_start, index_end) \
+             VALUES ('vid1', '137', 0, 511, 512, 4095)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Now set_format_total_bytes should work.
+        set_format_total_bytes(&pool, "vid1", "137", 12345678).await;
+        assert_eq!(
+            get_format_total_bytes(&pool, "vid1", "137").await,
+            Some(12345678)
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_complete_chunks_aligned_start() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        // Simulate receiving 3 MiB of data starting at offset 0.
+        let mut buf = BytesMut::from(&vec![7u8; (CHUNK_SIZE * 3 / 2) as usize][..]);
+        let position = CHUNK_SIZE * 3 / 2; // 3 MiB received
+
+        flush_complete_chunks(&pool, cache_dir, "vid1", "137", &mut buf, position).await;
+
+        // Should have written 1 full chunk (2 MiB), leaving 1 MiB in buffer.
+        assert_eq!(buf.len(), (CHUNK_SIZE / 2) as usize);
+
+        // Chunk 0 should exist on disk.
+        let path = chunk_path(cache_dir, "vid1", "137", 0);
+        assert!(path.exists());
+        let on_disk = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(on_disk.len(), CHUNK_SIZE as usize);
+    }
+
+    #[tokio::test]
+    async fn flush_complete_chunks_mid_chunk_start_discards() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        // Simulate starting at byte offset 1 MiB (mid-chunk 0).
+        // Buffer has 3 MiB of data, position = 1 MiB + 3 MiB = 4 MiB.
+        let data_len = (CHUNK_SIZE * 3 / 2) as usize; // 3 MiB
+        let mut buf = BytesMut::from(&vec![5u8; data_len][..]);
+        let start_offset = CHUNK_SIZE / 2; // 1 MiB into chunk 0
+        let position = start_offset + data_len as u64;
+
+        flush_complete_chunks(&pool, cache_dir, "vid1", "137", &mut buf, position).await;
+
+        // The first 1 MiB should be discarded (tail of chunk 0).
+        // Then we have 2 MiB aligned at chunk 1 boundary → written.
+        // Remaining: 0 bytes.
+        assert_eq!(buf.len(), 0);
+
+        // Chunk 0 should NOT exist (we started mid-chunk).
+        let path0 = chunk_path(cache_dir, "vid1", "137", 0);
+        assert!(!path0.exists());
+
+        // Chunk 1 should exist.
+        let path1 = chunk_path(cache_dir, "vid1", "137", 1);
+        assert!(path1.exists());
+    }
 }
