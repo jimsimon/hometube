@@ -154,8 +154,8 @@ export class SetupCredentialsForm extends LitElement {
     return html`
       <form @submit=${this.onSubmit} novalidate>
         <p>
-          You'll need a Google Cloud project with OAuth2 credentials of type "Web application".
-          Add this redirect URI to your OAuth client:
+          You'll need a Google Cloud project with OAuth2 credentials of type "Web application". Add
+          this redirect URI to your OAuth client:
           <code>${this.suggestedRedirectUri}</code>.
         </p>
 

@@ -377,19 +377,6 @@ impl YoutubeClient {
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-/// Build a deterministic URL for cache keying. Query params are sorted by
-/// key, then by value, and percent-encoded.
-pub(crate) fn build_canonical_url(base: &str, query: &[(&str, String)]) -> String {
-    let mut pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    pairs.sort();
-    let qs = pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-    format!("{base}?{qs}")
-}
-
 /// Tiny RFC 3986 unreserved-set percent-encoder. We avoid pulling in
 /// `urlencoding` for one helper.
 pub(crate) fn percent_encode(s: &str) -> String {
@@ -430,26 +417,6 @@ mod tests {
     #[test]
     fn encode_empty_string() {
         assert_eq!(percent_encode(""), "");
-    }
-
-    // -----------------------------------------------------------------------
-    // build_canonical_url
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn canonical_url_sorted_params() {
-        let url = build_canonical_url(
-            "https://api.example.com/items",
-            &[("z", "1".into()), ("a", "2".into())],
-        );
-        // Keys should be sorted alphabetically.
-        assert!(url.contains("a=2&z=1"), "got: {url}");
-    }
-
-    #[test]
-    fn canonical_url_encodes_values() {
-        let url = build_canonical_url("https://api.example.com", &[("q", "hello world".into())]);
-        assert!(url.contains("q=hello%20world"), "got: {url}");
     }
 
     // -----------------------------------------------------------------------
