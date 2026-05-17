@@ -1,10 +1,10 @@
 //! Setup-state helpers.
 //!
 //! HomeTube stores all runtime-configurable settings — Google OAuth
-//! credentials, the cookie signing key, the YouTube API key, and the
-//! `setup_complete` flag — in the `app_config` table. This module provides
-//! small typed helpers for reading/writing those entries and a single
-//! [`is_setup_complete`] check used by the setup-redirect middleware.
+//! credentials, the cookie signing key, and the `setup_complete` flag —
+//! in the `app_config` table. This module provides small typed helpers
+//! for reading/writing those entries and a single [`is_setup_complete`]
+//! check used by the setup-redirect middleware.
 
 use sqlx::SqlitePool;
 use tracing::debug;
@@ -17,7 +17,6 @@ pub const KEY_SETUP_COMPLETE: &str = "setup_complete";
 pub const KEY_GOOGLE_CLIENT_ID: &str = "google_client_id";
 pub const KEY_GOOGLE_CLIENT_SECRET: &str = "google_client_secret";
 pub const KEY_GOOGLE_REDIRECT_URI: &str = "google_redirect_uri";
-pub const KEY_YOUTUBE_API_KEY: &str = "youtube_api_key";
 pub const KEY_COOKIE_SECRET: &str = "cookie_secret";
 pub const KEY_YTDLP_COOKIES: &str = "ytdlp_cookies";
 
@@ -53,13 +52,12 @@ pub async fn is_setup_complete(pool: &SqlitePool) -> AppResult<bool> {
         .unwrap_or(false))
 }
 
-/// Convenience: true iff all four Google credential fields are present.
+/// Convenience: true iff all required Google credential fields are present.
 pub async fn has_google_credentials(pool: &SqlitePool) -> AppResult<bool> {
     for key in [
         KEY_GOOGLE_CLIENT_ID,
         KEY_GOOGLE_CLIENT_SECRET,
         KEY_GOOGLE_REDIRECT_URI,
-        KEY_YOUTUBE_API_KEY,
     ] {
         if get_config_value(pool, key).await?.is_none() {
             return Ok(false);

@@ -205,7 +205,7 @@ pub async fn detail(
 
     // Lazy-refresh: for YouTube-sourced library playlists, re-populate
     // video items from YouTube if the playlist hasn't been refreshed
-    // recently. This avoids hammering the YouTube API on repeated views.
+    // recently. This avoids hammering the discovery sidecar on repeated views.
     const REFRESH_INTERVAL_SECS: i64 = 15 * 60; // 15 minutes
     if !summary.is_own && summary.youtube_playlist_id.is_some() {
         let now = chrono::Utc::now().timestamp();

@@ -9,8 +9,9 @@
 //!
 //! The `:id` path parameter must refer to a *child* account; parent IDs
 //! are rejected with `400 Bad Request`. Metadata (title, thumbnail) is
-//! fetched from the YouTube Data API at insert time so the UI doesn't
-//! have to re-resolve names every time it lists the allowlist.
+//! fetched from YouTube (via the discovery sidecar) at insert time so
+//! the UI doesn't have to re-resolve names every time it lists the
+//! allowlist.
 
 use axum::{
     extract::{Path, State},

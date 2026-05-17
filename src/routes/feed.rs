@@ -200,7 +200,7 @@ pub struct UpNextQuery {
     ///
     /// - `playlist:<id>` — videos from a `child_playlists` row (own or
     ///   library) ordered by `position`.
-    /// - `channel:<id>` — channel uploads, drawn from the YouTube API.
+    /// - `channel:<id>` — channel uploads, drawn from the discovery sidecar.
     /// - `video:<id>` — fall back to "more from the same channel" or
     ///   the new-videos feed if no channel context is available.
     /// - missing — returns the new-videos feed.

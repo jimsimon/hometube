@@ -52,10 +52,10 @@ pub async fn ensure_proxy_secret(pool: &SqlitePool) -> AppResult<Vec<u8>> {
 
 /// Compute the canonical-query HMAC for the given proxy parameters.
 ///
-/// The signature is over the canonical query string built by
-/// [`youtube::build_canonical_url`] (sorted keys, percent-encoded
-/// values), which means the verification side can re-derive the exact
-/// same bytes without depending on the order of received params.
+/// The signature is over a canonical query string (sorted keys,
+/// percent-encoded values), which means the verification side can
+/// re-derive the exact same bytes without depending on the order of
+/// received params.
 pub fn sign_query(secret: &[u8], params: &[(&str, String)]) -> String {
     // Build a canonical string of sorted "k=v" pairs. We use the
     // youtube module's encoder to keep the rules in one place.

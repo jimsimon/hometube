@@ -48,7 +48,7 @@ use hometube::models::account::AccountType;
 use hometube::routes::build_router;
 use hometube::services::setup::{
     set_config_value, KEY_GOOGLE_CLIENT_ID, KEY_GOOGLE_CLIENT_SECRET, KEY_GOOGLE_REDIRECT_URI,
-    KEY_SETUP_COMPLETE, KEY_YOUTUBE_API_KEY,
+    KEY_SETUP_COMPLETE,
 };
 use hometube::state::AppState;
 
@@ -331,7 +331,6 @@ pub async fn seed_credentials(pool: &SqlitePool) {
             KEY_GOOGLE_REDIRECT_URI,
             "http://localhost:3000/api/auth/callback",
         ),
-        (KEY_YOUTUBE_API_KEY, "test-yt-api-key"),
     ];
     for (k, v) in pairs {
         set_config_value(pool, k, v).await.expect("seed config");

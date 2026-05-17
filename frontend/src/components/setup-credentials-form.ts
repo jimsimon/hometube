@@ -2,10 +2,9 @@
  * <hometube-setup-credentials-form>
  *
  * Step 2 of the setup wizard. Collects Google Cloud Console credentials
- * (client ID, client secret, YouTube API key) plus the OAuth redirect
- * URI, validates the values via `POST /api/setup/test-credentials`, and
- * — once the parent confirms — persists them with
- * `POST /api/setup/credentials`.
+ * (client ID, client secret) plus the OAuth redirect URI, validates the
+ * values via `POST /api/setup/test-credentials`, and — once the parent
+ * confirms — persists them with `POST /api/setup/credentials`.
  *
  * Emits a bubbling `setup-credentials-saved` CustomEvent when the values
  * have been persisted, so the wrapping `<hometube-setup-wizard>` can
@@ -20,7 +19,6 @@ import { ApiError, api } from "../services/api.js";
 export interface CredentialsPayload {
   google_client_id: string;
   google_client_secret: string;
-  youtube_api_key: string;
   redirect_uri: string;
 }
 
@@ -106,7 +104,6 @@ export class SetupCredentialsForm extends LitElement {
     return {
       google_client_id: v("client-id"),
       google_client_secret: v("client-secret"),
-      youtube_api_key: v("api-key"),
       redirect_uri: v("redirect-uri") || this.suggestedRedirectUri,
     };
   }
@@ -157,15 +154,8 @@ export class SetupCredentialsForm extends LitElement {
     return html`
       <form @submit=${this.onSubmit} novalidate>
         <p>
-          You'll need a Google Cloud project with the
-          <a
-            href="https://console.cloud.google.com/apis/library/youtube.googleapis.com"
-            target="_blank"
-            rel="noreferrer noopener"
-            >YouTube Data API</a
-          >
-          enabled and OAuth2 credentials of type "Web application". Add this redirect URI to your
-          OAuth client:
+          You'll need a Google Cloud project with OAuth2 credentials of type "Web application". Add
+          this redirect URI to your OAuth client:
           <code>${this.suggestedRedirectUri}</code>.
         </p>
 
@@ -183,11 +173,6 @@ export class SetupCredentialsForm extends LitElement {
             autocomplete="off"
             required
           />
-        </label>
-
-        <label for="api-key">
-          YouTube Data API Key
-          <input id="api-key" name="api-key" type="password" autocomplete="off" required />
         </label>
 
         <label for="redirect-uri">

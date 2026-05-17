@@ -4,8 +4,8 @@
 //!   and userinfo fetch
 //! - [`setup`]: small typed helpers for reading/writing the `app_config`
 //!   table (used by the wizard and the setup-redirect middleware)
-//! - [`youtube`]: YouTube Data API v3 read client (search, channels,
-//!   playlists, videos)
+//! - [`youtube`]: Content discovery client backed by the youtubei.js
+//!   sidecar (search, channels, playlists, videos)
 //! - [`ytdlp`]: yt-dlp subprocess wrapper for video extraction
 //! - [`video_cache`]: two-layer (memory + DB) yt-dlp metadata cache
 //! - [`dash`]: DASH manifest synthesis + HMAC signing helpers for the

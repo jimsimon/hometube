@@ -1,7 +1,8 @@
 # HomeTube — Docker Compose stack.
 #
-# Two services:
-#   app       — the HomeTube backend + frontend
+# Three services:
+#   app        — the HomeTube backend + frontend
+#   discovery  — youtubei.js sidecar for YouTube content discovery
 #   pot-server — bgutil PO token generator for YouTube bot-detection bypass
 
 services:
@@ -15,7 +16,11 @@ services:
     volumes:
       # SQLite DB, segment cache, downloaded yt-dlp binary updates.
       - app-data:/app/data
+    environment:
+      DISCOVERY_SIDECAR_URL: http://discovery:3000
     depends_on:
+      discovery:
+        condition: service_healthy
       pot-server:
         condition: service_started
     restart: unless-stopped
@@ -25,6 +30,23 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # YouTube content discovery sidecar — uses youtubei.js (InnerTube API)
+  # to provide search, channel/playlist/video metadata without the
+  # official YouTube Data API v3. No API key required.
+  discovery:
+    build:
+      context: ../sidecar/discovery
+    image: hometube-discovery:local
+    # No ports exposed to host — only reachable by the app container
+    # via Docker's internal network at discovery:3000.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # PO (Proof-of-Origin) token server — generates tokens that prove
   # requests come from a legitimate browser. yt-dlp's bgutil plugin
