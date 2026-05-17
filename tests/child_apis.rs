@@ -100,14 +100,17 @@ async fn feed_new_videos_returns_empty_with_no_allowlist() {
 }
 
 #[tokio::test]
-async fn feed_new_videos_returns_empty_when_yt_key_missing() {
+async fn feed_new_videos_returns_empty_when_sidecar_unreachable() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    // Wipe the youtube_api_key so YoutubeClient::from_db fails. The
-    // handler returns an empty array in that case.
-    sqlx::query("DELETE FROM app_config WHERE key = 'youtube_api_key'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    // Point the discovery sidecar at a non-existent host so the client
+    // fails. The handler returns an empty array in that case.
+    hometube::services::setup::set_config_value(
+        &app.pool,
+        "discovery_sidecar_url",
+        "http://127.0.0.1:1",
+    )
+    .await
+    .unwrap();
     let res = app.server.get("/api/feed/new-videos").await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();

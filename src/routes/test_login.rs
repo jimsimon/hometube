@@ -32,7 +32,7 @@ use crate::middleware::auth::SESSION_COOKIE;
 use crate::models::account::AccountType;
 use crate::services::setup::{
     set_config_value, KEY_GOOGLE_CLIENT_ID, KEY_GOOGLE_CLIENT_SECRET, KEY_GOOGLE_REDIRECT_URI,
-    KEY_SETUP_COMPLETE, KEY_YOUTUBE_API_KEY,
+    KEY_SETUP_COMPLETE,
 };
 use crate::state::AppState;
 
@@ -77,7 +77,6 @@ pub async fn seed(
         "http://localhost:3000/api/auth/callback",
     )
     .await;
-    let _ = set_config_value(&state.db, KEY_YOUTUBE_API_KEY, "test-yt-key").await;
     let _ = set_config_value(&state.db, KEY_SETUP_COMPLETE, "true").await;
 
     let display_name = body.display_name.unwrap_or_else(|| match role {

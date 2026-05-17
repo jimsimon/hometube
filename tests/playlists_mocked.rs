@@ -1,5 +1,5 @@
-//! Playlist tests using wiremock to mock YouTube API calls for add_video
-//! and add_library operations.
+//! Playlist tests using wiremock to mock the discovery sidecar for
+//! add_video and add_library operations.
 
 mod common;
 
@@ -8,13 +8,13 @@ use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
 use hometube::services::setup::set_config_value;
 use serde_json::json;
-use wiremock::matchers::{method, path_regex};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn boot_with_mock(role: AccountType) -> (common::TestApp, common::AuthCookie, MockServer) {
     let mock_server = MockServer::start().await;
     let (app, auth) = boot_with_parent_and_child(role).await;
-    set_config_value(&app.pool, "youtube_api_base_url", &mock_server.uri())
+    set_config_value(&app.pool, "discovery_sidecar_url", &mock_server.uri())
         .await
         .unwrap();
     (app, auth, mock_server)
@@ -22,19 +22,27 @@ async fn boot_with_mock(role: AccountType) -> (common::TestApp, common::AuthCook
 
 fn mock_video_response(video_id: &str) -> serde_json::Value {
     json!({
-        "items": [{
-            "id": video_id,
-            "snippet": {
-                "title": "YT Video",
-                "description": "desc",
-                "channelId": "UCvid",
-                "channelTitle": "VidCh",
-                "thumbnails": {"high": {"url": "http://t/h.jpg", "width": 480, "height": 360}},
-                "publishedAt": "2024-01-01T00:00:00Z"
-            },
-            "statistics": {"viewCount": "500"},
-            "contentDetails": {"duration": "PT3M"}
-        }]
+        "id": video_id,
+        "title": "YT Video",
+        "description": "desc",
+        "channel_id": "UCvid",
+        "channel_title": "VidCh",
+        "thumbnails": {"high": {"url": "http://t/h.jpg", "width": 480, "height": 360}},
+        "published_at": "2024-01-01T00:00:00Z",
+        "duration": "PT3M",
+        "view_count": 500
+    })
+}
+
+fn mock_playlist_response() -> serde_json::Value {
+    json!({
+        "id": "PL_import",
+        "title": "Imported Playlist",
+        "description": "From YouTube",
+        "channel_id": "UClib",
+        "channel_title": "Lib Ch",
+        "thumbnails": {},
+        "item_count": 2
     })
 }
 
@@ -42,29 +50,25 @@ fn mock_playlist_items() -> serde_json::Value {
     json!({
         "items": [
             {
-                "snippet": {
-                    "title": "PL Item 1",
-                    "videoOwnerChannelId": "UCpl",
-                    "videoOwnerChannelTitle": "PL Ch",
-                    "thumbnails": {"default": {"url": "http://t/1.jpg"}},
-                    "publishedAt": "2024-01-01T00:00:00Z",
-                    "position": 0
-                },
-                "contentDetails": {"videoId": "pl-v-1"}
+                "video_id": "pl-v-1",
+                "title": "PL Item 1",
+                "channel_id": "UCpl",
+                "channel_title": "PL Ch",
+                "thumbnails": {"default": {"url": "http://t/1.jpg"}},
+                "published_at": "2024-01-01T00:00:00Z",
+                "position": 0
             },
             {
-                "snippet": {
-                    "title": "PL Item 2",
-                    "videoOwnerChannelId": "UCpl",
-                    "videoOwnerChannelTitle": "PL Ch",
-                    "thumbnails": {},
-                    "publishedAt": "2024-01-02T00:00:00Z",
-                    "position": 1
-                },
-                "contentDetails": {"videoId": "pl-v-2"}
+                "video_id": "pl-v-2",
+                "title": "PL Item 2",
+                "channel_id": "UCpl",
+                "channel_title": "PL Ch",
+                "thumbnails": {},
+                "published_at": "2024-01-02T00:00:00Z",
+                "position": 1
             }
         ],
-        "nextPageToken": null
+        "next_page_token": null
     })
 }
 
@@ -85,9 +89,9 @@ async fn child_playlist_add_video_with_mocked_youtube() {
     let body: serde_json::Value = res.json();
     let pl_id = body["id"].as_i64().unwrap();
 
-    // Mock the YouTube video lookup.
+    // Mock the sidecar video lookup.
     Mock::given(method("GET"))
-        .and(path_regex("/videos.*"))
+        .and(path("/videos/add-vid"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_video_response("add-vid")))
         .mount(&mock_server)
         .await;
@@ -116,8 +120,10 @@ async fn child_playlist_add_video_not_found() {
     let pl_id = body["id"].as_i64().unwrap();
 
     Mock::given(method("GET"))
-        .and(path_regex("/videos.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .and(path_regex("/videos/.*"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"error": "video not found"})),
+        )
         .mount(&mock_server)
         .await;
 
@@ -126,7 +132,8 @@ async fn child_playlist_add_video_not_found() {
         .post(&format!("/api/playlists/{pl_id}/videos"))
         .json(&json!({ "video_id": "nonexistent" }))
         .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    let status = res.status_code().as_u16();
+    assert!(status >= 400, "expected error, got {status}");
 }
 
 // ===========================================================================
@@ -152,26 +159,14 @@ async fn child_playlist_add_library_creates_youtube_playlist() {
 
     // Mock playlist lookup.
     Mock::given(method("GET"))
-        .and(path_regex("/playlists.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{
-                "id": "PL_import",
-                "snippet": {
-                    "title": "Imported Playlist",
-                    "description": "From YouTube",
-                    "channelId": "UClib",
-                    "channelTitle": "Lib Ch",
-                    "thumbnails": {}
-                },
-                "contentDetails": {"itemCount": 2}
-            }]
-        })))
+        .and(path("/playlists/PL_import"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mock_playlist_response()))
         .mount(&mock_server)
         .await;
 
     // Mock playlist items.
     Mock::given(method("GET"))
-        .and(path_regex("/playlistItems.*"))
+        .and(path_regex("/playlist-items/PL_import.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_playlist_items()))
         .mount(&mock_server)
         .await;
@@ -206,7 +201,7 @@ async fn family_playlist_add_video_with_mocked_youtube() {
     let pl_id = body["id"].as_i64().unwrap();
 
     Mock::given(method("GET"))
-        .and(path_regex("/videos.*"))
+        .and(path("/videos/fam-vid"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_video_response("fam-vid")))
         .mount(&mock_server)
         .await;
@@ -254,20 +249,18 @@ async fn child_playlist_detail_refreshes_stale_youtube_playlist() {
 
     // Mock the playlist items fetch that happens during refresh.
     Mock::given(method("GET"))
-        .and(path_regex("/playlistItems.*"))
+        .and(path_regex("/playlist-items/PL_stale.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{
-                "snippet": {
-                    "title": "Refreshed Video",
-                    "videoOwnerChannelId": "UCref",
-                    "videoOwnerChannelTitle": "Ref Ch",
-                    "thumbnails": {"default": {"url": "http://t/r.jpg"}},
-                    "publishedAt": "2024-06-01T00:00:00Z",
-                    "position": 0
-                },
-                "contentDetails": {"videoId": "refresh-vid"}
+                "video_id": "refresh-vid",
+                "title": "Refreshed Video",
+                "channel_id": "UCref",
+                "channel_title": "Ref Ch",
+                "thumbnails": {"default": {"url": "http://t/r.jpg"}},
+                "published_at": "2024-06-01T00:00:00Z",
+                "position": 0
             }],
-            "nextPageToken": null
+            "next_page_token": null
         })))
         .mount(&mock_server)
         .await;

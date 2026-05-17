@@ -1,0 +1,13 @@
+{
+  "name": "hometube-discovery",
+  "version": "1.0.0",
+  "description": "YouTube content discovery sidecar for HomeTube, powered by youtubei.js",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "youtubei.js": "^12"
+  }
+}

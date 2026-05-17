@@ -1,9 +1,8 @@
-//! Tests for the YouTube Data API client utilities.
+//! Tests for the YouTube content discovery client utilities.
 //!
-//! Since the parsing functions are private, we test them indirectly via
-//! the HTTP API routes that exercise them (/api/parent/search). We also
-//! directly test the public(crate) URL building and encoding utilities,
-//! and the public types' serialization.
+//! Since the client now talks to the discovery sidecar (not the YouTube
+//! Data API), we test the public types, serialization, and the route
+//! wiring that exercises them.
 
 mod common;
 
@@ -41,7 +40,7 @@ fn search_type_parse_invalid() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn thumbnail_info_deserializes_from_youtube_json() {
+fn thumbnail_info_deserializes_from_json() {
     let json = r#"{"url":"https://i.ytimg.com/vi/abc/default.jpg","width":120,"height":90}"#;
     let info: ThumbnailInfo = serde_json::from_str(json).unwrap();
     assert_eq!(info.url, "https://i.ytimg.com/vi/abc/default.jpg");
@@ -59,19 +58,16 @@ fn thumbnail_info_deserializes_without_optional_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Integration test: parent search endpoint exercises the YouTube parser
-// indirectly — verifies the route wiring handles errors gracefully when
-// the API key points at nothing real.
+// Integration test: parent search endpoint exercises the route wiring.
+// Without a discovery sidecar configured, the client defaults to
+// http://discovery:3000 which will fail — verifying the error path.
 // ---------------------------------------------------------------------------
 
 use common::boot_setup_complete;
 use hometube::models::account::AccountType;
 
 #[tokio::test]
-async fn parent_search_returns_error_for_invalid_api_key() {
-    // The test harness seeds a fake API key ("test-yt-api-key") which
-    // will fail when the route tries to actually call YouTube. This
-    // exercises the error path in the search handler.
+async fn parent_search_returns_error_when_sidecar_unreachable() {
     let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
 
     let res = app
@@ -81,8 +77,7 @@ async fn parent_search_returns_error_for_invalid_api_key() {
         .add_query_param("type", "video")
         .await;
 
-    // Should return an error (either 500 from the failed YouTube call
-    // or some other non-2xx) — not panic.
+    // Should return an error (sidecar unreachable) — not panic.
     let status = res.status_code().as_u16();
     assert!(status >= 400, "expected error status, got {status}");
 }

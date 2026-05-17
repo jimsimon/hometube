@@ -26,7 +26,6 @@ pub struct SetupStatus {
 pub struct CredentialsBody {
     pub google_client_id: String,
     pub google_client_secret: String,
-    pub youtube_api_key: String,
     pub redirect_uri: String,
 }
 
@@ -62,7 +61,6 @@ pub async fn save_credentials(
         &body.google_client_secret,
     )
     .await?;
-    setup::set_config_value(&state.db, setup::KEY_YOUTUBE_API_KEY, &body.youtube_api_key).await?;
     setup::set_config_value(
         &state.db,
         setup::KEY_GOOGLE_REDIRECT_URI,
@@ -108,9 +106,6 @@ async fn validate_credentials(body: &CredentialsBody) -> AppResult<()> {
     }
     if body.google_client_secret.trim().is_empty() {
         return Err(AppError::BadRequest("client_secret is required".into()));
-    }
-    if body.youtube_api_key.trim().is_empty() {
-        return Err(AppError::BadRequest("api_key is required".into()));
     }
     if !body.redirect_uri.starts_with("http://") && !body.redirect_uri.starts_with("https://") {
         return Err(AppError::BadRequest(

@@ -3,8 +3,8 @@
 //! Two distinct concerns share this module:
 //!
 //! - `GET /api/parent/search` — parent-side discovery, used by the
-//!   allowlist UI to find content to add. Hits the YouTube Data API
-//!   directly. Implemented by [`parent_search`].
+//!   allowlist UI to find content to add. Backed by the discovery
+//!   sidecar. Implemented by [`parent_search`].
 //! - `GET /api/search` — child-side allowlist-bounded search.
 //!   Implemented by [`child_search`] (Phase 10). The child can only ever
 //!   see content that is reachable from their allowlist, and every

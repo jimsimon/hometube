@@ -242,7 +242,7 @@ pub struct AddVideoBody {
 
 /// `POST /api/family-playlists/:id/videos` (parent-only).
 ///
-/// Pulls metadata for the video from the YouTube Data API so the row
+/// Pulls metadata for the video from YouTube (via the discovery sidecar) so the row
 /// has a meaningful title/thumbnail without forcing the parent to type
 /// it in.
 pub async fn add_video(

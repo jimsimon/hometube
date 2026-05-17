@@ -61,7 +61,6 @@ async fn save_credentials_with_blank_fields_is_400() {
         .json(&serde_json::json!({
             "google_client_id": "",
             "google_client_secret": "",
-            "youtube_api_key": "",
             "redirect_uri": "http://localhost"
         }))
         .await;
@@ -109,7 +108,6 @@ async fn save_credentials_with_invalid_redirect_uri_is_400() {
         .json(&serde_json::json!({
             "google_client_id": "id",
             "google_client_secret": "secret",
-            "youtube_api_key": "key",
             "redirect_uri": "ftp://no",
         }))
         .await;

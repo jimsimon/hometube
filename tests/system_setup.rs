@@ -48,7 +48,6 @@ async fn save_credentials_rejects_empty_client_id() {
         .json(&json!({
             "google_client_id": "",
             "google_client_secret": "sec",
-            "youtube_api_key": "key",
             "redirect_uri": "http://localhost:3000/api/auth/callback"
         }))
         .await;
@@ -64,7 +63,6 @@ async fn save_credentials_rejects_empty_secret() {
         .json(&json!({
             "google_client_id": "id",
             "google_client_secret": "   ",
-            "youtube_api_key": "key",
             "redirect_uri": "http://localhost:3000/api/auth/callback"
         }))
         .await;
@@ -72,19 +70,32 @@ async fn save_credentials_rejects_empty_secret() {
 }
 
 #[tokio::test]
-async fn save_credentials_rejects_empty_api_key() {
+async fn save_credentials_accepts_missing_api_key() {
+    // The credentials endpoint only requires client_id, client_secret,
+    // and redirect_uri. No YouTube API key is needed.
     let app = boot().await;
+
+    // The real validation will fail because Google's discovery document
+    // is unreachable from the test harness, but the request should be
+    // accepted structurally (only failing on the Google reachability
+    // probe, not on missing fields).
     let res = app
         .server
         .post("/api/setup/credentials")
         .json(&json!({
             "google_client_id": "id",
             "google_client_secret": "sec",
-            "youtube_api_key": "",
             "redirect_uri": "http://localhost:3000/api/auth/callback"
         }))
         .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    // A 400 from the Google reachability check is acceptable; a 422
+    // from missing required fields would indicate a regression.
+    let status = res.status_code();
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "all required fields should be present"
+    );
 }
 
 #[tokio::test]
@@ -96,7 +107,6 @@ async fn save_credentials_rejects_bad_redirect_uri() {
         .json(&json!({
             "google_client_id": "id",
             "google_client_secret": "sec",
-            "youtube_api_key": "key",
             "redirect_uri": "ftp://bad"
         }))
         .await;
@@ -112,7 +122,6 @@ async fn test_credentials_rejects_same_validation() {
         .json(&json!({
             "google_client_id": "id",
             "google_client_secret": "",
-            "youtube_api_key": "key",
             "redirect_uri": "http://localhost:3000/cb"
         }))
         .await;
