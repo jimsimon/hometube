@@ -22,20 +22,10 @@ pub const SESSION_COOKIE: &str = "hometube_session";
 
 /// Snapshot of the currently-authenticated account, populated by
 /// [`session_layer`] and consumed via the [`CurrentAccount`] extractor.
-///
-/// `email` and `avatar_url` are populated for handlers and templates
-/// that need a richer profile view (e.g. nav-bar avatar) without
-/// re-querying the database. They're not currently consumed in any
-/// handler, but are part of the public API of this struct so the field
-/// presence is intentional.
 #[derive(Debug, Clone)]
 pub struct CurrentAccount {
     pub id: i64,
     pub display_name: String,
-    #[allow(dead_code)]
-    pub email: String,
-    #[allow(dead_code)]
-    pub avatar_url: Option<String>,
     pub account_type: AccountType,
     pub session_id: String,
 }
@@ -45,8 +35,6 @@ impl From<(&Account, String)> for CurrentAccount {
         Self {
             id: a.id,
             display_name: a.display_name.clone(),
-            email: a.email.clone(),
-            avatar_url: a.avatar_url.clone(),
             account_type: a.typed(),
             session_id,
         }

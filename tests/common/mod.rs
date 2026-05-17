@@ -1,16 +1,6 @@
 //! Shared test harness.
 //!
 //! Boots an in-memory HomeTube app with no real external dependencies.
-//! Google OAuth + the YouTube Data API are never reached because:
-//!
-//! - we never invoke routes that exchange OAuth codes (callbacks etc.),
-//!   and the discovery probe in `POST /api/setup/credentials` is the
-//!   only network call inside the routes we *do* test (we explicitly
-//!   skip those happy-path tests).
-//! - allowlist + cache test fixtures bypass the YouTube client by
-//!   inserting rows directly into `allowlisted_*` and
-//!   `video_metadata_cache`.
-//!
 //! The harness exposes [`boot`] (zero-account sandbox, useful for the
 //! setup-flow tests) and [`boot_setup_complete`] (a fully provisioned
 //! app with one parent + one child, plus a signed session cookie for
@@ -19,9 +9,9 @@
 //! ## Cookie signing
 //!
 //! HomeTube signs every session cookie with the application's master
-//! key. To avoid going through the full OAuth dance, the harness signs
-//! the session cookie itself using the same `Key` the app was built
-//! with, then drops the resulting signed cookie value into
+//! key. To avoid going through any auth flow, the harness signs the
+//! session cookie itself using the same `Key` the app was built with,
+//! then drops the resulting signed cookie value into
 //! `axum_test::TestServer`'s jar. From the server's perspective this is
 //! indistinguishable from a real cookie returned by `/api/auth/switch`.
 //!
@@ -46,10 +36,7 @@ use hometube::config::Config;
 use hometube::middleware::auth::SESSION_COOKIE;
 use hometube::models::account::AccountType;
 use hometube::routes::build_router;
-use hometube::services::setup::{
-    set_config_value, KEY_GOOGLE_CLIENT_ID, KEY_GOOGLE_CLIENT_SECRET, KEY_GOOGLE_REDIRECT_URI,
-    KEY_SETUP_COMPLETE,
-};
+use hometube::services::setup::{set_config_value, KEY_SETUP_COMPLETE};
 use hometube::state::AppState;
 
 /// The fully-booted app under test plus the connection pool the test
@@ -58,8 +45,7 @@ pub struct TestApp {
     pub server: TestServer,
     pub pool: SqlitePool,
     /// Master cookie key used by the app — exposed so tests that need
-    /// to mint additional signed cookies (e.g., the `hometube_oauth`
-    /// flow cookie) can do so.
+    /// to mint additional signed cookies can do so.
     pub key: TowerKey,
     /// IDs of any seeded accounts (`parent_id`, `child_id`). Both are
     /// `None` for [`boot`]; `boot_setup_complete` populates the role
@@ -124,36 +110,20 @@ pub async fn boot() -> TestApp {
 }
 
 /// Boot the app with a completed setup: one parent (and one child if
-/// `role == Child`), all credential keys present, and a signed session
-/// cookie for the requested role pre-installed in the test server's
-/// jar.
+/// `role == Child`), and a signed session cookie for the requested role
+/// pre-installed in the test server's jar.
 pub async fn boot_setup_complete(role: AccountType) -> (TestApp, AuthCookie) {
     let mut app = boot().await;
 
-    seed_credentials(&app.pool).await;
     set_config_value(&app.pool, KEY_SETUP_COMPLETE, "true")
         .await
         .expect("setup_complete");
 
-    let parent_id = insert_account(
-        &app.pool,
-        "google-parent-1",
-        "parent@example.test",
-        "Parent One",
-        AccountType::Parent,
-    )
-    .await;
+    let parent_id = insert_account(&app.pool, "Parent One", AccountType::Parent).await;
     app.parent_id = Some(parent_id);
 
     let child_id = if matches!(role, AccountType::Child) {
-        let id = insert_account(
-            &app.pool,
-            "google-child-1",
-            "child@example.test",
-            "Child One",
-            AccountType::Child,
-        )
-        .await;
+        let id = insert_account(&app.pool, "Child One", AccountType::Child).await;
         app.child_id = Some(id);
         id
     } else {
@@ -177,27 +147,12 @@ pub async fn boot_setup_complete(role: AccountType) -> (TestApp, AuthCookie) {
 pub async fn boot_with_parent_and_child(role: AccountType) -> (TestApp, AuthCookie) {
     let mut app = boot().await;
 
-    seed_credentials(&app.pool).await;
     set_config_value(&app.pool, KEY_SETUP_COMPLETE, "true")
         .await
         .expect("setup_complete");
 
-    let parent_id = insert_account(
-        &app.pool,
-        "google-parent-1",
-        "parent@example.test",
-        "Parent One",
-        AccountType::Parent,
-    )
-    .await;
-    let child_id = insert_account(
-        &app.pool,
-        "google-child-1",
-        "child@example.test",
-        "Child One",
-        AccountType::Child,
-    )
-    .await;
+    let parent_id = insert_account(&app.pool, "Parent One", AccountType::Parent).await;
+    let child_id = insert_account(&app.pool, "Child One", AccountType::Child).await;
     app.parent_id = Some(parent_id);
     app.child_id = Some(child_id);
 
@@ -211,30 +166,20 @@ pub async fn boot_with_parent_and_child(role: AccountType) -> (TestApp, AuthCook
     (app, auth)
 }
 
-/// Insert a fully-populated `accounts` row using deterministic test
-/// tokens. Returns the new `accounts.id`.
+/// Insert a fully-populated `accounts` row. Returns the new `accounts.id`.
 pub async fn insert_account(
     pool: &SqlitePool,
-    google_id: &str,
-    email: &str,
     display_name: &str,
     account_type: AccountType,
 ) -> i64 {
-    let one_hour_from_now = chrono::Utc::now().timestamp() + 3600;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO accounts \
-            (google_id, email, display_name, avatar_url, account_type, \
-             access_token, refresh_token, token_expires_at) \
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?) \
+            (display_name, avatar_url, account_type) \
+         VALUES (?, NULL, ?) \
          RETURNING id",
     )
-    .bind(google_id)
-    .bind(email)
     .bind(display_name)
     .bind(account_type.as_str())
-    .bind("test-access-token")
-    .bind("test-refresh-token")
-    .bind(one_hour_from_now)
     .fetch_one(pool)
     .await
     .expect("insert account");
@@ -322,23 +267,8 @@ pub async fn make_in_memory_pool() -> SqlitePool {
         .expect("connect")
 }
 
-/// Minimal credential set needed to keep middleware happy.
-pub async fn seed_credentials(pool: &SqlitePool) {
-    let pairs: &[(&str, &str)] = &[
-        (KEY_GOOGLE_CLIENT_ID, "test-client-id"),
-        (KEY_GOOGLE_CLIENT_SECRET, "test-client-secret"),
-        (
-            KEY_GOOGLE_REDIRECT_URI,
-            "http://localhost:3000/api/auth/callback",
-        ),
-    ];
-    for (k, v) in pairs {
-        set_config_value(pool, k, v).await.expect("seed config");
-    }
-}
-
 /// Seed the proxy HMAC secret so dash signing routines that read it
-/// don't have to mutate state inside a test.
+/// don't have to mutate state during a test.
 pub async fn seed_proxy_secret(pool: &SqlitePool) {
     use base64::Engine;
     let bytes = [7u8; 32];

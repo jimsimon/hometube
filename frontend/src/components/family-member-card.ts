@@ -2,13 +2,10 @@
  * <hometube-family-member-card>
  *
  * Renders a single row in the family-management list: avatar, name,
- * email, role badge, token-status badge, and last-login timestamp,
- * plus three action buttons:
+ * role badge, and last-login timestamp, plus action buttons:
  *
- *   - Edit          → opens an inline rename / role-change form
- *   - Re-authenticate → POSTs to `/api/family/members/:id/reauth` and
- *                       redirects to the returned login_url
- *   - Remove        → confirmation dialog then DELETE
+ *   - Edit   → opens an inline rename / role-change form
+ *   - Remove → confirmation dialog then DELETE
  *
  * The card never mutates its own `member` prop directly; on success it
  * dispatches a bubbling `family-changed` event so the parent
@@ -22,14 +19,11 @@ import { ApiError, api } from "../services/api.js";
 
 export interface FamilyMember {
   id: number;
-  email: string;
   display_name: string;
   avatar_url: string | null;
   account_type: "parent" | "child";
   has_pin: boolean;
   created_at: number;
-  token_expires_at: number;
-  token_expired: boolean;
   last_login_at: number | null;
 }
 
@@ -88,13 +82,6 @@ export class FamilyMemberCard extends LitElement {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .email {
-      color: var(--wa-color-text-quiet);
-      font-size: 0.85rem;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
     .badges {
       display: flex;
       gap: 0.5rem;
@@ -115,7 +102,6 @@ export class FamilyMemberCard extends LitElement {
       background: var(--wa-color-success-quiet, rgba(34, 197, 94, 0.15));
       color: var(--wa-color-success-on-quiet, #166534);
     }
-    .badge.expired,
     .badge.warn {
       background: var(--wa-color-warning-quiet, rgba(245, 158, 11, 0.18));
       color: var(--wa-color-warning-on-quiet, #92400e);
@@ -227,20 +213,6 @@ export class FamilyMemberCard extends LitElement {
     }
   }
 
-  private async onReauth(): Promise<void> {
-    if (!this.member) return;
-    this.busy = true;
-    try {
-      const res = await api.post<{ login_url: string }>(
-        `/api/family/members/${this.member.id}/reauth`,
-      );
-      window.location.href = res.login_url;
-    } catch (err) {
-      this.status = `Re-auth failed: ${this.errorMessage(err)}`;
-      this.busy = false;
-    }
-  }
-
   private openRemove(): void {
     this.removing = true;
     queueMicrotask(() => this.removeDialog?.show?.());
@@ -276,7 +248,6 @@ export class FamilyMemberCard extends LitElement {
         </div>
         <div class="info">
           <span class="name" id="member-${m.id}-name">${m.display_name}</span>
-          <span class="email">${m.email}</span>
           <div class="badges">
             <span class=${`badge ${m.account_type}`}>${m.account_type}</span>
             ${m.account_type === "parent" && !m.has_pin
@@ -293,11 +264,6 @@ export class FamilyMemberCard extends LitElement {
           >
             ${this.editing ? "Cancel" : "Edit"}
           </button>
-          ${m.account_type === "parent"
-            ? html`<button type="button" ?disabled=${this.busy} @click=${this.onReauth}>
-                Re-authenticate
-              </button>`
-            : nothing}
           <button type="button" class="danger" ?disabled=${this.busy} @click=${this.openRemove}>
             Remove
           </button>
@@ -330,7 +296,7 @@ export class FamilyMemberCard extends LitElement {
           ? html`<wa-dialog class="confirm-remove" label=${`Remove ${m.display_name}?`} open>
               <p>
                 Removing ${m.display_name} also signs them out everywhere and deletes their HomeTube
-                data. Their YouTube account itself is unaffected.
+                data.
               </p>
               <div class="dialog-actions">
                 <button type="button" @click=${this.closeRemove}>Cancel</button>

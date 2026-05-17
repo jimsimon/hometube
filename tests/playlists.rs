@@ -314,14 +314,7 @@ async fn cannot_modify_other_childs_playlist() {
     let (app, _parent_auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let parent_id = app.parent_id.unwrap();
     let child_a = app.child_id.unwrap();
-    let child_b = common::insert_account(
-        &app.pool,
-        "google-child-2",
-        "child2@example.test",
-        "Child Two",
-        AccountType::Child,
-    )
-    .await;
+    let child_b = common::insert_account(&app.pool, "Child Two", AccountType::Child).await;
     let _ = parent_id;
 
     // child_a creates a playlist.

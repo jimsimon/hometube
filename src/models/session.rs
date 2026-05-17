@@ -81,15 +81,10 @@ struct SessionAccountRow {
     s_expires_at: i64,
     s_created_at: i64,
     a_id: i64,
-    a_google_id: Option<String>,
-    a_email: String,
     a_display_name: String,
     a_avatar_url: Option<String>,
     a_account_type: String,
     a_pin_hash: Option<String>,
-    a_access_token: String,
-    a_refresh_token: String,
-    a_token_expires_at: i64,
     a_created_at: i64,
     a_updated_at: i64,
 }
@@ -103,11 +98,9 @@ pub async fn lookup_with_account(
     let row: Option<SessionAccountRow> = sqlx::query_as(
         "SELECT s.id AS s_id, s.account_id AS s_account_id, \
                 s.expires_at AS s_expires_at, s.created_at AS s_created_at, \
-                a.id AS a_id, a.google_id AS a_google_id, a.email AS a_email, \
+                a.id AS a_id, \
                 a.display_name AS a_display_name, a.avatar_url AS a_avatar_url, \
                 a.account_type AS a_account_type, a.pin_hash AS a_pin_hash, \
-                a.access_token AS a_access_token, a.refresh_token AS a_refresh_token, \
-                a.token_expires_at AS a_token_expires_at, \
                 a.created_at AS a_created_at, a.updated_at AS a_updated_at \
          FROM sessions s INNER JOIN accounts a ON a.id = s.account_id \
          WHERE s.id = ?",
@@ -136,15 +129,10 @@ pub async fn lookup_with_account(
     };
     let account = Account {
         id: row.a_id,
-        google_id: row.a_google_id,
-        email: row.a_email,
         display_name: row.a_display_name,
         avatar_url: row.a_avatar_url,
         account_type: row.a_account_type,
         pin_hash: row.a_pin_hash,
-        access_token: row.a_access_token,
-        refresh_token: row.a_refresh_token,
-        token_expires_at: row.a_token_expires_at,
         created_at: row.a_created_at,
         updated_at: row.a_updated_at,
     };

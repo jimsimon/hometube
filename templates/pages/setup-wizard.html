@@ -10,17 +10,11 @@
     your family. You can re-run any step from the parent dashboard later.
   </p>
 
-  <hometube-setup-wizard
-    suggested-redirect-uri="{{ suggested_redirect_uri }}"
-  ></hometube-setup-wizard>
+  <hometube-setup-wizard></hometube-setup-wizard>
 </section>
 {% endblock %}
 
 {% block scripts %}
 <script type="module" src="/assets/components/setup-wizard.js"></script>
-<script
-  type="module"
-  src="/assets/components/setup-credentials-form.js"
-></script>
 <script type="module" src="/assets/components/setup-pin-input.js"></script>
 {% endblock %}

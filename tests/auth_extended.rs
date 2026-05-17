@@ -20,14 +20,7 @@ async fn profiles_lists_multiple_accounts() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
 
     // Add more accounts.
-    insert_account(
-        &app.pool,
-        "google-child-2",
-        "child2@test.com",
-        "Child Two",
-        AccountType::Child,
-    )
-    .await;
+    insert_account(&app.pool, "Child Two", AccountType::Child).await;
 
     let res = app.server.get("/api/auth/profiles").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -59,8 +52,8 @@ async fn me_returns_account_info() {
     let res = app.server.get("/api/auth/me").await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
-    assert_eq!(body["email"], "parent@example.test");
     assert_eq!(body["account_type"], "parent");
+    assert_eq!(body["display_name"], "Parent One");
 }
 
 // ---------------------------------------------------------------------------
@@ -208,19 +201,4 @@ async fn logout_clears_session() {
 // Login redirect
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn login_returns_redirect_url() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-
-    let res = app
-        .server
-        .get("/api/auth/login?role=parent")
-        .clear_cookies()
-        .await;
-    let status = res.status_code().as_u16();
-    // Should redirect to Google OAuth.
-    assert!(
-        (300..400).contains(&status) || status == 200,
-        "expected redirect or OK, got {status}"
-    );
-}
+// OAuth login test removed — Google OAuth has been replaced by PIN-based auth.

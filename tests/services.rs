@@ -7,7 +7,7 @@ use common::boot;
 use hometube::models::account::AccountType;
 use hometube::services::cron::{compute_next_run_at, seed_default_jobs, seed_ytdlp_info};
 use hometube::services::notifications::{self, dispatch_ytdlp_failure_deduped, TYPE_SYSTEM_UPDATE};
-use hometube::services::setup::{has_first_parent, has_google_credentials, is_setup_complete};
+use hometube::services::setup::{has_first_parent, is_setup_complete};
 use hometube::services::video_cache::{
     cache_size_preset_to_bytes, current_cache_size_label, evict_video_public, list_cached_videos,
     set_cache_size, set_ttl_hours, total_cache_bytes, total_segment_count, CACHE_SIZE_PRESETS,
@@ -18,13 +18,9 @@ async fn setup_helpers_reflect_db_state() {
     let app = boot().await;
 
     assert!(!is_setup_complete(&app.pool).await.unwrap());
-    assert!(!has_google_credentials(&app.pool).await.unwrap());
     assert!(!has_first_parent(&app.pool).await.unwrap());
 
-    common::seed_credentials(&app.pool).await;
-    assert!(has_google_credentials(&app.pool).await.unwrap());
-
-    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
+    common::insert_account(&app.pool, "P", AccountType::Parent).await;
     assert!(has_first_parent(&app.pool).await.unwrap());
 }
 
@@ -82,7 +78,7 @@ async fn cron_compute_next_run_at_handles_each_preset() {
 #[tokio::test]
 async fn dispatch_ytdlp_failure_dedups() {
     let app = boot().await;
-    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
+    common::insert_account(&app.pool, "P", AccountType::Parent).await;
 
     // First call → notification inserted.
     dispatch_ytdlp_failure_deduped(&app.pool, "vid-X", "boom")
@@ -113,7 +109,7 @@ async fn dispatch_ytdlp_failure_dedups() {
 #[tokio::test]
 async fn broadcast_once_per_day_dedups() {
     let app = boot().await;
-    common::insert_account(&app.pool, "g1", "p@e.t", "P", AccountType::Parent).await;
+    common::insert_account(&app.pool, "P", AccountType::Parent).await;
 
     let metadata = serde_json::json!({"child_account_id": 1});
     let key = notifications::json_fragment_key("child_account_id", &1);

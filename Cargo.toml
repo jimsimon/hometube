@@ -21,10 +21,6 @@ askama = "0.16"
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
 
-# Authentication
-oauth2 = "5"
-openidconnect = "4"
-
 # HTTP Client (YouTube API + video stream proxying)
 reqwest = { version = "0.13", features = ["stream", "json", "query"] }
 

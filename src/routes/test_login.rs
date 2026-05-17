@@ -30,10 +30,7 @@ use tower_cookies::{cookie::SameSite, Cookie, Cookies};
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::SESSION_COOKIE;
 use crate::models::account::AccountType;
-use crate::services::setup::{
-    set_config_value, KEY_GOOGLE_CLIENT_ID, KEY_GOOGLE_CLIENT_SECRET, KEY_GOOGLE_REDIRECT_URI,
-    KEY_SETUP_COMPLETE,
-};
+use crate::services::setup::{set_config_value, KEY_SETUP_COMPLETE};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -67,16 +64,8 @@ pub async fn seed(
         }
     };
 
-    // Always mark setup complete + ensure dummy credentials exist so
-    // middleware doesn't bounce us back to /setup. Idempotent.
-    let _ = set_config_value(&state.db, KEY_GOOGLE_CLIENT_ID, "test-client-id").await;
-    let _ = set_config_value(&state.db, KEY_GOOGLE_CLIENT_SECRET, "test-client-secret").await;
-    let _ = set_config_value(
-        &state.db,
-        KEY_GOOGLE_REDIRECT_URI,
-        "http://localhost:3000/api/auth/callback",
-    )
-    .await;
+    // Always mark setup complete so middleware doesn't bounce us back
+    // to /setup. Idempotent.
     let _ = set_config_value(&state.db, KEY_SETUP_COMPLETE, "true").await;
 
     let display_name = body.display_name.unwrap_or_else(|| match role {
@@ -84,25 +73,14 @@ pub async fn seed(
         AccountType::Child => "E2E Child".into(),
     });
 
-    // Random suffix so multiple seed() calls in the same DB don't
-    // collide on the UNIQUE(google_id) constraint.
-    let nonce: u64 = rand::random();
-    let google_id = format!("e2e-{nonce}");
-    let email = format!("{nonce}@e2e.test");
-
-    let now = chrono::Utc::now().timestamp();
     let account_id: i64 = sqlx::query_scalar(
         "INSERT INTO accounts \
-            (google_id, email, display_name, avatar_url, account_type, \
-             access_token, refresh_token, token_expires_at) \
-         VALUES (?, ?, ?, NULL, ?, 'tk', 'rk', ?) \
+            (display_name, avatar_url, account_type) \
+         VALUES (?, NULL, ?) \
          RETURNING id",
     )
-    .bind(&google_id)
-    .bind(&email)
     .bind(&display_name)
     .bind(role.as_str())
-    .bind(now + 3600)
     .fetch_one(&state.db)
     .await?;
 

@@ -56,7 +56,6 @@ async fn me_returns_401_for_anonymous() {
     // common module but here we want setup to be complete so the
     // setup-redirect middleware doesn't intercept us.
     let app = common::boot().await;
-    common::seed_credentials(&app.pool).await;
     hometube::services::setup::set_config_value(
         &app.pool,
         hometube::services::setup::KEY_SETUP_COMPLETE,
@@ -189,73 +188,6 @@ async fn switch_404_for_missing_account() {
         .json(&json!({ "account_id": 9999 }))
         .await;
     assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn callback_rejects_missing_oauth_cookie() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-    // Hitting the OAuth callback without the round-trip cookie is a
-    // 400 — the handler can't trust a code without the matching state.
-    let res = app
-        .server
-        .get("/api/auth/callback?code=abc&state=zzz")
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn callback_with_state_mismatch_400() {
-    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
-
-    // Mint a signed `hometube_oauth` cookie with a known csrf, then
-    // call the callback with a *different* state value.
-    let raw_key = tower_cookies::cookie::Key::from(&common::test_key_bytes());
-    let mut jar = tower_cookies::cookie::CookieJar::new();
-    let payload = r#"{"csrf":"correct-csrf","pkce_verifier":"pv","role":"parent"}"#;
-    jar.signed_mut(&raw_key)
-        .add(tower_cookies::cookie::Cookie::new(
-            "hometube_oauth",
-            payload,
-        ));
-    let signed = jar.get("hometube_oauth").unwrap().clone();
-
-    let res = app
-        .server
-        .get("/api/auth/callback?code=abc&state=wrong-csrf")
-        .add_cookie(tower_cookies::cookie::Cookie::new(
-            signed.name().to_string(),
-            signed.value().to_string(),
-        ))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn login_redirects_to_google() {
-    // The login route hits the discovery endpoint via
-    // `oauth::build_client`. With no credentials configured at all,
-    // it returns 500. With *test* credentials configured, it still
-    // makes a network call to Google's discovery doc on the first
-    // run — for that reason we deliberately don't assert on success
-    // here, just that the route exists and produces *some* response.
-    let app = common::boot().await;
-    common::seed_credentials(&app.pool).await;
-    hometube::services::setup::set_config_value(
-        &app.pool,
-        hometube::services::setup::KEY_SETUP_COMPLETE,
-        "true",
-    )
-    .await
-    .unwrap();
-    let res = app.server.get("/api/auth/login").await;
-    // 303 redirect on success, or 5xx if Google's discovery URL is
-    // unreachable from the test environment. Either way we exercised
-    // the handler code path.
-    let s = res.status_code();
-    assert!(
-        s.is_redirection() || s.is_server_error(),
-        "unexpected status from /api/auth/login: {s}"
-    );
 }
 
 #[tokio::test]
