@@ -149,7 +149,7 @@ async fn video_cache_helpers() {
     let app = boot().await;
 
     // Default + change.
-    assert_eq!(current_cache_size_label(&app.pool).await, "50 GB");
+    assert_eq!(current_cache_size_label(&app.pool).await, "100 GB");
     set_cache_size(&app.pool, "10 GB").await.unwrap();
     assert_eq!(current_cache_size_label(&app.pool).await, "10 GB");
 
@@ -157,7 +157,10 @@ async fn video_cache_helpers() {
     assert!(set_cache_size(&app.pool, "weird").await.is_err());
 
     // Bytes math.
-    assert_eq!(cache_size_preset_to_bytes("5 GB"), 5 * 1024 * 1024 * 1024);
+    assert_eq!(
+        cache_size_preset_to_bytes("250 GB"),
+        250 * 1024 * 1024 * 1024
+    );
 
     // TTL.
     set_ttl_hours(&app.pool, 12).await.unwrap();
@@ -175,6 +178,7 @@ async fn video_cache_helpers() {
 
 #[tokio::test]
 async fn cache_size_presets_constant_is_complete() {
-    assert!(CACHE_SIZE_PRESETS.contains(&"5 GB"));
+    assert!(CACHE_SIZE_PRESETS.contains(&"10 GB"));
+    assert!(CACHE_SIZE_PRESETS.contains(&"500 GB"));
     assert!(CACHE_SIZE_PRESETS.contains(&"Unlimited"));
 }

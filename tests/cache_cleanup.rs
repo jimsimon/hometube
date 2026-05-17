@@ -153,8 +153,8 @@ async fn cleanup_keeps_channel_allowlisted_video() {
 async fn lru_eviction_when_over_limit() {
     let app = boot().await;
 
-    // Set cache max to 5 GB.
-    set_cache_size(&app.pool, "5 GB").await.unwrap();
+    // Set cache max to 10 GB.
+    set_cache_size(&app.pool, "10 GB").await.unwrap();
 
     // Seed two segments with enormous sizes to exceed the limit.
     // (We fake the sizes — no real files needed for the DB logic.)
@@ -178,28 +178,28 @@ async fn lru_eviction_when_over_limit() {
         .unwrap();
     }
 
-    // big-a: 3 GB, accessed a while ago (LRU).
+    // big-a: 6 GB, accessed a while ago (LRU).
     sqlx::query(
         "INSERT INTO segment_cache (video_id, format_id, segment_number, file_path, file_size_bytes, last_accessed_at) \
          VALUES ('big-a', '137', 0, '/tmp/nonexistent_a', ?, 1000)",
     )
-    .bind(3_i64 * 1024 * 1024 * 1024)
+    .bind(6_i64 * 1024 * 1024 * 1024)
     .execute(&app.pool)
     .await
     .unwrap();
 
-    // big-b: 3 GB, accessed recently.
+    // big-b: 6 GB, accessed recently.
     sqlx::query(
         "INSERT INTO segment_cache (video_id, format_id, segment_number, file_path, file_size_bytes, last_accessed_at) \
          VALUES ('big-b', '137', 0, '/tmp/nonexistent_b', ?, ?)",
     )
-    .bind(3_i64 * 1024 * 1024 * 1024)
+    .bind(6_i64 * 1024 * 1024 * 1024)
     .bind(Utc::now().timestamp())
     .execute(&app.pool)
     .await
     .unwrap();
 
-    // Total: 6 GB > 5 GB limit.
+    // Total: 12 GB > 10 GB limit.
     let (msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
     assert!(msg.contains("freed"), "msg was: {msg}");
 

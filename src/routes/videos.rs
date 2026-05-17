@@ -28,13 +28,14 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
 use crate::models::account::AccountType;
 use crate::services::access::can_child_view;
 use crate::services::dash;
+use crate::services::segment_store::{self, TeeStream};
 use crate::services::video_cache::VideoCache;
 use crate::services::ytdlp::{ExtractResult, Format};
 use crate::state::AppState;
@@ -504,12 +505,10 @@ pub struct FormatQuery {
 /// byte-range requests against that URL and we stream the bytes
 /// through from YouTube's CDN with `Range:` pass-through.
 ///
-/// This endpoint is deliberately *not* segmented: there is no `sq=`,
-/// no per-segment caching, and no upstream URL reconstruction. The
-/// upstream URL is whatever yt-dlp surfaced for the format, and we
-/// fetch it verbatim. That sidesteps the broken HLS-PoT segment path
-/// (which gets 403'd by Google's CDN) by relying on the more reliable
-/// `https`-protocol per-format URLs.
+/// **Segment caching**: when all 2 MiB chunks covering the requested byte
+/// range are already cached on disk, the response is served directly from
+/// the filesystem. Otherwise, bytes are proxied from upstream and
+/// tee-cached into aligned chunks for future requests.
 pub async fn get_format(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -539,11 +538,97 @@ pub async fn get_format(
         .clone()
         .ok_or_else(|| AppError::BadRequest("format has no direct URL".into()))?;
 
-    let mut req = reqwest::Client::new().get(&url);
-    if let Some(range) = headers.get(header::RANGE) {
-        if let Ok(s) = range.to_str() {
-            req = req.header(header::RANGE, s);
+    // Determine total file size from metadata (used for Content-Range on cache hits
+    // and for TeeStream's final-chunk logic on misses).
+    // Guard against negative sentinel values (yt-dlp may use -1 for unknown).
+    let total_size: Option<u64> = format.filesize.and_then(|s| u64::try_from(s).ok());
+
+    // Parse the incoming Range header to determine byte offsets.
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let parsed_range = range_header.as_deref().and_then(parse_range_header);
+
+    // --- Cache-hit path ---
+    // If we have a defined range with known end AND all chunks are cached, serve from disk.
+    // If the file read fails (e.g., eviction race), we fall through to the upstream path.
+    if let Some((byte_start, Some(end))) = parsed_range {
+        let is_cached =
+            segment_store::range_fully_cached(&state.db, &q.video_id, &q.format, byte_start, end)
+                .await
+                .unwrap_or(false);
+
+        if is_cached {
+            let read_result = segment_store::read_range_from_cache(
+                &state.config.cache_dir,
+                &q.video_id,
+                &q.format,
+                byte_start,
+                end,
+            )
+            .await;
+
+            if let Ok(data) = read_result {
+                debug!(
+                    video_id = %q.video_id,
+                    format = %q.format,
+                    byte_start,
+                    byte_end = end,
+                    "segment cache hit — serving from disk"
+                );
+
+                // Touch accessed chunks in the background (LRU bookkeeping).
+                let pool = state.db.clone();
+                let vid = q.video_id.clone();
+                let fmt = q.format.clone();
+                tokio::spawn(async move {
+                    segment_store::touch_chunks(
+                        &pool,
+                        &vid,
+                        &fmt,
+                        segment_store::chunk_index(byte_start),
+                        segment_store::chunk_index(end),
+                    )
+                    .await;
+                });
+
+                // Determine total size for Content-Range header.
+                let file_total_db =
+                    segment_store::get_format_total_bytes(&state.db, &q.video_id, &q.format).await;
+                let effective_total = total_size.or(file_total_db);
+
+                let content_length = data.len();
+                let mut response = Response::new(Body::from(data));
+                *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+                let h = response.headers_mut();
+                h.insert(
+                    header::CONTENT_TYPE,
+                    "application/octet-stream".parse().unwrap(),
+                );
+                h.insert(header::CONTENT_LENGTH, content_length.into());
+                let range_str = match effective_total {
+                    Some(total) => format!("bytes {}-{}/{}", byte_start, end, total),
+                    None => format!("bytes {}-{}/*", byte_start, end),
+                };
+                h.insert(header::CONTENT_RANGE, range_str.parse().unwrap());
+                h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+                return Ok(response);
+            }
+            // File read failed (eviction race) — fall through to upstream.
+            debug!(
+                video_id = %q.video_id,
+                format = %q.format,
+                "cache read failed, falling through to upstream"
+            );
         }
+    }
+
+    // --- Cache-miss path: proxy from upstream with tee-caching ---
+    let mut req = state.http_client.get(&url);
+    if let Some(ref range_val) = range_header {
+        req = req.header(header::RANGE, range_val.as_str());
     }
     let res = req.send().await.map_err(AppError::Http)?;
     let status = res.status();
@@ -553,9 +638,6 @@ pub async fn get_format(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    // Pass through Content-Length and Content-Range so the browser
-    // knows the file size and which range it received — both are
-    // required for the player's byte-range fetching to work.
     let upstream_content_length = res
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -572,8 +654,69 @@ pub async fn get_format(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let stream = res.bytes_stream().map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
+    // Try to extract total file size from Content-Range: bytes X-Y/TOTAL
+    let upstream_total = upstream_content_range
+        .as_deref()
+        .and_then(parse_content_range_total);
+    let effective_total = total_size.or(upstream_total);
+
+    // Persist total_bytes if we learned it for the first time.
+    if let Some(total) = effective_total {
+        let pool = state.db.clone();
+        let vid = q.video_id.clone();
+        let fmt = q.format.clone();
+        tokio::spawn(async move {
+            segment_store::set_format_total_bytes(&pool, &vid, &fmt, total).await;
+        });
+    }
+
+    // Determine the absolute byte offset where this stream starts.
+    // Priority: upstream Content-Range header > parsed Range request start.
+    // If neither is available (e.g., suffix range without Content-Range in
+    // response), we can't determine the offset — skip tee-caching.
+    let stream_start: Option<u64> = upstream_content_range
+        .as_deref()
+        .and_then(parse_content_range_start)
+        .or_else(|| parsed_range.map(|(s, _)| s));
+
+    // Wrap the upstream stream in TeeStream for caching, but only if we
+    // can determine the stream's absolute position. Without it, we'd
+    // cache bytes at wrong offsets and corrupt the cache.
+    let raw_stream = res.bytes_stream().map_err(std::io::Error::other);
+    let body = if let Some(start) = stream_start {
+        let tee = TeeStream::new(
+            Box::pin(raw_stream),
+            state.db.clone(),
+            state.config.cache_dir.clone(),
+            q.video_id.clone(),
+            q.format.clone(),
+            start,
+            effective_total,
+        );
+        Body::from_stream(tee)
+    } else {
+        // Unknown offset (e.g., full-file request or suffix range without
+        // Content-Range) — stream through without caching. For full-file
+        // requests (no Range header at all) where status is 200, the
+        // stream starts at byte 0.
+        if !range_header.as_ref().is_some_and(|r| r.contains('=')) || status == StatusCode::OK {
+            // Full-file response — start at 0.
+            let tee = TeeStream::new(
+                Box::pin(raw_stream),
+                state.db.clone(),
+                state.config.cache_dir.clone(),
+                q.video_id.clone(),
+                q.format.clone(),
+                0,
+                effective_total,
+            );
+            Body::from_stream(tee)
+        } else {
+            // Suffix range or other unusual case — don't cache.
+            Body::from_stream(raw_stream)
+        }
+    };
+
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let h = response.headers_mut();
@@ -594,6 +737,40 @@ pub async fn get_format(
         }
     }
     Ok(response)
+}
+
+/// Parse a `Range: bytes=START-END` header.
+/// Returns `(start, Option<end>)`. `end` is `None` for open-ended ranges like `bytes=1000-`.
+fn parse_range_header(header: &str) -> Option<(u64, Option<u64>)> {
+    let s = header.strip_prefix("bytes=")?;
+    let (start_str, end_str) = s.split_once('-')?;
+    let start: u64 = start_str.parse().ok()?;
+    let end: Option<u64> = if end_str.is_empty() {
+        None
+    } else {
+        Some(end_str.parse().ok()?)
+    };
+    Some((start, end))
+}
+
+/// Parse the total size from a `Content-Range: bytes X-Y/TOTAL` header.
+fn parse_content_range_total(header: &str) -> Option<u64> {
+    // Format: "bytes 0-999/5000" or "bytes 0-999/*"
+    let s = header.strip_prefix("bytes ")?;
+    let (_range_part, total_part) = s.split_once('/')?;
+    if total_part == "*" {
+        None
+    } else {
+        total_part.parse().ok()
+    }
+}
+
+/// Parse the start byte from a `Content-Range: bytes START-END/TOTAL` header.
+fn parse_content_range_start(header: &str) -> Option<u64> {
+    let s = header.strip_prefix("bytes ")?;
+    let (range_part, _total_part) = s.split_once('/')?;
+    let (start_str, _end_str) = range_part.split_once('-')?;
+    start_str.parse().ok()
 }
 
 /// `GET /api/proxy/thumbnail/:videoId` — stream the highest-resolution

@@ -110,7 +110,7 @@ async fn set_cache_size_validates_input() {
 }
 
 #[tokio::test]
-async fn default_cache_size_is_50gb() {
+async fn default_cache_size_is_100gb() {
     let app = boot().await;
     let label = current_cache_size_label(&app.pool).await;
     assert_eq!(label, DEFAULT_CACHE_MAX_SIZE);

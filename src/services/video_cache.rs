@@ -164,26 +164,35 @@ pub async fn set_ttl_hours(pool: &SqlitePool, hours: i64) -> AppResult<()> {
 // ---------------------------------------------------------------------------
 
 /// `app_config` key for the cache size cap. Stored as one of the human
-/// presets ("5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited").
+/// presets ("10 GB", "25 GB", "50 GB", "100 GB", "250 GB", "500 GB", "Unlimited").
 pub const KEY_CACHE_MAX_SIZE: &str = "cache_max_size";
-pub const DEFAULT_CACHE_MAX_SIZE: &str = "50 GB";
+pub const DEFAULT_CACHE_MAX_SIZE: &str = "100 GB";
 
 /// Convert a cache-size preset label to a byte count. `"Unlimited"`
 /// returns `0`. Unknown labels also return `0` (treat as unlimited).
 pub fn cache_size_preset_to_bytes(label: &str) -> u64 {
     match label.trim() {
-        "5 GB" => 5 * 1024 * 1024 * 1024,
         "10 GB" => 10 * 1024 * 1024 * 1024,
         "25 GB" => 25 * 1024 * 1024 * 1024,
         "50 GB" => 50 * 1024 * 1024 * 1024,
         "100 GB" => 100 * 1024 * 1024 * 1024,
+        "250 GB" => 250 * 1024 * 1024 * 1024,
+        "500 GB" => 500 * 1024 * 1024 * 1024,
         "Unlimited" => 0,
         _ => 0,
     }
 }
 
 /// Recognised size presets, in order of presentation.
-pub const CACHE_SIZE_PRESETS: &[&str] = &["5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited"];
+pub const CACHE_SIZE_PRESETS: &[&str] = &[
+    "10 GB",
+    "25 GB",
+    "50 GB",
+    "100 GB",
+    "250 GB",
+    "500 GB",
+    "Unlimited",
+];
 
 /// Resolve the configured max size, defaulting to [`DEFAULT_CACHE_MAX_SIZE`].
 pub async fn current_cache_size_label(pool: &SqlitePool) -> String {
@@ -343,9 +352,16 @@ async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)>
     .await?;
     let mut bytes_total: u64 = 0;
     let mut segs: u64 = 0;
+    let mut video_dir: Option<std::path::PathBuf> = None;
     for (_id, size, path) in &rows {
         if let Err(err) = tokio::fs::remove_file(path).await {
             debug!(%path, %err, "failed to remove segment file");
+        }
+        // Track the parent directory (video dir) for cleanup.
+        if video_dir.is_none() {
+            video_dir = std::path::Path::new(path.as_str())
+                .parent()
+                .map(|p| p.to_path_buf());
         }
         bytes_total += *size as u64;
         segs += 1;
@@ -358,6 +374,15 @@ async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)>
         .bind(video_id)
         .execute(pool)
         .await?;
+
+    // Clean up empty directories (video dir, then shard dir).
+    if let Some(vdir) = video_dir {
+        let _ = tokio::fs::remove_dir(&vdir).await; // fails silently if not empty
+        if let Some(shard_dir) = vdir.parent() {
+            let _ = tokio::fs::remove_dir(shard_dir).await;
+        }
+    }
+
     Ok((segs, bytes_total))
 }
 
@@ -420,8 +445,19 @@ mod tests {
 
     #[test]
     fn presets_round_trip_to_bytes() {
-        assert_eq!(cache_size_preset_to_bytes("5 GB"), 5 * 1024 * 1024 * 1024);
         assert_eq!(cache_size_preset_to_bytes("10 GB"), 10 * 1024 * 1024 * 1024);
+        assert_eq!(
+            cache_size_preset_to_bytes("100 GB"),
+            100 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            cache_size_preset_to_bytes("250 GB"),
+            250 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            cache_size_preset_to_bytes("500 GB"),
+            500 * 1024 * 1024 * 1024
+        );
         assert_eq!(cache_size_preset_to_bytes("Unlimited"), 0);
         assert_eq!(cache_size_preset_to_bytes("nonsense"), 0);
     }
@@ -429,7 +465,7 @@ mod tests {
     #[test]
     fn presets_list_is_sorted_in_presentation_order() {
         // Sanity check — small set, deterministic order.
-        assert_eq!(CACHE_SIZE_PRESETS.first(), Some(&"5 GB"));
+        assert_eq!(CACHE_SIZE_PRESETS.first(), Some(&"10 GB"));
         assert_eq!(CACHE_SIZE_PRESETS.last(), Some(&"Unlimited"));
     }
 }

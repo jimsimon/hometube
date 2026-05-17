@@ -22,6 +22,9 @@ pub struct Config {
     /// Directory where the Vite-built static assets live. Default differs
     /// between dev (`./frontend/dist`) and Docker (`/app/static`).
     pub static_dir: String,
+    /// Directory for on-disk segment cache files. Chunks are stored in a
+    /// sharded layout: `{cache_dir}/{video_id[0:2]}/{video_id}/{format}_{chunk}.chunk`.
+    pub cache_dir: String,
 }
 
 impl Config {
@@ -48,6 +51,11 @@ impl Config {
 
         let ytdlp_path = env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
         let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
+        let cache_dir =
+            env::var("CACHE_DIR").unwrap_or_else(|_| "./data/segment_cache".to_string());
+
+        // Ensure the cache directory exists.
+        std::fs::create_dir_all(&cache_dir).ok();
 
         Ok(Self {
             host,
@@ -55,6 +63,7 @@ impl Config {
             database_url,
             ytdlp_path,
             static_dir,
+            cache_dir,
         })
     }
 }

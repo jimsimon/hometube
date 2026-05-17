@@ -34,7 +34,7 @@ async fn settings_have_defaults() {
     let body: serde_json::Value = res.json();
     // From `services::video_cache::DEFAULT_CACHE_MAX_SIZE` and
     // `DEFAULT_TTL_HOURS`.
-    assert_eq!(body["max_size"], "50 GB");
+    assert_eq!(body["max_size"], "100 GB");
     // The harness `boot()` doesn't touch metadata_cache_ttl_hours, so
     // it falls back to the default.
     assert_eq!(body["metadata_ttl_hours"], 4);

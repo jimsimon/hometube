@@ -17,6 +17,7 @@ pub mod cron;
 pub mod dash;
 pub mod notifications;
 pub mod segment_ranges;
+pub mod segment_store;
 pub mod setup;
 pub mod video_cache;
 pub mod youtube;
