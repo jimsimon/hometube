@@ -36,12 +36,15 @@ pub const CHUNK_SIZE: u64 = 2 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Compute the 2-character shard prefix from a video ID.
+/// Uses `char` boundaries to avoid panicking on multi-byte UTF-8,
+/// though YouTube video IDs are always ASCII in practice.
 fn shard_prefix(video_id: &str) -> &str {
-    if video_id.len() >= 2 {
-        &video_id[..2]
-    } else {
-        video_id
-    }
+    let end = video_id
+        .char_indices()
+        .nth(2)
+        .map(|(i, _)| i)
+        .unwrap_or(video_id.len());
+    &video_id[..end]
 }
 
 /// Compute the filesystem path for a single chunk file.
@@ -54,10 +57,10 @@ pub fn chunk_path(cache_dir: &str, video_id: &str, format_id: &str, chunk_num: u
 }
 
 /// Ensure the shard + video directory exists and return it.
-fn ensure_chunk_dir(cache_dir: &str, video_id: &str) -> std::io::Result<PathBuf> {
+async fn ensure_chunk_dir(cache_dir: &str, video_id: &str) -> std::io::Result<PathBuf> {
     let shard = shard_prefix(video_id);
     let dir = PathBuf::from(cache_dir).join(shard).join(video_id);
-    std::fs::create_dir_all(&dir)?;
+    tokio::fs::create_dir_all(&dir).await?;
     Ok(dir)
 }
 
@@ -149,6 +152,7 @@ pub async fn store_chunk(
 ) -> AppResult<()> {
     // Ensure directory structure.
     ensure_chunk_dir(cache_dir, video_id)
+        .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("creating chunk dir: {e}")))?;
 
     let path = chunk_path(cache_dir, video_id, format_id, chunk_num);
@@ -306,6 +310,11 @@ pub struct TeeStream {
     /// Sender half — dropped when the TeeStream is dropped (signals EOF
     /// if the Eof message wasn't sent explicitly due to an error/abort).
     tx: tokio::sync::mpsc::Sender<TeeMsg>,
+    /// Set to `true` if any send fails (channel full/closed). Once poisoned,
+    /// no further messages are sent — the writer task will see a gap in the
+    /// byte stream and we must not cache any subsequent data for this request
+    /// as it would be at wrong offsets.
+    poisoned: bool,
 }
 
 impl TeeStream {
@@ -340,7 +349,11 @@ impl TeeStream {
             total_size,
         ));
 
-        Self { inner, tx }
+        Self {
+            inner,
+            tx,
+            poisoned: false,
+        }
     }
 }
 
@@ -349,14 +362,27 @@ impl Stream for TeeStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = self.inner.as_mut().poll_next(cx);
+
+        // Once poisoned, skip all channel sends — the writer task will
+        // receive no more data and won't produce corrupt partial chunks.
+        if self.poisoned {
+            return poll;
+        }
+
         match &poll {
             Poll::Ready(Some(Ok(bytes))) => {
-                // Best-effort send — if the channel is full or closed, we
-                // still deliver the bytes to the client (caching is optional).
-                let _ = self.tx.try_send(TeeMsg::Data(bytes.clone()));
+                if self.tx.try_send(TeeMsg::Data(bytes.clone())).is_err() {
+                    // Channel full or closed — poison the stream. Any chunks
+                    // already written by the writer are valid (they were
+                    // complete aligned chunks). We just stop sending more.
+                    self.poisoned = true;
+                    debug!("tee channel full/closed — disabling caching for this stream");
+                }
             }
             Poll::Ready(None) => {
                 // Signal end-of-stream to the writer task.
+                // If this fails, the writer will still exit when the channel
+                // is dropped (sender dropped → recv returns None).
                 let _ = self.tx.try_send(TeeMsg::Eof);
             }
             Poll::Ready(Some(Err(_))) | Poll::Pending => {}
