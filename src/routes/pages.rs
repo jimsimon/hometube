@@ -48,9 +48,7 @@ impl VideoCardData {
 struct SetupWizardTemplate {}
 
 /// `GET /setup` — server-rendered shell for the multi-step setup wizard.
-pub async fn setup_wizard(
-    State(_state): State<AppState>,
-) -> AppResult<impl IntoResponse> {
+pub async fn setup_wizard(State(_state): State<AppState>) -> AppResult<impl IntoResponse> {
     let tpl = SetupWizardTemplate {};
     Ok(Html(tpl.render()?))
 }

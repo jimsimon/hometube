@@ -60,9 +60,14 @@ async fn total_count() {
 #[tokio::test]
 async fn insert_local_child() {
     let app = boot().await;
-    let id = account::insert_local(&app.pool, "Local Kid", Some("http://av/k.jpg"), AccountType::Child)
-        .await
-        .unwrap();
+    let id = account::insert_local(
+        &app.pool,
+        "Local Kid",
+        Some("http://av/k.jpg"),
+        AccountType::Child,
+    )
+    .await
+    .unwrap();
     let found = account::find_by_id(&app.pool, id).await.unwrap().unwrap();
     assert_eq!(found.display_name, "Local Kid");
     assert_eq!(found.typed(), AccountType::Child);

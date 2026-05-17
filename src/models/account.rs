@@ -88,8 +88,7 @@ pub struct ProfileSummary {
     pub has_pin: bool,
 }
 
-const COLS: &str =
-    "id, display_name, avatar_url, account_type, pin_hash, created_at, updated_at";
+const COLS: &str = "id, display_name, avatar_url, account_type, pin_hash, created_at, updated_at";
 
 fn map_account(row: AccountRow) -> Account {
     let AccountRow {
