@@ -275,6 +275,11 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // first 64 bytes of each index range and adjust if needed.
     fixup_webm_cues_offsets(&mut result).await;
 
+    // Fallback: for opus audio formats that have NO segment_ranges at
+    // all (innertube sometimes omits them), probe the file header to
+    // find the Cues element position.
+    probe_missing_audio_ranges(&mut result).await;
+
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
 
@@ -387,6 +392,33 @@ async fn parse_player_page_dumps(
 
 use crate::services::segment_ranges::WEBM_CUES_ID;
 
+/// Returns `true` for DRC (Dynamic Range Compression) variants.
+/// DRC variants share an itag with the standard variant but are
+/// *different files* with different Cues byte offsets. The DASH
+/// manifest excludes them, so probes must too.
+fn is_drc(f: &Format) -> bool {
+    f.format_id.contains("-drc-")
+        || f.format_id.ends_with("-drc")
+        || f.format_note
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase().contains("drc"))
+            .unwrap_or(false)
+}
+
+/// Result of probing one format's index range for the WebM Cues element.
+enum CuesProbeResult {
+    /// Cues element found at `index_start` — no adjustment needed.
+    Aligned,
+    /// Cues element found at an offset within the probe window.
+    /// The value is the absolute byte position of the Cues element.
+    Adjusted(u64),
+    /// Cues element not found anywhere in the 64-byte probe window.
+    /// Drop the segment range entirely.
+    NotFound,
+    /// Probe request failed — keep the range as-is (graceful fallback).
+    ProbeFailed,
+}
+
 /// Probe each format's index range to verify the WebM Cues element
 /// starts exactly at `index_start`. YouTube's innertube API sometimes
 /// reports an `indexRange` that includes a few leading bytes before the
@@ -394,11 +426,13 @@ use crate::services::segment_ranges::WEBM_CUES_ID;
 /// the Cues ID as the very first bytes of the fetched range.
 ///
 /// For each format with a URL and associated segment range, we fetch a
-/// small prefix of the index range. If the Cues ID isn't at byte 0, the
-/// range entry is removed so no `<SegmentBase>` is emitted in the initial
-/// manifest. The manifest-time validator ([`crate::routes::videos::validate_cues_offsets`])
-/// will re-probe and adjust the init/index boundary correctly when the
-/// manifest is next served.
+/// small prefix of the index range. If the Cues ID is found at an
+/// offset within the probe window, `index_start` is adjusted forward
+/// (and `init_end` is extended to cover the gap) so the player's
+/// byte-range fetch lands exactly on the Cues element. If the Cues ID
+/// is not found at all, the range is removed so no `<SegmentBase>` is
+/// emitted.
+///
 /// Validate and fix WebM Cues offsets in segment ranges. Public for
 /// integration testing; not intended for use outside extraction.
 pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
@@ -409,9 +443,17 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
     }
 
     // Build a list of (itag, format_url, index_start) to probe.
+    //
+    // DRC (Dynamic Range Compression) variants and auto-dubs share an
+    // itag with the original variant but are *different files* with
+    // different Cues byte offsets. The innertube `/player` API only
+    // reports ranges for the original version, so probing a DRC or dub
+    // URL gives a false mismatch. Skip them — the DASH manifest
+    // already excludes both.
     let probes: Vec<(i64, String, u64, u64)> = result
         .formats
         .iter()
+        .filter(|f| !is_drc(f))
         .filter_map(|f| {
             let url = f.url.as_ref()?;
             let itag_str = f.format_id.split('-').next()?;
@@ -434,7 +476,7 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
     let client = reqwest::Client::new();
 
     // Probe concurrently (up to 8 at a time).
-    let adjustments: Vec<(i64, Option<u64>)> = stream::iter(probes)
+    let adjustments: Vec<(i64, CuesProbeResult)> = stream::iter(probes)
         .map(|(itag, url, index_start, index_end)| {
             let client = &client;
             async move {
@@ -448,28 +490,41 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
                     .await
                 {
                     Ok(r) if r.status().is_success() => r,
-                    _ => return (itag, Some(index_start)), // probe failed — keep as-is
+                    _ => return (itag, CuesProbeResult::ProbeFailed),
                 };
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
-                    Err(_) => return (itag, Some(index_start)),
+                    Err(_) => return (itag, CuesProbeResult::ProbeFailed),
                 };
 
                 // Check if Cues element starts at byte 0 of the range.
                 if bytes.len() >= 4 && bytes[0..4] == WEBM_CUES_ID {
-                    // Cues is at the expected position — keep as-is.
-                    return (itag, Some(index_start));
+                    return (itag, CuesProbeResult::Aligned);
                 }
 
-                // Cues element doesn't start at byte 0 — YouTube's
-                // indexRange is inconsistent for this format. Remove
-                // the range so no SegmentBase is emitted.
+                // Scan the remaining bytes for the Cues element ID.
+                // YouTube sometimes places a few leading EBML elements
+                // before the actual Cues. Adjust so index_start points
+                // exactly at the Cues — Shaka requires it at byte 0.
+                if let Some(offset) = find_cues_offset(&bytes) {
+                    let new_index_start = index_start + offset as u64;
+                    tracing::info!(
+                        itag,
+                        index_start,
+                        new_index_start,
+                        offset,
+                        "adjusted WebM Cues offset"
+                    );
+                    return (itag, CuesProbeResult::Adjusted(new_index_start));
+                }
+
+                // Cues element not found anywhere in the probe window.
                 tracing::warn!(
                     itag,
                     index_start,
-                    "WebM Cues not at start of index range; dropping SegmentBase"
+                    "WebM Cues not found in index range probe; dropping SegmentBase"
                 );
-                (itag, None)
+                (itag, CuesProbeResult::NotFound)
             }
         })
         .buffer_unordered(8)
@@ -477,12 +532,200 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
         .await;
 
     // Apply adjustments.
-    for (itag, keep) in adjustments {
-        if keep.is_none() {
-            // Remove the entry so no SegmentBase is emitted.
-            result.segment_ranges.remove(&itag);
+    for (itag, probe) in adjustments {
+        match probe {
+            CuesProbeResult::Aligned | CuesProbeResult::ProbeFailed => {
+                // No change needed.
+            }
+            CuesProbeResult::Adjusted(new_index_start) => {
+                if let Some(sr) = result.segment_ranges.get_mut(&itag) {
+                    // Slide the index range forward by the same offset.
+                    // The innertube API sized index_end based on the
+                    // Cues starting at the original index_start, so
+                    // shifting start without shifting end would
+                    // truncate the Cues and cause Shaka's EBML parser
+                    // to hit BUFFER_READ_OUT_OF_BOUNDS. Leave init_end
+                    // unchanged — the gap is harmless.
+                    let delta = new_index_start - sr.index_start;
+                    sr.index_start = new_index_start;
+                    sr.index_end += delta;
+                }
+            }
+            CuesProbeResult::NotFound => {
+                result.segment_ranges.remove(&itag);
+            }
         }
-        // If Some(_), the range is already correct — no adjustment needed.
+    }
+}
+
+/// Scan a byte slice for the WebM Cues element ID (`0x1C53BB6B`).
+/// Returns the byte offset within `data` where the ID starts, or
+/// `None` if not found. Starts scanning from offset 1 (offset 0 is
+/// already checked by the caller).
+fn find_cues_offset(data: &[u8]) -> Option<usize> {
+    if data.len() < 4 {
+        return None;
+    }
+    for i in 1..=(data.len() - 4) {
+        if data[i..i + 4] == WEBM_CUES_ID {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the *last* occurrence of the Cues element ID in `data`.
+/// The SeekHead near the start of a WebM file also contains the Cues
+/// ID as data within a SeekID sub-element — using the last occurrence
+/// skips that false positive.
+fn find_last_cues_offset(data: &[u8]) -> Option<usize> {
+    if data.len() < 4 {
+        return None;
+    }
+    let mut last = None;
+    for i in 0..=(data.len() - 4) {
+        if data[i..i + 4] == WEBM_CUES_ID {
+            last = Some(i);
+        }
+    }
+    last
+}
+
+/// Read an EBML variable-width integer (VINT) at `offset` in `data`.
+/// Returns `(width, value)` or `None` if the data is too short.
+fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
+    if offset >= data.len() {
+        return None;
+    }
+    let first = data[offset];
+    if first == 0 {
+        return None;
+    }
+    let width = first.leading_zeros() as usize + 1;
+    if offset + width > data.len() || width > 8 {
+        return None;
+    }
+    let mut value = (first as u64) & ((1u64 << (8 - width)) - 1);
+    for i in 1..width {
+        value = (value << 8) | data[offset + i] as u64;
+    }
+    Some((width, value))
+}
+
+/// For opus audio formats that have no innertube segment_ranges, probe
+/// the file header to find the Cues element and populate ranges.
+///
+/// YouTube's innertube `/player` API sometimes omits `indexRange` for
+/// audio formats. Without ranges, the DASH manifest can't emit
+/// `<SegmentBase>` and the format is excluded. This function fills the
+/// gap by fetching the first ~1 KiB of each audio URL and scanning
+/// for the Cues element.
+async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
+    use futures_util::stream::{self, StreamExt};
+
+    // Collect audio itags that are missing from segment_ranges.
+    let probes: Vec<(i64, String)> = result
+        .formats
+        .iter()
+        .filter(|f| !is_drc(f))
+        .filter(|f| {
+            let acodec = f.acodec.as_deref().unwrap_or("none");
+            let vcodec = f.vcodec.as_deref().unwrap_or("none");
+            acodec.starts_with("opus") && vcodec == "none"
+        })
+        .filter_map(|f| {
+            let url = f.url.as_ref()?;
+            let itag_str = f.format_id.split('-').next()?;
+            let itag: i64 = itag_str.parse().ok()?;
+            // Only probe if this itag is NOT already in segment_ranges.
+            if result.segment_ranges.contains_key(&itag) {
+                return None;
+            }
+            Some((itag, url.clone()))
+        })
+        // Deduplicate by itag.
+        .fold(Vec::new(), |mut acc, item| {
+            if !acc.iter().any(|(i, _)| *i == item.0) {
+                acc.push(item);
+            }
+            acc
+        });
+
+    if probes.is_empty() {
+        return;
+    }
+
+    tracing::debug!(count = probes.len(), "probing audio formats missing segment_ranges");
+
+    let client = reqwest::Client::new();
+
+    let discovered: Vec<(i64, Option<SegmentRanges>)> = stream::iter(probes)
+        .map(|(itag, url)| {
+            let client = &client;
+            async move {
+                // Fetch the first 1024 bytes of the file.
+                let resp = match client
+                    .get(&url)
+                    .header(reqwest::header::RANGE, "bytes=0-1023")
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => r,
+                    _ => return (itag, None),
+                };
+                let bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(_) => return (itag, None),
+                };
+
+                // Find the actual Cues element (use last occurrence to
+                // skip the SeekHead's SeekID reference).
+                let cues_pos = match find_last_cues_offset(&bytes) {
+                    Some(pos) => pos,
+                    None => {
+                        tracing::debug!(itag, "Cues not found in first 1024 bytes");
+                        return (itag, None);
+                    }
+                };
+
+                // Read the Cues element size to determine index_end.
+                let (size_width, cues_data_size) =
+                    match read_ebml_vint(&bytes, cues_pos + 4) {
+                        Some(v) => v,
+                        None => return (itag, None),
+                    };
+
+                let index_start = cues_pos as u64;
+                let index_end = index_start + 4 + size_width as u64 + cues_data_size - 1;
+                let init_end = index_start - 1;
+
+                tracing::info!(
+                    itag,
+                    index_start,
+                    index_end,
+                    init_end,
+                    "probed audio Cues position"
+                );
+
+                (
+                    itag,
+                    Some(SegmentRanges {
+                        init_start: 0,
+                        init_end,
+                        index_start,
+                        index_end,
+                    }),
+                )
+            }
+        })
+        .buffer_unordered(4)
+        .collect()
+        .await;
+
+    for (itag, ranges) in discovered {
+        if let Some(sr) = ranges {
+            result.segment_ranges.insert(itag, sr);
+        }
     }
 }
 

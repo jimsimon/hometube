@@ -305,11 +305,14 @@ async fn fixup_webm_cues_keeps_correct_ranges() {
 }
 
 #[tokio::test]
-async fn fixup_webm_cues_removes_misaligned_range() {
+async fn fixup_webm_cues_adjusts_misaligned_range() {
     let server = MockServer::start().await;
 
-    // Serve bytes where Cues ID is NOT at offset 0 (7 bytes of junk first).
-    let mut body = vec![0x9F, 0x81, 0x02, 0x62, 0x64, 0x81, 0x10]; // 7 junk bytes
+    // Serve bytes where Cues ID is NOT at offset 0 (7 leading EBML bytes).
+    // The fixup should slide both index_start and index_end forward by
+    // the offset, keeping the range length (and thus the Cues coverage)
+    // intact. init_end stays unchanged — the gap is harmless.
+    let mut body = vec![0x9F, 0x81, 0x02, 0x62, 0x64, 0x81, 0x10]; // 7 valid EBML bytes
     body.extend_from_slice(&[0x1C, 0x53, 0xBB, 0x6B]); // Cues ID at offset 7
     body.extend(std::iter::repeat_n(0u8, 53));
 
@@ -329,10 +332,46 @@ async fn fixup_webm_cues_removes_misaligned_range() {
 
     hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
 
-    // Range should be removed — Cues wasn't at byte 0 of the index range.
+    // Both index_start and index_end shift by +7 (the Cues offset).
+    // init_end stays at 258 — the gap is harmless.
+    assert!(
+        result.segment_ranges.contains_key(&249),
+        "expected itag 249 to be preserved with adjusted offset"
+    );
+    let sr = result.segment_ranges[&249];
+    assert_eq!(sr.index_start, 266, "index_start should move to Cues position");
+    assert_eq!(sr.index_end, 805, "index_end should shift by same delta (+7)");
+    assert_eq!(sr.init_end, 258, "init_end should remain unchanged");
+    assert_eq!(sr.init_start, 0, "init_start should remain unchanged");
+}
+
+#[tokio::test]
+async fn fixup_webm_cues_drops_range_when_cues_not_found() {
+    let server = MockServer::start().await;
+
+    // Serve 64 bytes with no Cues ID anywhere.
+    let body = vec![0xAA; 64];
+
+    Mock::given(header("range", "bytes=259-322"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(body))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/audio.webm", server.uri());
+    let ranges = SegmentRanges {
+        init_start: 0,
+        init_end: 258,
+        index_start: 259,
+        index_end: 798,
+    };
+    let mut result = result_with_format("249-dashy-0", &url, 249, ranges);
+
+    hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
+
+    // Range should be removed — Cues wasn't found anywhere in the probe.
     assert!(
         !result.segment_ranges.contains_key(&249),
-        "expected itag 249 to be removed, but it's still present"
+        "expected itag 249 to be removed when Cues not found"
     );
 }
 
