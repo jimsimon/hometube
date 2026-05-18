@@ -35,7 +35,7 @@ services:
     ports:
       - "${HOMETUBE_PORT:-30000}:3000"
     volumes:
-      - ${HOMETUBE_DATA:-REPLACE_ME}:/app/data
+      - ${HOMETUBE_DATA}:/app/data
     environment:
       DISCOVERY_SIDECAR_URL: http://discovery:3000
       POT_SERVER_URL: http://pot-server:4416
@@ -71,10 +71,10 @@ services:
       retries: 3
       start_period: 5s
 
-  # PO (Proof-of-Origin) token server. Upstream image; pin a real tag
-  # and bump deliberately rather than tracking `:latest`. Check
-  # https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
-  # for the current release.
+  # PO (Proof-of-Origin) token server. Upstream image — tracks `:latest`
+  # by convention with the rest of this stack. Pin to a specific tag
+  # from https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
+  # if you want deliberate upgrades instead of recreate-time drift.
   pot-server:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     restart: unless-stopped
