@@ -92,6 +92,7 @@ impl VideoCache {
                 result: result.clone(),
             },
         );
+
         Ok(result)
     }
 }

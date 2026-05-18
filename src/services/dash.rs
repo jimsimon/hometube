@@ -217,6 +217,13 @@ pub fn synthesize_manifest(
         let acodec = f.acodec.as_deref().unwrap_or("none");
         let is_video_only = vcodec != "none" && acodec == "none";
         let is_audio_only = acodec != "none" && vcodec == "none";
+
+        // All audio languages (including AI dubs and author-uploaded
+        // dubs) are kept in the manifest. YouTube marks both AI and
+        // author dubs with `"TV-D"` in `format_note`, making them
+        // indistinguishable. Rather than risk filtering out legitimate
+        // author dubs, we include everything and let the user switch
+        // languages via Shaka's language menu.
         if is_video_only {
             // vp9 is sometimes also reported as `vp09.*` for full
             // codec strings. Accept both spellings.
@@ -526,8 +533,10 @@ fn trim_video_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> 
 /// quality-tier (`249`/`250`/`251`) and DRC (`*-drc-*`) variants down
 /// to a single track.
 ///
-/// First-seen wins per language. yt-dlp orders by quality with the
-/// preferred variant first.
+/// One format per language. First-seen wins — this must match the
+/// probe order used by `fixup_webm_cues_offsets` (which also takes
+/// the first non-DRC non-dub format per itag) so the segment ranges
+/// are correct for the format the manifest emits.
 fn trim_audio_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> {
     let mut by_lang: std::collections::BTreeMap<String, &Format> =
         std::collections::BTreeMap::new();

@@ -188,6 +188,8 @@ export interface StreamResponse {
   }>;
   /** Pre-signed proxy URL for audio-only playback. */
   audio_proxy_url?: string | null;
+  /** True when the video uses spherical/equirectangular projection (360°). */
+  is_spherical?: boolean;
 }
 
 export interface AllowedWindow {

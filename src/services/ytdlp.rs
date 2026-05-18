@@ -133,6 +133,19 @@ pub struct ExtractResult {
     /// `format_box_ranges` so probing is never needed.
     #[serde(default)]
     pub segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+
+    /// Per-format-id ranges, populated by the WebM Cues fixup probe.
+    /// Different language variants of the same itag are *different
+    /// files* with different Cues byte offsets, so the per-itag
+    /// `segment_ranges` map can't represent them correctly. When this
+    /// map has an entry for a `format_id`, it overrides whatever the
+    /// itag-keyed map would produce.
+    ///
+    /// Serialized so the metadata cache preserves the probe results
+    /// across server restarts (yt-dlp itself doesn't emit this field,
+    /// hence `serde(default)`).
+    #[serde(default)]
+    pub format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
 /// Inclusive byte ranges for a single adaptive format's SegmentBase,
@@ -177,6 +190,8 @@ struct ExtractResultRaw {
     manifest_url: Option<String>,
     #[serde(default)]
     segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+    #[serde(default)]
+    format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
 impl From<ExtractResultRaw> for ExtractResult {
@@ -198,6 +213,7 @@ impl From<ExtractResultRaw> for ExtractResult {
             automatic_captions: raw.automatic_captions,
             manifest_url: raw.manifest_url,
             segment_ranges: raw.segment_ranges,
+            format_box_ranges: raw.format_box_ranges,
         }
     }
 }
@@ -267,13 +283,11 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         debug!(%video_id, count = result.segment_ranges.len(), "parsed segment ranges from player dump");
     }
 
-    // Validate WebM Cues offsets: YouTube's innertube `indexRange`
-    // sometimes points a few bytes BEFORE the actual Cues element
-    // (0x1C53BB6B). Shaka's WebM parser requires the Cues ID to be
-    // the very first bytes of the fetched index range, otherwise it
-    // throws WEBM_CUES_ELEMENT_MISSING (error 3007). We probe the
-    // first 64 bytes of each index range and adjust if needed.
-    fixup_webm_cues_offsets(&mut result).await;
+    // WebM Cues offset correction is handled lazily by the proxy
+    // (see get_format in routes/videos.rs). When a range response
+    // doesn't start with the Cues ID, the proxy scans for it, shifts
+    // the bytes, fetches the missing tail, and persists the corrected
+    // ranges. Zero CDN probes needed at extraction time.
 
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
@@ -385,105 +399,31 @@ async fn parse_player_page_dumps(
     ranges
 }
 
-use crate::services::segment_ranges::WEBM_CUES_ID;
-
-/// Probe each format's index range to verify the WebM Cues element
-/// starts exactly at `index_start`. YouTube's innertube API sometimes
-/// reports an `indexRange` that includes a few leading bytes before the
-/// actual Cues element (observed on audio/opus formats). Shaka requires
-/// the Cues ID as the very first bytes of the fetched range.
-///
-/// For each format with a URL and associated segment range, we fetch a
-/// small prefix of the index range. If the Cues ID isn't at byte 0, the
-/// range entry is removed so no `<SegmentBase>` is emitted in the initial
-/// manifest. The manifest-time validator ([`crate::routes::videos::validate_cues_offsets`])
-/// will re-probe and adjust the init/index boundary correctly when the
-/// manifest is next served.
-/// Validate and fix WebM Cues offsets in segment ranges. Public for
-/// integration testing; not intended for use outside extraction.
-pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
-    use futures_util::stream::{self, StreamExt};
-
-    if result.segment_ranges.is_empty() {
-        return;
+/// Read an EBML variable-width integer (VINT) at `offset` in `data`.
+/// Returns `(width, value)` or `None` if the data is too short.
+fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
+    if offset >= data.len() {
+        return None;
     }
-
-    // Build a list of (itag, format_url, index_start) to probe.
-    let probes: Vec<(i64, String, u64, u64)> = result
-        .formats
-        .iter()
-        .filter_map(|f| {
-            let url = f.url.as_ref()?;
-            let itag_str = f.format_id.split('-').next()?;
-            let itag: i64 = itag_str.parse().ok()?;
-            let sr = result.segment_ranges.get(&itag)?;
-            Some((itag, url.clone(), sr.index_start, sr.index_end))
-        })
-        // Deduplicate by itag (multiple format_ids may share the same itag).
-        .fold(Vec::new(), |mut acc, item| {
-            if !acc.iter().any(|(i, _, _, _)| *i == item.0) {
-                acc.push(item);
-            }
-            acc
-        });
-
-    if probes.is_empty() {
-        return;
+    let first = data[offset];
+    if first == 0 {
+        return None;
     }
-
-    let client = reqwest::Client::new();
-
-    // Probe concurrently (up to 8 at a time).
-    let adjustments: Vec<(i64, Option<u64>)> = stream::iter(probes)
-        .map(|(itag, url, index_start, index_end)| {
-            let client = &client;
-            async move {
-                // Fetch the first 64 bytes of the index range.
-                let probe_end = std::cmp::min(index_start + 63, index_end);
-                let range_header = format!("bytes={index_start}-{probe_end}");
-                let resp = match client
-                    .get(&url)
-                    .header(reqwest::header::RANGE, &range_header)
-                    .send()
-                    .await
-                {
-                    Ok(r) if r.status().is_success() => r,
-                    _ => return (itag, Some(index_start)), // probe failed — keep as-is
-                };
-                let bytes = match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(_) => return (itag, Some(index_start)),
-                };
-
-                // Check if Cues element starts at byte 0 of the range.
-                if bytes.len() >= 4 && bytes[0..4] == WEBM_CUES_ID {
-                    // Cues is at the expected position — keep as-is.
-                    return (itag, Some(index_start));
-                }
-
-                // Cues element doesn't start at byte 0 — YouTube's
-                // indexRange is inconsistent for this format. Remove
-                // the range so no SegmentBase is emitted.
-                tracing::warn!(
-                    itag,
-                    index_start,
-                    "WebM Cues not at start of index range; dropping SegmentBase"
-                );
-                (itag, None)
-            }
-        })
-        .buffer_unordered(8)
-        .collect()
-        .await;
-
-    // Apply adjustments.
-    for (itag, keep) in adjustments {
-        if keep.is_none() {
-            // Remove the entry so no SegmentBase is emitted.
-            result.segment_ranges.remove(&itag);
-        }
-        // If Some(_), the range is already correct — no adjustment needed.
+    let width = first.leading_zeros() as usize + 1;
+    if offset + width > data.len() || width > 8 {
+        return None;
     }
+    let mut value = (first as u64) & ((1u64 << (8 - width)) - 1);
+    for i in 1..width {
+        value = (value << 8) | data[offset + i] as u64;
+    }
+    Some((width, value))
+}
+
+/// Public wrapper for read_ebml_vint, used by the proxy's Cues
+/// auto-correction to compute index_end from the Cues size VINT.
+pub fn read_ebml_vint_pub(data: &[u8], offset: usize) -> Option<(usize, u64)> {
+    read_ebml_vint(data, offset)
 }
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a

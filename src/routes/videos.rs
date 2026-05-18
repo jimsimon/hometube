@@ -35,9 +35,10 @@ use crate::middleware::auth::CurrentAccount;
 use crate::models::account::AccountType;
 use crate::services::access::can_child_view;
 use crate::services::dash;
+use crate::services::segment_ranges::{self, WEBM_CUES_ID};
 use crate::services::segment_store::{self, TeeStream};
 use crate::services::video_cache::VideoCache;
-use crate::services::ytdlp::{ExtractResult, Format};
+use crate::services::ytdlp::{self, ExtractResult, Format};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,10 @@ pub struct StreamResponse {
     /// generate an HMAC signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_proxy_url: Option<String>,
+    /// `true` when the video uses spherical/equirectangular projection
+    /// (360° video). Detected from yt-dlp's `format_note` containing
+    /// `"equi"` or `"hequ"` on video-only formats.
+    pub is_spherical: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,12 +167,26 @@ pub async fn get_stream(
             .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
     };
 
+    // Detect spherical/360° videos. yt-dlp marks equirectangular
+    // formats with "equi" or "hequ" in `format_note`. Check any
+    // video-only format (has vcodec, no acodec).
+    let is_spherical = result.formats.iter().any(|f| {
+        let is_video_only = f.vcodec.as_deref().is_some_and(|v| v != "none")
+            && f.acodec.as_deref().is_none_or(|a| a == "none");
+        is_video_only
+            && f.format_note.as_deref().is_some_and(|n| {
+                let lower = n.to_ascii_lowercase();
+                lower.contains("equi") || lower.contains("hequ")
+            })
+    });
+
     Ok(Json(StreamResponse {
         video_id,
         manifest,
         manifest_type,
         formats,
         audio_proxy_url,
+        is_spherical,
     }))
 }
 
@@ -497,6 +516,20 @@ pub struct FormatQuery {
     pub sig: String,
 }
 
+/// Scan `data` for the WebM Cues element ID (`0x1C53BB6B`).
+/// Returns the byte offset within `data` where it starts, or `None`.
+fn cues_scan_offset(data: &[u8]) -> Option<usize> {
+    if data.len() < 4 {
+        return None;
+    }
+    for i in 1..=(data.len() - 4) {
+        if data[i..i + 4] == WEBM_CUES_ID {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// `GET /api/proxy/format` — proxy a single yt-dlp format URL.
 ///
 /// Used by the synthesized DASH manifest (see [`dash::synthesize_manifest`])
@@ -670,18 +703,210 @@ pub async fn get_format(
         });
     }
 
-    // Determine the absolute byte offset where this stream starts.
-    // Priority: upstream Content-Range header > parsed Range request start.
-    // If neither is available (e.g., suffix range without Content-Range in
-    // response), we can't determine the offset — skip tee-caching.
+    // ---------------------------------------------------------------
+    // WebM Cues auto-correction for index range requests.
+    //
+    // YouTube's innertube API reports a single set of byte ranges per
+    // itag, but dubbed audio tracks (different files sharing the same
+    // itag) may have the Cues element at a different offset. When the
+    // manifest's indexRange is wrong, Shaka's first fetch doesn't
+    // start with the Cues ID and throws WEBM_CUES_ELEMENT_MISSING.
+    //
+    // For small responses (likely init or index, not media segments),
+    // we buffer the body and check. If the bytes should be a Cues
+    // element but aren't, we scan for the Cues ID, shift the byte
+    // window, fetch the missing tail, and serve corrected data. The
+    // correction is persisted to format_box_ranges so the next
+    // manifest request uses correct ranges.
+    // ---------------------------------------------------------------
+    let content_length_hint: usize = upstream_content_length
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let byte_start = parsed_range.map(|(s, _)| s).unwrap_or(0);
+    let byte_end = parsed_range.and_then(|(_, e)| e);
+    let is_small_range = content_length_hint > 0
+        && content_length_hint <= 8192
+        && byte_start > 0
+        && byte_end.is_some();
+
+    if is_small_range {
+        // Buffer the entire small response.
+        let body_bytes = res.bytes().await.map_err(AppError::Http)?;
+
+        if body_bytes.len() >= 4 && body_bytes[0..4] != WEBM_CUES_ID {
+            // Not a Cues element at byte 0 — scan for it.
+            if let Some(offset) = cues_scan_offset(&body_bytes) {
+                let original_start = byte_start;
+                let original_end = byte_end.unwrap();
+                let new_start = original_start + offset as u64;
+                let new_end = original_end + offset as u64;
+
+                tracing::info!(
+                    video_id = %q.video_id,
+                    format = %q.format,
+                    original_start,
+                    new_start,
+                    offset,
+                    "proxy: Cues auto-correction applied"
+                );
+
+                // Build corrected bytes: drop leading junk, fetch tail.
+                let mut corrected = body_bytes[offset..].to_vec();
+                if new_end > original_end {
+                    let tail_start = original_end + 1;
+                    let tail_end = new_end;
+                    let tail_range = format!("bytes={tail_start}-{tail_end}");
+                    if let Ok(tail_resp) = state
+                        .http_client
+                        .get(&url)
+                        .header(header::RANGE, &tail_range)
+                        .send()
+                        .await
+                    {
+                        if tail_resp.status().is_success() {
+                            if let Ok(tail) = tail_resp.bytes().await {
+                                corrected.extend_from_slice(&tail);
+                            }
+                        }
+                    }
+                }
+
+                // Persist corrected ranges in background.
+                {
+                    let pool = state.db.clone();
+                    let vid = q.video_id.clone();
+                    let fmt = q.format.clone();
+                    let init_end = new_start - 1;
+                    let idx_end = if corrected.len() >= 8 {
+                        ytdlp::read_ebml_vint_pub(&corrected, 4)
+                            .map(|(sw, sv)| new_start + 4 + sw as u64 + sv - 1)
+                            .unwrap_or(new_end)
+                    } else {
+                        new_end
+                    };
+                    tokio::spawn(async move {
+                        use crate::services::segment_ranges::{self, BoxRanges, ByteRange};
+                        let br = BoxRanges {
+                            init: ByteRange {
+                                start: 0,
+                                end: init_end,
+                            },
+                            index: ByteRange {
+                                start: new_start,
+                                end: idx_end,
+                            },
+                        };
+                        segment_ranges::store(&pool, &vid, &fmt, br).await;
+                    });
+                }
+
+                // Serve corrected bytes. Content-Range reflects the
+                // actual byte range served (original_start through
+                // original_start + content_length - 1) so the client
+                // sees a consistent Content-Length / Content-Range pair.
+                let content_length = corrected.len();
+                let actual_end = original_start + content_length as u64 - 1;
+                let mut response = Response::new(Body::from(corrected));
+                *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+                let h = response.headers_mut();
+                h.insert(
+                    header::CONTENT_TYPE,
+                    "application/octet-stream".parse().unwrap(),
+                );
+                h.insert(header::CONTENT_LENGTH, content_length.into());
+                let range_str = match effective_total {
+                    Some(total) => format!("bytes {}-{}/{}", original_start, actual_end, total),
+                    None => format!("bytes {}-{}/*", original_start, actual_end),
+                };
+                h.insert(header::CONTENT_RANGE, range_str.parse().unwrap());
+                h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+                return Ok(response);
+            }
+        }
+
+        // No correction needed — serve buffered bytes as-is.
+        let content_length = body_bytes.len();
+        let mut response = Response::new(Body::from(body_bytes));
+        *response.status_mut() = status;
+        let h = response.headers_mut();
+        h.insert(header::CONTENT_TYPE, upstream_content_type.parse().unwrap());
+        h.insert(header::CONTENT_LENGTH, content_length.into());
+        if let Some(rng) = upstream_content_range {
+            if let Ok(v) = rng.parse() {
+                h.insert(header::CONTENT_RANGE, v);
+            }
+        }
+        h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        return Ok(response);
+    }
+
+    // ---------------------------------------------------------------
+    // Init segment extension: if we have a corrected init_end in the
+    // DB that's larger than what the manifest declared, re-fetch with
+    // the extended range so MSE gets a complete init segment.
+    // ---------------------------------------------------------------
+    if let (0, Some(requested_end)) = (byte_start, byte_end) {
+        if let Some(stored) = segment_ranges::lookup(&state.db, &q.video_id, &q.format).await {
+            if stored.init.end > requested_end {
+                tracing::info!(
+                    video_id = %q.video_id,
+                    format = %q.format,
+                    requested_end,
+                    corrected_end = stored.init.end,
+                    "proxy: extending init range"
+                );
+                let extended_range = format!("bytes=0-{}", stored.init.end);
+                let ext_resp = state
+                    .http_client
+                    .get(&url)
+                    .header(header::RANGE, &extended_range)
+                    .send()
+                    .await
+                    .map_err(AppError::Http)?;
+                let ext_status = ext_resp.status();
+                let ext_bytes = ext_resp.bytes().await.map_err(AppError::Http)?;
+                if !ext_status.is_success() {
+                    // Extended fetch failed (403, 404, etc.) — serve
+                    // the error body through so the client sees it.
+                    tracing::warn!(
+                        video_id = %q.video_id,
+                        format = %q.format,
+                        status = %ext_status,
+                        "proxy: extended init fetch failed"
+                    );
+                    let mut response = Response::new(Body::from(ext_bytes));
+                    *response.status_mut() = ext_status;
+                    return Ok(response);
+                }
+                let content_length = ext_bytes.len();
+                let mut response = Response::new(Body::from(ext_bytes));
+                *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+                let h = response.headers_mut();
+                h.insert(
+                    header::CONTENT_TYPE,
+                    "application/octet-stream".parse().unwrap(),
+                );
+                h.insert(header::CONTENT_LENGTH, content_length.into());
+                let range_str = match effective_total {
+                    Some(total) => format!("bytes 0-{}/{}", stored.init.end, total),
+                    None => format!("bytes 0-{}/*", stored.init.end),
+                };
+                h.insert(header::CONTENT_RANGE, range_str.parse().unwrap());
+                h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+                return Ok(response);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Standard path: stream the upstream response with tee-caching.
+    // ---------------------------------------------------------------
     let stream_start: Option<u64> = upstream_content_range
         .as_deref()
         .and_then(parse_content_range_start)
         .or_else(|| parsed_range.map(|(s, _)| s));
 
-    // Wrap the upstream stream in TeeStream for caching, but only if we
-    // can determine the stream's absolute position. Without it, we'd
-    // cache bytes at wrong offsets and corrupt the cache.
     let raw_stream = res.bytes_stream().map_err(std::io::Error::other);
     let body = if let Some(start) = stream_start {
         let tee = TeeStream::new(
@@ -695,12 +920,7 @@ pub async fn get_format(
         );
         Body::from_stream(tee)
     } else {
-        // Unknown offset (e.g., full-file request or suffix range without
-        // Content-Range) — stream through without caching. For full-file
-        // requests (no Range header at all) where status is 200, the
-        // stream starts at byte 0.
         if !range_header.as_ref().is_some_and(|r| r.contains('=')) || status == StatusCode::OK {
-            // Full-file response — start at 0.
             let tee = TeeStream::new(
                 Box::pin(raw_stream),
                 state.db.clone(),
@@ -712,7 +932,6 @@ pub async fn get_format(
             );
             Body::from_stream(tee)
         } else {
-            // Suffix range or other unusual case — don't cache.
             Body::from_stream(raw_stream)
         }
     };
@@ -902,16 +1121,18 @@ async fn resolve_segment_ranges(
 
     let mut out: std::collections::HashMap<String, BoxRanges> = std::collections::HashMap::new();
 
-    // Step 1: Convert itag-keyed segment_ranges to format_id-keyed map.
-    // A format_id like "303-dashy" shares itag 303 with "303". We
-    // parse the leading integer itag from each format_id.
+    // Step 1: Resolve box ranges for each format. The fixup probe in
+    // ytdlp.rs may have populated `format_box_ranges` per-format_id
+    // (different language variants are different files with different
+    // Cues offsets); prefer that map. Fall back to the itag-keyed
+    // `segment_ranges` from innertube when no per-format override
+    // exists.
     for f in &result.formats {
-        let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
-            continue;
-        };
-        let Some(sr) = result.segment_ranges.get(&itag) else {
-            continue;
-        };
+        let sr_opt = result.format_box_ranges.get(&f.format_id).or_else(|| {
+            parse_itag_from_format_id(&f.format_id)
+                .and_then(|itag| result.segment_ranges.get(&itag))
+        });
+        let Some(sr) = sr_opt else { continue };
         let br = BoxRanges {
             init: ByteRange {
                 start: sr.init_start,
@@ -942,17 +1163,21 @@ async fn resolve_segment_ranges(
         out.extend(cached);
     }
 
-    // Step 3: Persist only newly-resolved ranges (from Step 1) that
-    // weren't already in the DB (from Step 2). This avoids redundant
-    // INSERT OR REPLACE writes on warm-cache manifest loads.
+    // Step 3: Persist newly-resolved ranges from Step 1 (whether they
+    // came from format_box_ranges overrides or itag-keyed
+    // segment_ranges). The DB cache is per-format_id and outlives the
+    // in-memory extraction result.
     let new_from_innertube: Vec<(String, BoxRanges)> = result
         .formats
         .iter()
         .filter_map(|f| {
-            let itag = parse_itag_from_format_id(&f.format_id)?;
-            result.segment_ranges.get(&itag)?;
-            // Only persist if this format_id wasn't already served by
-            // the DB lookup in Step 2 (i.e. it came from segment_ranges).
+            let has_override = result.format_box_ranges.contains_key(&f.format_id);
+            let has_itag_range = parse_itag_from_format_id(&f.format_id)
+                .and_then(|itag| result.segment_ranges.get(&itag))
+                .is_some();
+            if !has_override && !has_itag_range {
+                return None;
+            }
             out.get(&f.format_id)
                 .copied()
                 .map(|br| (f.format_id.clone(), br))
@@ -1038,6 +1263,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1073,6 +1299,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1095,6 +1322,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(pick_thumbnail(&result), None);
     }
