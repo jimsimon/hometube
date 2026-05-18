@@ -95,12 +95,3 @@ If a migration breaks something, the recovery path is:
 
 This is the same reason ZFS snapshots before upgrades are worth the discipline — they give you instant atomic rollback for free.
 
-## Reverse proxies / HTTPS
-
-The app speaks plain HTTP on its container port. Put it behind nginx, Caddy, Traefik, or your reverse proxy of choice and let that proxy terminate TLS. Pass the `Host` header through unchanged.
-
-## Resource sizing
-
-A family of three browsing 1080p with the 50 GB segment cache uses around 1 GB of RAM under load and a few GB of CPU-seconds per hour. SQLite plus the cache dominates disk usage — size the data dataset to your `cache_max_size` plus a few hundred MB of headroom.
-
-The sidecars are tiny: ~50 MB RAM each at idle, more under search load.
