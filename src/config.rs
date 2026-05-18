@@ -46,7 +46,11 @@ impl Config {
         let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "./data/cache".to_string());
 
         // Ensure the persistent-state directories exist before any
-        // consumer (SQLite, segment store, yt-dlp cookies writer) tries
+        // Ensure the persistent-state directories exist before any
+        // consumer (SQLite, segment store) tries to open files inside
+        // them. Each subtree is independent — operators may mount them
+        // on entirely separate filesystems. The tools directory is
+        // created lazily by its writers (cookies, yt-dlp binary).
         // to open files inside them. Each subtree is independent —
         // operators may mount them on entirely separate filesystems.
         if let Some(parent) = std::path::Path::new(&database_path).parent() {
