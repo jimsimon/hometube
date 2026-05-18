@@ -50,18 +50,46 @@ FROM debian:bookworm-slim AS runtime
 
 # Runtime dependencies:
 #   - ca-certificates: for HTTPS to Google + googlevideo.com
-#   - curl          : healthcheck + yt-dlp download below
+#   - curl          : healthcheck + yt-dlp + deno downloads below
 #   - python3       : yt-dlp's runtime requirement (single-binary works
 #                     in many cases but a Python interpreter is the
 #                     supported fallback)
-#   - nodejs        : JS runtime for yt-dlp's YouTube signature cipher
-#                     decoding (passed via --js-runtimes node). Adds
-#                     roughly 60 MB to the runtime image; we use the
-#                     bookworm-packaged Node 18 (no npm) rather than a
-#                     NodeSource build to minimise the size hit.
+#   - unzip         : extracting the bgutil PO token plugin + deno zip
+#
+# Note: bookworm ships nodejs 18.x, which is below yt-dlp's minimum of
+# Node 20 for the `[jsc]` challenge framework. We install Deno instead
+# (yt-dlp's recommended runtime, enabled by default in the extractor).
+# See https://github.com/yt-dlp/yt-dlp/wiki/EJS for the full matrix of
+# supported runtimes and minimum versions.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno — yt-dlp's recommended JS runtime for solving YouTube's
+# n-parameter and signature challenges (via the bundled yt-dlp-ejs
+# component). Without a supported runtime, yt-dlp prunes every
+# signature-ciphered DASH format and bails out with
+#   "Requested format is not available".
+#
+# We grab the pre-built `deno` binary directly from the official
+# release zip (no `denort` — the slim runtime variant won't suffice).
+# Pinned via DENO_VERSION below so image rebuilds are deterministic; bump
+# this with conscious intent and verify against
+# https://github.com/denoland/deno/releases.
+ARG DENO_VERSION=v2.5.4
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "${ARCH}" in \
+         amd64) DENO_TARGET="x86_64-unknown-linux-gnu" ;; \
+         arm64) DENO_TARGET="aarch64-unknown-linux-gnu" ;; \
+         *) echo "Unsupported arch for Deno: ${ARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL \
+        "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/deno-${DENO_TARGET}.zip" \
+        -o /tmp/deno.zip \
+    && unzip -o /tmp/deno.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && deno --version
 
 # Copy the built binary and static assets.
 COPY --from=backend /app/target/release/hometube /usr/local/bin/hometube
