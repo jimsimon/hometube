@@ -93,35 +93,6 @@ impl VideoCache {
             },
         );
 
-        // Background: probe dubbed audio Cues positions and persist
-        // to DB. The next manifest request picks up the results via
-        // resolve_segment_ranges → lookup_all. This avoids blocking
-        // initial playback for videos with many dubbed languages.
-        {
-            let result_clone = result.clone();
-            let pool_clone = pool.clone();
-            let vid = video_id.to_string();
-            tokio::spawn(async move {
-                let discovered = ytdlp::probe_missing_audio_ranges(&result_clone).await;
-                if discovered.is_empty() {
-                    return;
-                }
-                tracing::info!(
-                    video_id = %vid,
-                    count = discovered.len(),
-                    "background dub probe complete, persisting ranges"
-                );
-                for (format_id, sr) in discovered {
-                    use crate::services::segment_ranges::{self, BoxRanges, ByteRange};
-                    let br = BoxRanges {
-                        init: ByteRange { start: sr.init_start, end: sr.init_end },
-                        index: ByteRange { start: sr.index_start, end: sr.index_end },
-                    };
-                    segment_ranges::store(&pool_clone, &vid, &format_id, br).await;
-                }
-            });
-        }
-
         Ok(result)
     }
 }

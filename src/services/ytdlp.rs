@@ -291,12 +291,9 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // first 64 bytes of each index range and adjust if needed.
     fixup_webm_cues_offsets(&mut result).await;
 
-    // NOTE: probe_missing_audio_ranges is NOT called here on the
-    // critical path. It runs as a background task after the extraction
-    // result is cached (see video_cache.rs). This avoids blocking the
-    // first page load for videos with many dubbed audio languages.
-    // The dub ranges appear in the manifest after the background probe
-    // completes (typically within a few seconds).
+    // Dub audio Cues discovery is handled lazily by the proxy's
+    // auto-correction (see get_format in routes/videos.rs) — no
+    // CDN probes needed here.
 
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
@@ -685,22 +682,6 @@ fn find_cues_offset(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Find the *last* occurrence of the Cues element ID in `data`.
-/// The SeekHead near the start of a WebM file also contains the Cues
-/// ID as data within a SeekID sub-element — using the last occurrence
-/// skips that false positive.
-fn find_last_cues_offset(data: &[u8]) -> Option<usize> {
-    if data.len() < 4 {
-        return None;
-    }
-    let mut last = None;
-    for i in 0..=(data.len() - 4) {
-        if data[i..i + 4] == WEBM_CUES_ID {
-            last = Some(i);
-        }
-    }
-    last
-}
 
 /// Read an EBML variable-width integer (VINT) at `offset` in `data`.
 /// Returns `(width, value)` or `None` if the data is too short.
@@ -729,163 +710,6 @@ pub fn read_ebml_vint_pub(data: &[u8], offset: usize) -> Option<(usize, u64)> {
     read_ebml_vint(data, offset)
 }
 
-
-/// For opus audio formats that have no innertube segment_ranges, probe
-/// the file header to find the Cues element and populate ranges.
-///
-/// YouTube's innertube `/player` API sometimes omits `indexRange` for
-/// audio formats. Without ranges, the DASH manifest can't emit
-/// `<SegmentBase>` and the format is excluded. This function fills the
-/// gap by fetching the first ~1 KiB of each audio URL and scanning
-/// for the Cues element.
-/// Probe audio formats that lack `format_box_ranges` entries.
-/// Returns a map of `format_id → SegmentRanges` for any formats
-/// whose Cues element was successfully discovered.
-///
-/// Called as a background task after extraction — the results are
-/// persisted to the `format_box_ranges` DB table so the next manifest
-/// request picks them up.
-pub async fn probe_missing_audio_ranges(result: &ExtractResult) -> std::collections::HashMap<String, SegmentRanges> {
-    use futures_util::stream::{self, StreamExt};
-
-    // Probe each unique audio URL that still lacks format_box_ranges.
-    // This covers two cases:
-    //   1. Formats whose itag has no innertube ranges at all.
-    //   2. Author-uploaded language dubs that share an itag with the
-    //      original but have different file layouts (Cues at different
-    //      offsets). The fixup pass probed using the original's
-    //      index_start and failed to find Cues for these dubs.
-    //
-    // To avoid excessive CDN requests (which could trigger bot
-    // detection), we only probe ONE format per (language, URL) pair.
-    // The manifest's `trim_audio_representations` picks one format per
-    // language anyway, so probing all quality tiers would be wasted
-    // requests. Other format_ids that share the same URL inherit the
-    // discovered ranges.
-    let mut url_to_formats: std::collections::HashMap<
-        String,
-        Vec<String>,
-    > = std::collections::HashMap::new();
-    // Track which languages we've already queued a probe for, so we
-    // only probe one quality tier per language.
-    let mut probed_langs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for f in result
-        .formats
-        .iter()
-        .filter(|f| !is_drc(f))
-    {
-        let acodec = f.acodec.as_deref().unwrap_or("none");
-        let vcodec = f.vcodec.as_deref().unwrap_or("none");
-        if !acodec.starts_with("opus") || vcodec != "none" {
-            continue;
-        }
-        let Some(url) = f.url.as_ref() else { continue };
-        if result.format_box_ranges.contains_key(&f.format_id) {
-            continue;
-        }
-        // One probe per language — the first format_id encountered
-        // for each language wins. Other quality tiers of the same
-        // language are different files and would need separate probes,
-        // but the manifest only uses one format per language.
-        let lang = f.language.clone().unwrap_or_default();
-        if !probed_langs.insert(lang) {
-            continue;
-        }
-        url_to_formats
-            .entry(url.clone())
-            .or_default()
-            .push(f.format_id.clone());
-    }
-
-    if url_to_formats.is_empty() {
-        return std::collections::HashMap::new();
-    }
-
-    tracing::info!(
-        count = url_to_formats.len(),
-        "probing dub audio URLs in background"
-    );
-
-    let client = reqwest::Client::new();
-
-    let probes: Vec<(String, Vec<String>)> = url_to_formats.into_iter().collect();
-
-    let discovered: Vec<(Vec<String>, Option<SegmentRanges>)> = stream::iter(probes)
-        .map(|(url, format_ids)| {
-            let client = &client;
-            async move {
-                // Fetch the first 1024 bytes of the file.
-                let resp = match client
-                    .get(&url)
-                    .header(reqwest::header::RANGE, "bytes=0-1023")
-                    .send()
-                    .await
-                {
-                    Ok(r) if r.status().is_success() => r,
-                    _ => return (format_ids, None),
-                };
-                let bytes = match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(_) => return (format_ids, None),
-                };
-
-                // Find the actual Cues element (use last occurrence to
-                // skip the SeekHead's SeekID reference).
-                let cues_pos = match find_last_cues_offset(&bytes) {
-                    Some(pos) => pos,
-                    None => {
-                        tracing::debug!(
-                            format_ids = ?format_ids,
-                            "Cues not found in first 1024 bytes"
-                        );
-                        return (format_ids, None);
-                    }
-                };
-
-                // Read the Cues element size to determine index_end.
-                let (size_width, cues_data_size) =
-                    match read_ebml_vint(&bytes, cues_pos + 4) {
-                        Some(v) => v,
-                        None => return (format_ids, None),
-                    };
-
-                let index_start = cues_pos as u64;
-                let index_end = index_start + 4 + size_width as u64 + cues_data_size - 1;
-                let init_end = index_start - 1;
-
-                tracing::info!(
-                    format_ids = ?format_ids,
-                    index_start,
-                    index_end,
-                    init_end,
-                    "probed audio Cues position"
-                );
-
-                (
-                    format_ids,
-                    Some(SegmentRanges {
-                        init_start: 0,
-                        init_end,
-                        index_start,
-                        index_end,
-                    }),
-                )
-            }
-        })
-        .buffer_unordered(4)
-        .collect()
-        .await;
-
-    let mut out = std::collections::HashMap::new();
-    for (format_ids, ranges) in discovered {
-        if let Some(sr) = ranges {
-            for format_id in format_ids {
-                out.insert(format_id, sr);
-            }
-        }
-    }
-    out
-}
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
 /// single language and return the resulting WebVTT body.
