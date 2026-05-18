@@ -1,0 +1,89 @@
+# HomeTube — TrueNAS Scale (ElectricEel 24.10+) compose stack.
+#
+# Differences from docker-compose.yml (the local-dev file):
+#   - Pulls pre-built images from a registry instead of `build:`.
+#     TrueNAS Scale does not build images; CI must publish them.
+#   - Uses host bind mounts on a TrueNAS dataset instead of a named
+#     volume so snapshots/replication/backup work the TrueNAS way.
+#   - Runs containers as the `apps` user (UID/GID 568 by default) to
+#     match TrueNAS's app sandbox model and avoid root-owned files on
+#     the bind mount.
+#   - All services default to `:latest` for ease of homelab use;
+#     override HOMETUBE_VERSION to pin a specific build when you want
+#     deliberate upgrades instead of recreate-time drift.
+#   - Host port and data path are env-overridable so the same file
+#     works across deployments without edits.
+#
+# Deployment:
+#   1. Create a dataset on your pool, e.g. tank/apps/hometube/data,
+#      chown'd to 568:568.
+#   2. In the TrueNAS UI: Apps → Discover Apps → Custom App → paste
+#      this YAML. Set HOMETUBE_VERSION, HOMETUBE_PORT, HOMETUBE_DATA
+#      as needed (defaults below).
+#
+# Required env vars (set in the Custom App UI or a .env file):
+#   HOMETUBE_REGISTRY  — registry/namespace prefix, e.g. ghcr.io/yourname
+#   HOMETUBE_VERSION   — image tag for the hometube + discovery images
+#   HOMETUBE_PORT      — host port to expose the web UI on (default 30000)
+#   HOMETUBE_DATA      — host path for persistent data (REQUIRED, no default)
+#   HOMETUBE_UID/GID   — runtime user (default 568:568, TrueNAS `apps`)
+
+services:
+  app:
+    image: ${HOMETUBE_REGISTRY:-ghcr.io/jimsimon}/hometube:${HOMETUBE_VERSION:-latest}
+    user: "${HOMETUBE_UID:-568}:${HOMETUBE_GID:-568}"
+    ports:
+      - "${HOMETUBE_PORT:-30000}:3000"
+    volumes:
+      - ${HOMETUBE_DATA:-REPLACE_ME}:/app/data
+    environment:
+      DISCOVERY_SIDECAR_URL: http://discovery:3000
+      POT_SERVER_URL: http://pot-server:4416
+    depends_on:
+      discovery:
+        condition: service_healthy
+      pot-server:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # YouTube content discovery sidecar — youtubei.js (InnerTube API).
+  # Not exposed to the host; only reachable by `app` on the internal
+  # Docker network at discovery:3000.
+  discovery:
+    image: ${HOMETUBE_REGISTRY:-ghcr.io/jimsimon}/hometube-discovery:${HOMETUBE_VERSION:-latest}
+    # Override the image's baked-in `node` user (UID 1000) so files
+    # written by the container — should there ever be any — match the
+    # TrueNAS apps user.
+    user: "${HOMETUBE_UID:-568}:${HOMETUBE_GID:-568}"
+    # Run tini as PID 1 so Node receives SIGTERM cleanly on restart.
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # PO (Proof-of-Origin) token server. Upstream image; pin a real tag
+  # and bump deliberately rather than tracking `:latest`. Check
+  # https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
+  # for the current release.
+  pot-server:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+    # The bgutil image is Node-Alpine-based and exposes /ping on 4416.
+    # If a future upstream rebuild drops busybox `wget`, remove this
+    # block and fall back to `condition: service_started` in `app`.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4416/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

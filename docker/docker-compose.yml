@@ -40,6 +40,9 @@ services:
     image: hometube-discovery:local
     # No ports exposed to host — only reachable by the app container
     # via Docker's internal network at discovery:3000.
+    # Node as PID 1 doesn't reap zombies or handle SIGTERM cleanly;
+    # `init: true` runs tini in front of it.
+    init: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
