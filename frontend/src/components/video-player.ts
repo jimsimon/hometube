@@ -429,8 +429,12 @@ export class VideoPlayer extends LitElement {
     // Default audio language to English. Shaka picks any AdaptationSet
     // whose `lang` attribute starts with "en" (e.g. "en", "en-US",
     // "en-GB"). Users can switch via the language button in the
-    // overflow menu for non-English content.
-    player.configure("preferredAudioLanguage", "en");
+    // overflow menu when multiple languages are present.
+    //
+    // Shaka v5 replaced the flat `preferredAudioLanguage` string with
+    // a `preferredAudio` object that bundles language, role, channel
+    // count, label, etc.
+    player.configure("preferredAudio", { language: "en" });
 
     // Apply quality cap if set.
     if (this.settings?.max_quality) {
@@ -499,7 +503,8 @@ export class VideoPlayer extends LitElement {
         await player.addTextTrackAsync(
           trackUrl,
           t.lang,
-          "subtitle",
+          // W3C TextTrackKind: "subtitles" or "captions" (NOT "subtitle").
+          t.auto_generated ? "captions" : "subtitles",
           "text/vtt",
           undefined,
           t.auto_generated ? `${t.lang} (auto)` : t.lang,
