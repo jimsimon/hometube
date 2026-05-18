@@ -148,20 +148,86 @@ function readEbmlVint(
   return [width, value];
 }
 
+/** Projection metadata extracted from a WebM init segment. */
+interface ProjectionInfo {
+  /** ProjectionType: 0=rect, 1=equirectangular, 2=cubemap, 3=equi+bounds. */
+  type: number;
+  /** ProjectionPoseYaw in degrees (IEEE 754 float). */
+  yaw: number;
+  /** ProjectionPosePitch in degrees (IEEE 754 float). */
+  pitch: number;
+  /** ProjectionPoseRoll in degrees (IEEE 754 float). */
+  roll: number;
+}
+
 /**
- * Scan `buf` for a WebM Projection master element (ID 0x7670) and
- * overwrite it byte-for-byte with a Void element (ID 0xEC). Both element
- * IDs are valid at any position; the Tracks/TrackEntry/Video parent
- * size fields remain correct because the total byte count is preserved.
- *
- * Returns `true` if a Projection element was found and rewritten.
- *
- * The function only rewrites when the bytes immediately following the
- * size VINT look like a real Projection content (`0x7671` ProjectionType
- * as the first child) — this avoids false positives on random 0x76 0x70
- * byte pairs inside binary data (CodecPrivate, etc.).
+ * Read a 32-bit big-endian IEEE 754 float from `buf` at `offset`.
  */
-function rewriteWebmProjectionToVoid(buf: Uint8Array): boolean {
+function readFloat32BE(buf: Uint8Array, offset: number): number {
+  if (offset + 4 > buf.length) return 0;
+  const dv = new DataView(buf.buffer, buf.byteOffset + offset, 4);
+  return dv.getFloat32(0, false);
+}
+
+// WebM Projection sub-element IDs (2-byte VINT each):
+//   ProjectionType       0x7671
+//   ProjectionPrivate    0x7672
+//   ProjectionPoseYaw    0x7673
+//   ProjectionPosePitch  0x7674
+//   ProjectionPoseRoll   0x7675
+
+/**
+ * Parse the children of a Projection master element starting at
+ * `dataStart` with `dataLen` bytes. Extracts type and pose values.
+ */
+function parseProjectionChildren(
+  buf: Uint8Array,
+  dataStart: number,
+  dataLen: number,
+): ProjectionInfo {
+  const info: ProjectionInfo = { type: 1, yaw: 0, pitch: 0, roll: 0 };
+  let pos = dataStart;
+  const end = dataStart + dataLen;
+  while (pos < end) {
+    // Read element ID (2-byte for 0x76XX sub-elements).
+    if (pos + 2 > end) break;
+    const idHi = buf[pos];
+    const idLo = buf[pos + 1];
+    pos += 2;
+    // Read size VINT.
+    const sizeRead = readEbmlVint(buf, pos);
+    if (!sizeRead) break;
+    const [sw, sv] = sizeRead;
+    pos += sw;
+    if (pos + sv > end) break;
+    if (idHi === 0x76) {
+      if (idLo === 0x71) {
+        // ProjectionType — unsigned integer (1 byte for typical values).
+        info.type = sv === 1 ? buf[pos] : 0;
+      } else if (idLo === 0x73 && sv === 4) {
+        info.yaw = readFloat32BE(buf, pos);
+      } else if (idLo === 0x74 && sv === 4) {
+        info.pitch = readFloat32BE(buf, pos);
+      } else if (idLo === 0x75 && sv === 4) {
+        info.roll = readFloat32BE(buf, pos);
+      }
+    }
+    pos += sv;
+  }
+  return info;
+}
+
+/**
+ * Scan `buf` for a WebM Projection master element (ID 0x7670).
+ * If found:
+ * 1. Extract projection metadata (type, pose yaw/pitch/roll).
+ * 2. Overwrite the element byte-for-byte with a Void element (0xEC)
+ *    so parent size fields stay correct and MSE ignores it.
+ *
+ * Returns the extracted `ProjectionInfo` if a Projection element was
+ * found and rewritten, or `null` if none was found.
+ */
+function extractAndStripProjection(buf: Uint8Array): ProjectionInfo | null {
   for (let i = 0; i + 4 < buf.length; i++) {
     if (buf[i] !== 0x76 || buf[i + 1] !== 0x70) continue;
     const sizeRead = readEbmlVint(buf, i + 2);
@@ -171,29 +237,22 @@ function rewriteWebmProjectionToVoid(buf: Uint8Array): boolean {
     if (i + total > buf.length) continue;
     // First child should be ProjectionType (0x7671).
     const childOffset = i + 2 + sizeWidth;
-    if (
-      buf[childOffset] !== 0x76 ||
-      buf[childOffset + 1] !== 0x71
-    ) {
+    if (buf[childOffset] !== 0x76 || buf[childOffset + 1] !== 0x71) {
       continue;
     }
-    // Rewrite as Void: 0xEC + 1-byte VINT size + (total - 2) zero bytes.
-    // Void element data length = total - 2 (1 byte ID, 1 byte size).
-    // 1-byte VINT can encode sizes up to 126; Projection in WebM is
-    // typically <60 bytes, so this always fits.
+    // Extract metadata before stripping.
+    const info = parseProjectionChildren(buf, childOffset, sizeValue);
+    // Rewrite as Void: 0xEC + 1-byte VINT size + zero padding.
     const voidDataLen = total - 2;
-    if (voidDataLen > 126) {
-      // Would need a wider size VINT to stay byte-equivalent. Bail.
-      continue;
-    }
+    if (voidDataLen > 126) continue;
     buf[i] = 0xec;
     buf[i + 1] = 0x80 | voidDataLen;
     for (let j = i + 2; j < i + total; j++) {
       buf[j] = 0;
     }
-    return true;
+    return info;
   }
-  return false;
+  return null;
 }
 
 @customElement("hometube-video-player")
@@ -242,6 +301,10 @@ export class VideoPlayer extends LitElement {
   private player: ShakaPlayer | null = null;
   /** shaka.ui.Overlay instance (manages the control bar). */
   private ui: ShakaUI | null = null;
+  /** Spherical (360°) renderer instance — created lazily for VR videos. */
+  private sphericalRenderer: { destroy(): void; resize(): void } | null = null;
+  /** Projection pose extracted from the first WebM init segment. */
+  private projectionInfo: ProjectionInfo | null = null;
 
   static styles = [
     css`
@@ -267,6 +330,24 @@ export class VideoPlayer extends LitElement {
         width: 100%;
         height: 100%;
         object-fit: contain;
+      }
+      /* 360° spherical canvas overlays the video surface. Shaka's
+         controls (z-indexed higher) remain clickable on top. */
+      .spherical-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        cursor: grab;
+      }
+      .spherical-canvas:active {
+        cursor: grabbing;
+      }
+      /* When the spherical canvas is active, hide the flat <video>. */
+      :host([data-spherical]) .shaka-container video {
+        opacity: 0;
+        pointer-events: none;
       }
       /* Caption styling. Shaka uses native <track> / ::cue rendering
          via NativeTextDisplayer. The ::cue pseudo-element controls how
@@ -503,11 +584,9 @@ export class VideoPlayer extends LitElement {
     // YouTube serves 360°/VR videos as WebM with a `Projection` master
     // element inside the Video track. Chromium's MSE VP9 path rejects
     // those init segments (MEDIA_SOURCE_OPERATION_FAILED, error 3014).
-    // We overwrite the Projection element byte-for-byte with a WebM Void
-    // element (ID 0xEC) of identical size. MSE ignores Void entirely, so
-    // the surrounding Tracks/TrackEntry/Video size fields stay correct.
-    // The video then plays as a flat equirectangular image (we lose VR
-    // remapping, but Chromium wouldn't do VR remapping anyway).
+    // Before stripping, we extract the projection metadata (type, pose
+    // yaw/pitch/roll) so the spherical renderer can use it for the
+    // initial camera direction.
     (player.getNetworkingEngine() as any).registerResponseFilter(
       (type: number, response: { data: ArrayBuffer | Uint8Array }) => {
         // SEGMENT == 1 in Shaka; init segments are fetched as SEGMENT.
@@ -525,9 +604,19 @@ export class VideoPlayer extends LitElement {
         ) {
           return;
         }
-        if (rewriteWebmProjectionToVoid(u8)) {
+        const info = extractAndStripProjection(u8);
+        if (info) {
+          // Keep the first extraction (each quality has the same pose).
+          if (!this.projectionInfo) {
+            this.projectionInfo = info;
+          }
           // eslint-disable-next-line no-console
-          console.info("[video-player] neutralized WebM Projection element");
+          console.info(
+            "[video-player] neutralized Projection, pose:",
+            info.yaw,
+            info.pitch,
+            info.roll,
+          );
         }
       },
     );
@@ -646,6 +735,11 @@ export class VideoPlayer extends LitElement {
       this.videoEl.playbackRate = 1;
     }
 
+    // Activate 360° spherical renderer for VR videos.
+    if (this.stream?.is_spherical && !this.audioOnly) {
+      this.activateSphericalRenderer();
+    }
+
     // Autoplay: attempt to start playback immediately. If the browser
     // blocks it (autoplay policy requires user gesture for unmuted
     // video), silently fall back to paused — the kid taps play.
@@ -657,6 +751,12 @@ export class VideoPlayer extends LitElement {
   }
 
   private async destroyPlayer(): Promise<void> {
+    if (this.sphericalRenderer) {
+      this.sphericalRenderer.destroy();
+      this.sphericalRenderer = null;
+      this.removeAttribute("data-spherical");
+    }
+    this.projectionInfo = null;
     if (this.videoEl) {
       this.videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
       this.videoEl.removeEventListener("play", this.onPlay);
@@ -676,6 +776,39 @@ export class VideoPlayer extends LitElement {
         // Ignore errors during teardown.
       }
       this.player = null;
+    }
+  }
+
+  /**
+   * Lazy-load the Three.js spherical renderer and overlay a `<canvas>`
+   * on top of the video element. Only called for 360° videos.
+   */
+  private async activateSphericalRenderer(): Promise<void> {
+    try {
+      const { createSphericalRenderer } = await import("./spherical-renderer.js");
+      // Create a canvas inside the shaka container, between the video
+      // and the Shaka UI controls overlay.
+      const canvas = document.createElement("canvas");
+      canvas.className = "spherical-canvas";
+      // Insert canvas right after the <video> element so Shaka's
+      // control overlay (appended later) sits on top.
+      this.videoEl.insertAdjacentElement("afterend", canvas);
+
+      const pose = this.projectionInfo;
+      this.sphericalRenderer = createSphericalRenderer({
+        video: this.videoEl,
+        canvas,
+        // Shaka's control overlay sits above the canvas in z-order,
+        // so pointer events must be captured on the container instead.
+        dragTarget: this.containerEl,
+        initialYaw: pose?.yaw ?? 0,
+        initialPitch: pose?.pitch ?? 0,
+      });
+      // Set host attribute so CSS can hide the flat <video>.
+      this.setAttribute("data-spherical", "");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[video-player] failed to load spherical renderer:", err);
     }
   }
 

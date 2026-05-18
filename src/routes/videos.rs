@@ -71,6 +71,10 @@ pub struct StreamResponse {
     /// generate an HMAC signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_proxy_url: Option<String>,
+    /// `true` when the video uses spherical/equirectangular projection
+    /// (360° video). Detected from yt-dlp's `format_note` containing
+    /// `"equi"` or `"hequ"` on video-only formats.
+    pub is_spherical: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,12 +166,31 @@ pub async fn get_stream(
             .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
     };
 
+    // Detect spherical/360° videos. yt-dlp marks equirectangular
+    // formats with "equi" or "hequ" in `format_note`. Check any
+    // video-only format (has vcodec, no acodec).
+    let is_spherical = result.formats.iter().any(|f| {
+        let is_video_only = f
+            .vcodec
+            .as_deref()
+            .is_some_and(|v| v != "none")
+            && f.acodec.as_deref().is_none_or(|a| a == "none");
+        is_video_only
+            && f.format_note
+                .as_deref()
+                .is_some_and(|n| {
+                    let lower = n.to_ascii_lowercase();
+                    lower.contains("equi") || lower.contains("hequ")
+                })
+    });
+
     Ok(Json(StreamResponse {
         video_id,
         manifest,
         manifest_type,
         formats,
         audio_proxy_url,
+        is_spherical,
     }))
 }
 
