@@ -272,7 +272,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract metadata (backend)
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -281,7 +281,8 @@ jobs:
             type=raw,value=latest
             type=sha,format=long
 
-      - uses: docker/build-push-action@v7
+      - name: Build + push backend image
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -290,3 +291,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Extract metadata (discovery sidecar)
+        id: meta-discovery
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}-discovery
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - name: Build + push discovery sidecar image
+        uses: docker/build-push-action@v7
+        with:
+          context: sidecar/discovery
+          file: sidecar/discovery/Dockerfile
+          push: true
+          tags: ${{ steps.meta-discovery.outputs.tags }}
+          labels: ${{ steps.meta-discovery.outputs.labels }}
+          cache-from: type=gha,scope=discovery
+          cache-to: type=gha,mode=max,scope=discovery

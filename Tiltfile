@@ -95,7 +95,7 @@ local_resource(
 
 # PO token server: generates proof-of-origin tokens so yt-dlp can
 # bypass YouTube's bot detection. Runs the bgutil Docker sidecar on
-# port 4416 (same as docker-compose.yml).
+# port 4416 (same as the deployed compose stack).
 local_resource(
     'pot-server',
     serve_cmd='docker run --rm -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest',

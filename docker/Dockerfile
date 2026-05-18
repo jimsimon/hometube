@@ -35,12 +35,12 @@ RUN apt-get update \
 
 # Copy only the manifest first to take advantage of layer caching for
 # the dependency build; then copy sources.
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
 COPY templates/ ./templates/
 COPY migrations/ ./migrations/
 
-RUN cargo build --release \
+RUN cargo build --release --locked \
     && strip target/release/hometube || true
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,17 @@ RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-
     && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/bgutil/ \
     && rm /tmp/pot-plugin.zip
 
+# Create a non-root user (UID/GID 568 matches the TrueNAS Scale `apps`
+# user, but works on any host). The data directory is created and
+# chown'd so the container can write to a freshly-mounted empty volume
+# without manual setup.
+RUN groupadd --system --gid 568 hometube \
+    && useradd --system --uid 568 --gid 568 --home /app --shell /usr/sbin/nologin hometube \
+    && mkdir -p /app/data \
+    && chown -R 568:568 /app
+
 WORKDIR /app
+USER 568:568
 EXPOSE 3000
 VOLUME ["/app/data"]
 
@@ -101,6 +111,7 @@ ENV STATIC_DIR=/app/static \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
     YTDLP_COOKIES_PATH=/app/data/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
+    DISCOVERY_SIDECAR_URL=http://discovery:3000 \
     DATABASE_PATH=/app/data/app.db \
     CACHE_DIR=/app/data/segment_cache
 
