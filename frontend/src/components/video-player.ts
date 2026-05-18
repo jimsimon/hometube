@@ -584,10 +584,11 @@ export class VideoPlayer extends LitElement {
     // Before stripping, we extract the projection metadata (type, pose
     // yaw/pitch/roll) so the spherical renderer can use it for the
     // initial camera direction.
+    // Shaka's RequestType enum: MANIFEST=0, SEGMENT=1, LICENSE=2, ...
+    const SHAKA_REQUEST_TYPE_SEGMENT = 1;
     (player.getNetworkingEngine() as any).registerResponseFilter(
       (type: number, response: { data: ArrayBuffer | Uint8Array }) => {
-        // SEGMENT == 1 in Shaka; init segments are fetched as SEGMENT.
-        if (type !== 1) return;
+        if (type !== SHAKA_REQUEST_TYPE_SEGMENT) return;
         const data = response.data;
         if (!(data instanceof ArrayBuffer)) return;
         if (data.byteLength < 8 || data.byteLength > 8192) return;
@@ -747,6 +748,8 @@ export class VideoPlayer extends LitElement {
       this.sphericalRenderer.destroy();
       this.sphericalRenderer = null;
       this.removeAttribute("data-spherical");
+      // Remove the canvas element from the DOM.
+      this.shadowRoot?.querySelector(".spherical-canvas")?.remove();
     }
     this.projectionInfo = null;
     if (this.videoEl) {

@@ -764,8 +764,10 @@ pub async fn get_format(
                         .send()
                         .await
                     {
-                        if let Ok(tail) = tail_resp.bytes().await {
-                            corrected.extend_from_slice(&tail);
+                        if tail_resp.status().is_success() {
+                            if let Ok(tail) = tail_resp.bytes().await {
+                                corrected.extend_from_slice(&tail);
+                            }
                         }
                     }
                 }
@@ -799,8 +801,12 @@ pub async fn get_format(
                     });
                 }
 
-                // Serve corrected bytes.
+                // Serve corrected bytes. Content-Range reflects the
+                // actual byte range served (original_start through
+                // original_start + content_length - 1) so the client
+                // sees a consistent Content-Length / Content-Range pair.
                 let content_length = corrected.len();
+                let actual_end = original_start + content_length as u64 - 1;
                 let mut response = Response::new(Body::from(corrected));
                 *response.status_mut() = StatusCode::PARTIAL_CONTENT;
                 let h = response.headers_mut();
@@ -810,8 +816,8 @@ pub async fn get_format(
                 );
                 h.insert(header::CONTENT_LENGTH, content_length.into());
                 let range_str = match effective_total {
-                    Some(total) => format!("bytes {}-{}/{}", original_start, original_end, total),
-                    None => format!("bytes {}-{}/*", original_start, original_end),
+                    Some(total) => format!("bytes {}-{}/{}", original_start, actual_end, total),
+                    None => format!("bytes {}-{}/*", original_start, actual_end),
                 };
                 h.insert(header::CONTENT_RANGE, range_str.parse().unwrap());
                 h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
@@ -858,7 +864,21 @@ pub async fn get_format(
                     .send()
                     .await
                     .map_err(AppError::Http)?;
+                let ext_status = ext_resp.status();
                 let ext_bytes = ext_resp.bytes().await.map_err(AppError::Http)?;
+                if !ext_status.is_success() {
+                    // Extended fetch failed (403, 404, etc.) — serve
+                    // the error body through so the client sees it.
+                    tracing::warn!(
+                        video_id = %q.video_id,
+                        format = %q.format,
+                        status = %ext_status,
+                        "proxy: extended init fetch failed"
+                    );
+                    let mut response = Response::new(Body::from(ext_bytes));
+                    *response.status_mut() = ext_status;
+                    return Ok(response);
+                }
                 let content_length = ext_bytes.len();
                 let mut response = Response::new(Body::from(ext_bytes));
                 *response.status_mut() = StatusCode::PARTIAL_CONTENT;

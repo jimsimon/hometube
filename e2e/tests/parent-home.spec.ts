@@ -1,23 +1,46 @@
 /**
  * E2E: Parent home (/parent/home).
  *
- * With a parent session, verifies:
- *   - the page renders the allowlist tabs
+ * With a parent session and at least one child account, verifies:
+ *   - the allowlist manager component renders
+ *   - allowlist tabs appear once a child is selected
  *   - the child-selector dropdown is visible
  */
 
 import { test, expect } from '../fixtures/session';
 
+const BASE = process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3000';
+
+/** Seed a child account so the allowlist manager has something to show. */
+async function ensureChild(page: import('@playwright/test').Page) {
+  await page.evaluate(
+    async (url) => {
+      await fetch(url + '/api/test/seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'child', display_name: 'E2E Child' }),
+      });
+    },
+    BASE,
+  );
+}
+
 test('parent home renders allowlist tabs', async ({ parentPage }) => {
+  await ensureChild(parentPage);
   await parentPage.goto('/parent/home');
   await expect(parentPage).toHaveURL(/\/parent\/home/);
 
   // The allowlist manager renders tab buttons for channels/playlists/videos.
-  const tabs = parentPage.locator('hometube-allowlist-manager [role="tab"]');
+  // Tabs live inside the component's shadow DOM, so use chained locators
+  // to pierce the shadow boundary.
+  const tabs = parentPage
+    .locator('hometube-allowlist-manager')
+    .locator('[role="tab"]');
   await expect(tabs.first()).toBeVisible({ timeout: 10_000 });
 });
 
 test('parent home shows a child selector', async ({ parentPage }) => {
+  await ensureChild(parentPage);
   await parentPage.goto('/parent/home');
   // The account-selector component renders a <select> when at least
   // one child exists.
