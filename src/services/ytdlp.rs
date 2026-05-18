@@ -421,52 +421,12 @@ fn is_drc(f: &Format) -> bool {
 }
 
 /// Compute the maximum `language_preference` across all audio-only
-/// formats. yt-dlp scores the original-language track highest, so
-/// formats below this value are auto-dubs. Returns `None` when no
-/// audio format declares a preference (no dubs to filter).
-fn max_audio_language_preference(formats: &[Format]) -> Option<i64> {
-    formats
-        .iter()
-        .filter(|f| {
-            let v = f.vcodec.as_deref().unwrap_or("none");
-            let a = f.acodec.as_deref().unwrap_or("none");
-            a != "none" && v == "none"
-        })
-        .filter_map(|f| f.language_preference)
-        .max()
-}
-
-/// Returns `true` for YouTube AI-generated audio dubs. We keep
-/// channel-author-uploaded multi-language audio (real human dubs) so
-/// users can switch languages via the player UI. AI dubs are
-/// detected by the conjunction of:
-///
-/// 1. `"TV-D"` in `format_note` — yt-dlp's marker for AI translations
-///    (also appears on the original-language track and on video
-///    formats, so it's necessary but not sufficient).
-/// 2. `language_preference` strictly lower than the max across audio
-///    formats — yt-dlp scores the original-language track highest,
-///    so anything below max with a `"TV-D"` tag is an AI translation.
-///
-/// Author-uploaded dubs typically lack the `"TV-D"` marker, so they
-/// pass condition 1 and remain in the manifest.
-fn is_auto_dub(f: &Format, max_pref: Option<i64>) -> bool {
-    let vcodec = f.vcodec.as_deref().unwrap_or("none");
-    let acodec = f.acodec.as_deref().unwrap_or("none");
-    let is_audio_only = acodec != "none" && vcodec == "none";
-    if !is_audio_only {
-        return false;
-    }
-    let has_tv_d = f
-        .format_note
-        .as_deref()
-        .map(|s| s.to_ascii_lowercase().contains("tv-d"))
-        .unwrap_or(false);
-    if !has_tv_d {
-        return false;
-    }
-    matches!((f.language_preference, max_pref), (Some(p), Some(max)) if p < max)
-}
+// NOTE: Auto-dub filtering was removed. YouTube marks both AI-generated
+// dubs and author-uploaded professional dubs with `"TV-D"` in
+// `format_note`, making them indistinguishable. Rather than risk
+// filtering out legitimate author dubs (e.g. Mark Rober's 16+
+// professional dubs), all language tracks are kept and the user
+// can switch via Shaka's language menu.
 
 /// Result of probing one format's index range for the WebM Cues element.
 enum CuesProbeResult {
@@ -517,7 +477,6 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
     // are the same file, different protocol labels).
     //
     // Group: URL -> list of (format_id, itag).
-    let max_pref = max_audio_language_preference(&result.formats);
     let mut url_to_formats: std::collections::HashMap<
         String,
         Vec<(String, i64)>,
@@ -525,7 +484,7 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
     for f in result
         .formats
         .iter()
-        .filter(|f| !is_drc(f) && !is_auto_dub(f, max_pref))
+        .filter(|f| !is_drc(f))
     {
         let Some(url) = f.url.as_ref() else { continue };
         let Some(itag_str) = f.format_id.split('-').next() else {
@@ -750,18 +709,31 @@ fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
 async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
     use futures_util::stream::{self, StreamExt};
 
-    // Probe each unique audio URL whose itag has no innertube ranges.
-    // Different language variants share an itag but are different
-    // files, so each URL gets its own probe and per-format_id ranges.
-    let max_pref = max_audio_language_preference(&result.formats);
+    // Probe each unique audio URL that still lacks format_box_ranges.
+    // This covers two cases:
+    //   1. Formats whose itag has no innertube ranges at all.
+    //   2. Author-uploaded language dubs that share an itag with the
+    //      original but have different file layouts (Cues at different
+    //      offsets). The fixup pass probed using the original's
+    //      index_start and failed to find Cues for these dubs.
+    //
+    // To avoid excessive CDN requests (which could trigger bot
+    // detection), we only probe ONE format per (language, URL) pair.
+    // The manifest's `trim_audio_representations` picks one format per
+    // language anyway, so probing all quality tiers would be wasted
+    // requests. Other format_ids that share the same URL inherit the
+    // discovered ranges.
     let mut url_to_formats: std::collections::HashMap<
         String,
         Vec<String>,
     > = std::collections::HashMap::new();
+    // Track which languages we've already queued a probe for, so we
+    // only probe one quality tier per language.
+    let mut probed_langs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in result
         .formats
         .iter()
-        .filter(|f| !is_drc(f) && !is_auto_dub(f, max_pref))
+        .filter(|f| !is_drc(f))
     {
         let acodec = f.acodec.as_deref().unwrap_or("none");
         let vcodec = f.vcodec.as_deref().unwrap_or("none");
@@ -769,17 +741,15 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
             continue;
         }
         let Some(url) = f.url.as_ref() else { continue };
-        let Some(itag_str) = f.format_id.split('-').next() else {
+        if result.format_box_ranges.contains_key(&f.format_id) {
             continue;
-        };
-        let Some(itag) = itag_str.parse::<i64>().ok() else {
-            continue;
-        };
-        // Only probe if no innertube ranges AND no fixup-produced
-        // override exists for this format_id already.
-        if result.segment_ranges.contains_key(&itag)
-            || result.format_box_ranges.contains_key(&f.format_id)
-        {
+        }
+        // One probe per language — the first format_id encountered
+        // for each language wins. Other quality tiers of the same
+        // language are different files and would need separate probes,
+        // but the manifest only uses one format per language.
+        let lang = f.language.clone().unwrap_or_default();
+        if !probed_langs.insert(lang) {
             continue;
         }
         url_to_formats

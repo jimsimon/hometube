@@ -188,18 +188,6 @@ pub fn synthesize_manifest(
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
-    // Precomputed max language_preference across audio formats.
-    // Used by `is_usable` to filter auto-dubs (formats below max).
-    let max_audio_pref: Option<i64> = formats
-        .iter()
-        .filter(|f| {
-            let v = f.vcodec.as_deref().unwrap_or("none");
-            let a = f.acodec.as_deref().unwrap_or("none");
-            a != "none" && v == "none"
-        })
-        .filter_map(|f| f.language_preference)
-        .max();
-
     let is_usable = |f: &&Format| -> bool {
         if f.format_id.starts_with("sb") {
             return false;
@@ -230,29 +218,12 @@ pub fn synthesize_manifest(
         let is_video_only = vcodec != "none" && acodec == "none";
         let is_audio_only = acodec != "none" && vcodec == "none";
 
-        // Exclude YouTube AI-generated dubs but keep channel-author-
-        // uploaded multi-language audio (so users can switch languages
-        // in the player). AI dubs satisfy BOTH conditions:
-        //   1. `"TV-D"` in `format_note` (yt-dlp's AI-translation
-        //      marker; also present on the original and on video
-        //      formats, so necessary but not sufficient).
-        //   2. `language_preference` strictly below the max — yt-dlp
-        //      scores the original-language track highest.
-        // Author-uploaded dubs lack `"TV-D"` and pass through.
-        if is_audio_only {
-            let has_tv_d = f
-                .format_note
-                .as_deref()
-                .map(|s| s.to_ascii_lowercase().contains("tv-d"))
-                .unwrap_or(false);
-            if has_tv_d {
-                if let (Some(pref), Some(max)) = (f.language_preference, max_audio_pref) {
-                    if pref < max {
-                        return false;
-                    }
-                }
-            }
-        }
+        // All audio languages (including AI dubs and author-uploaded
+        // dubs) are kept in the manifest. YouTube marks both AI and
+        // author dubs with `"TV-D"` in `format_note`, making them
+        // indistinguishable. Rather than risk filtering out legitimate
+        // author dubs, we include everything and let the user switch
+        // languages via Shaka's language menu.
         if is_video_only {
             // vp9 is sometimes also reported as `vp09.*` for full
             // codec strings. Accept both spellings.
