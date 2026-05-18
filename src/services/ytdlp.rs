@@ -497,6 +497,11 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
         .iter()
         .filter(|f| !is_drc(f))
     {
+        // Only probe WebM formats — MP4 (H.264, AV1, AAC) doesn't
+        // have a Cues element and the probe would always fail.
+        if f.ext.as_deref() != Some("webm") {
+            continue;
+        }
         let Some(url) = f.url.as_ref() else { continue };
         let Some(itag_str) = f.format_id.split('-').next() else {
             continue;
