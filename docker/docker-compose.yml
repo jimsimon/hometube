@@ -68,7 +68,11 @@ services:
       discovery:
         condition: service_healthy
       pot-server:
-        condition: service_healthy
+        # The upstream bgutil image doesn't include wget/curl, so we
+        # can't run a meaningful in-container healthcheck. Gate only on
+        # the container being up; if pot-server isn't actually ready
+        # yet when yt-dlp first calls it, the plugin retries.
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
@@ -103,12 +107,7 @@ services:
   pot-server:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     restart: unless-stopped
-    # The bgutil image is Node-Alpine-based and exposes /ping on 4416.
-    # If a future upstream rebuild drops busybox `wget`, remove this
-    # block and fall back to `condition: service_started` in `app`.
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:4416/ping || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck: the upstream image is minimal and ships without
+    # wget or curl, so there's no in-container way to probe it. The
+    # `app` service gates on this container being started rather than
+    # healthy; yt-dlp's bgutil plugin retries on transient failures.
