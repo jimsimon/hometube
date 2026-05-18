@@ -723,6 +723,13 @@ fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
     Some((width, value))
 }
 
+/// Public wrapper for read_ebml_vint, used by the proxy's Cues
+/// auto-correction to compute index_end from the Cues size VINT.
+pub fn read_ebml_vint_pub(data: &[u8], offset: usize) -> Option<(usize, u64)> {
+    read_ebml_vint(data, offset)
+}
+
+
 /// For opus audio formats that have no innertube segment_ranges, probe
 /// the file header to find the Cues element and populate ranges.
 ///
