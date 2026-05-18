@@ -11,22 +11,19 @@ import { test, expect } from '../fixtures/session';
 
 const BASE = process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3000';
 
-/** Seed a child account so the allowlist manager has something to show. */
-async function ensureChild(page: import('@playwright/test').Page) {
-  await page.evaluate(
-    async (url) => {
-      await fetch(url + '/api/test/seed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'child', display_name: 'E2E Child' }),
-      });
-    },
-    BASE,
-  );
+/**
+ * Seed a child account without switching the current session.
+ * Uses the Playwright request API (separate cookie jar) so the
+ * parentPage's session cookie is unaffected.
+ */
+async function ensureChild(request: import('@playwright/test').APIRequestContext) {
+  await request.post(`${BASE}/api/test/seed`, {
+    data: { role: 'child', display_name: 'E2E Child' },
+  });
 }
 
-test('parent home renders allowlist tabs', async ({ parentPage }) => {
-  await ensureChild(parentPage);
+test('parent home renders allowlist tabs', async ({ parentPage, request }) => {
+  await ensureChild(request);
   await parentPage.goto('/parent/home');
   await expect(parentPage).toHaveURL(/\/parent\/home/);
 
@@ -39,8 +36,8 @@ test('parent home renders allowlist tabs', async ({ parentPage }) => {
   await expect(tabs.first()).toBeVisible({ timeout: 10_000 });
 });
 
-test('parent home shows a child selector', async ({ parentPage }) => {
-  await ensureChild(parentPage);
+test('parent home shows a child selector', async ({ parentPage, request }) => {
+  await ensureChild(request);
   await parentPage.goto('/parent/home');
   // The account-selector component renders a <select> when at least
   // one child exists.
