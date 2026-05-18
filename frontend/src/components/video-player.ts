@@ -426,6 +426,12 @@ export class VideoPlayer extends LitElement {
       request.allowCrossSiteCredentials = true;
     });
 
+    // Default audio language to English. Shaka picks any AdaptationSet
+    // whose `lang` attribute starts with "en" (e.g. "en", "en-US",
+    // "en-GB"). Users can switch via the language button in the
+    // overflow menu for non-English content.
+    player.configure("preferredAudioLanguage", "en");
+
     // Apply quality cap if set.
     if (this.settings?.max_quality) {
       const maxHeight = QUALITY_CAP[this.settings.max_quality];

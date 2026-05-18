@@ -188,6 +188,18 @@ pub fn synthesize_manifest(
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
+    // Precomputed max language_preference across audio formats.
+    // Used by `is_usable` to filter auto-dubs (formats below max).
+    let max_audio_pref: Option<i64> = formats
+        .iter()
+        .filter(|f| {
+            let v = f.vcodec.as_deref().unwrap_or("none");
+            let a = f.acodec.as_deref().unwrap_or("none");
+            a != "none" && v == "none"
+        })
+        .filter_map(|f| f.language_preference)
+        .max();
+
     let is_usable = |f: &&Format| -> bool {
         if f.format_id.starts_with("sb") {
             return false;
@@ -217,6 +229,20 @@ pub fn synthesize_manifest(
         let acodec = f.acodec.as_deref().unwrap_or("none");
         let is_video_only = vcodec != "none" && acodec == "none";
         let is_audio_only = acodec != "none" && vcodec == "none";
+
+        // Exclude YouTube auto-generated dubs (AI translations).
+        // A format is a dub iff another audio format has a strictly
+        // higher `language_preference` — yt-dlp scores the original
+        // track highest. This relative check avoids dropping the only
+        // audio on single-language videos where YouTube nonetheless
+        // marks `pref=-1` and `"TV-D"`.
+        if is_audio_only {
+            if let (Some(pref), Some(max)) = (f.language_preference, max_audio_pref) {
+                if pref < max {
+                    return false;
+                }
+            }
+        }
         if is_video_only {
             // vp9 is sometimes also reported as `vp09.*` for full
             // codec strings. Accept both spellings.
@@ -261,7 +287,6 @@ pub fn synthesize_manifest(
             f.acodec.as_deref().unwrap_or("none") != "none"
                 && f.vcodec.as_deref().unwrap_or("none") == "none"
         })
-        
         .collect();
 
     // Trim the candidate pools so the player doesn't drown in

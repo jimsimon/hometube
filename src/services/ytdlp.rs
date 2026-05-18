@@ -133,6 +133,19 @@ pub struct ExtractResult {
     /// `format_box_ranges` so probing is never needed.
     #[serde(default)]
     pub segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+
+    /// Per-format-id ranges, populated by the WebM Cues fixup probe.
+    /// Different language variants of the same itag are *different
+    /// files* with different Cues byte offsets, so the per-itag
+    /// `segment_ranges` map can't represent them correctly. When this
+    /// map has an entry for a `format_id`, it overrides whatever the
+    /// itag-keyed map would produce.
+    ///
+    /// Serialized so the metadata cache preserves the probe results
+    /// across server restarts (yt-dlp itself doesn't emit this field,
+    /// hence `serde(default)`).
+    #[serde(default)]
+    pub format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
 /// Inclusive byte ranges for a single adaptive format's SegmentBase,
@@ -177,6 +190,8 @@ struct ExtractResultRaw {
     manifest_url: Option<String>,
     #[serde(default)]
     segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
+    #[serde(default)]
+    format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
 impl From<ExtractResultRaw> for ExtractResult {
@@ -198,6 +213,7 @@ impl From<ExtractResultRaw> for ExtractResult {
             automatic_captions: raw.automatic_captions,
             manifest_url: raw.manifest_url,
             segment_ranges: raw.segment_ranges,
+            format_box_ranges: raw.format_box_ranges,
         }
     }
 }
@@ -394,8 +410,7 @@ use crate::services::segment_ranges::WEBM_CUES_ID;
 
 /// Returns `true` for DRC (Dynamic Range Compression) variants.
 /// DRC variants share an itag with the standard variant but are
-/// *different files* with different Cues byte offsets. The DASH
-/// manifest excludes them, so probes must too.
+/// *different files* with different Cues byte offsets.
 fn is_drc(f: &Format) -> bool {
     f.format_id.contains("-drc-")
         || f.format_id.ends_with("-drc")
@@ -403,6 +418,45 @@ fn is_drc(f: &Format) -> bool {
             .as_deref()
             .map(|s| s.to_ascii_lowercase().contains("drc"))
             .unwrap_or(false)
+}
+
+/// Compute the maximum `language_preference` across all audio-only
+/// formats. yt-dlp scores the original-language track highest, so
+/// formats below this value are auto-dubs. Returns `None` when no
+/// audio format declares a preference (no dubs to filter).
+fn max_audio_language_preference(formats: &[Format]) -> Option<i64> {
+    formats
+        .iter()
+        .filter(|f| {
+            let v = f.vcodec.as_deref().unwrap_or("none");
+            let a = f.acodec.as_deref().unwrap_or("none");
+            a != "none" && v == "none"
+        })
+        .filter_map(|f| f.language_preference)
+        .max()
+}
+
+/// Returns `true` for YouTube auto-generated audio dubs (AI
+/// translations). A format is a dub when another audio format has a
+/// strictly higher `language_preference` for the same video — yt-dlp
+/// scores the original track highest.
+///
+/// This relative check (rather than `pref < 0`) avoids dropping
+/// legitimate single-language audio that YouTube still marks
+/// `pref=-1` and `"TV-D"` (observed on some kids-content channels).
+/// `max_pref` is the maximum across all audio formats; pass `None`
+/// when no format declares a preference (no dubs to filter).
+fn is_auto_dub(f: &Format, max_pref: Option<i64>) -> bool {
+    let vcodec = f.vcodec.as_deref().unwrap_or("none");
+    let acodec = f.acodec.as_deref().unwrap_or("none");
+    let is_audio_only = acodec != "none" && vcodec == "none";
+    if !is_audio_only {
+        return false;
+    }
+    match (f.language_preference, max_pref) {
+        (Some(pref), Some(max)) => pref < max,
+        _ => false,
+    }
 }
 
 /// Result of probing one format's index range for the WebM Cues element.
@@ -442,117 +496,181 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
         return;
     }
 
-    // Build a list of (itag, format_url, index_start) to probe.
+    // Probe each unique URL once. Different language variants of the
+    // same itag (audio dubs) are *different files* with different Cues
+    // byte offsets, so probing only one variant per itag would produce
+    // wrong ranges for the other languages. DRC variants are skipped
+    // entirely — they share an itag with the standard variant but the
+    // DASH manifest excludes them.
     //
-    // DRC (Dynamic Range Compression) variants and auto-dubs share an
-    // itag with the original variant but are *different files* with
-    // different Cues byte offsets. The innertube `/player` API only
-    // reports ranges for the original version, so probing a DRC or dub
-    // URL gives a false mismatch. Skip them — the DASH manifest
-    // already excludes both.
-    let probes: Vec<(i64, String, u64, u64)> = result
+    // For each probed URL, we apply the resulting adjustment to ALL
+    // format_ids that share that URL (e.g. `249-7` and `249-dashy-7`
+    // are the same file, different protocol labels).
+    //
+    // Group: URL -> list of (format_id, itag).
+    let max_pref = max_audio_language_preference(&result.formats);
+    let mut url_to_formats: std::collections::HashMap<
+        String,
+        Vec<(String, i64)>,
+    > = std::collections::HashMap::new();
+    for f in result
         .formats
         .iter()
-        .filter(|f| !is_drc(f))
-        .filter_map(|f| {
-            let url = f.url.as_ref()?;
-            let itag_str = f.format_id.split('-').next()?;
-            let itag: i64 = itag_str.parse().ok()?;
-            let sr = result.segment_ranges.get(&itag)?;
-            Some((itag, url.clone(), sr.index_start, sr.index_end))
-        })
-        // Deduplicate by itag (multiple format_ids may share the same itag).
-        .fold(Vec::new(), |mut acc, item| {
-            if !acc.iter().any(|(i, _, _, _)| *i == item.0) {
-                acc.push(item);
-            }
-            acc
-        });
+        .filter(|f| !is_drc(f) && !is_auto_dub(f, max_pref))
+    {
+        let Some(url) = f.url.as_ref() else { continue };
+        let Some(itag_str) = f.format_id.split('-').next() else {
+            continue;
+        };
+        let Some(itag) = itag_str.parse::<i64>().ok() else {
+            continue;
+        };
+        if !result.segment_ranges.contains_key(&itag) {
+            continue;
+        }
+        url_to_formats
+            .entry(url.clone())
+            .or_default()
+            .push((f.format_id.clone(), itag));
+    }
 
-    if probes.is_empty() {
+    if url_to_formats.is_empty() {
         return;
     }
 
     let client = reqwest::Client::new();
 
-    // Probe concurrently (up to 8 at a time).
-    let adjustments: Vec<(i64, CuesProbeResult)> = stream::iter(probes)
-        .map(|(itag, url, index_start, index_end)| {
-            let client = &client;
-            async move {
-                // Fetch the first 64 bytes of the index range.
-                let probe_end = std::cmp::min(index_start + 63, index_end);
-                let range_header = format!("bytes={index_start}-{probe_end}");
-                let resp = match client
-                    .get(&url)
-                    .header(reqwest::header::RANGE, &range_header)
-                    .send()
-                    .await
-                {
-                    Ok(r) if r.status().is_success() => r,
-                    _ => return (itag, CuesProbeResult::ProbeFailed),
-                };
-                let bytes = match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(_) => return (itag, CuesProbeResult::ProbeFailed),
-                };
-
-                // Check if Cues element starts at byte 0 of the range.
-                if bytes.len() >= 4 && bytes[0..4] == WEBM_CUES_ID {
-                    return (itag, CuesProbeResult::Aligned);
-                }
-
-                // Scan the remaining bytes for the Cues element ID.
-                // YouTube sometimes places a few leading EBML elements
-                // before the actual Cues. Adjust so index_start points
-                // exactly at the Cues — Shaka requires it at byte 0.
-                if let Some(offset) = find_cues_offset(&bytes) {
-                    let new_index_start = index_start + offset as u64;
-                    tracing::info!(
-                        itag,
-                        index_start,
-                        new_index_start,
-                        offset,
-                        "adjusted WebM Cues offset"
-                    );
-                    return (itag, CuesProbeResult::Adjusted(new_index_start));
-                }
-
-                // Cues element not found anywhere in the probe window.
-                tracing::warn!(
-                    itag,
-                    index_start,
-                    "WebM Cues not found in index range probe; dropping SegmentBase"
-                );
-                (itag, CuesProbeResult::NotFound)
-            }
+    // Each probe input: (url, format_ids_sharing_url, base_ranges).
+    let probes: Vec<(String, Vec<(String, i64)>, SegmentRanges)> = url_to_formats
+        .into_iter()
+        .filter_map(|(url, format_ids)| {
+            // All formats in the group share an itag (they're the same
+            // file), so the base ranges are the same for all of them.
+            let itag = format_ids.first().map(|(_, i)| *i)?;
+            let base = *result.segment_ranges.get(&itag)?;
+            Some((url, format_ids, base))
         })
-        .buffer_unordered(8)
-        .collect()
-        .await;
+        .collect();
 
-    // Apply adjustments.
-    for (itag, probe) in adjustments {
+    // Probe concurrently (up to 8 at a time).
+    let outcomes: Vec<(Vec<(String, i64)>, SegmentRanges, CuesProbeResult)> =
+        stream::iter(probes)
+            .map(|(url, format_ids, base)| {
+                let client = &client;
+                async move {
+                    let index_start = base.index_start;
+                    let index_end = base.index_end;
+                    // Fetch the first 64 bytes of the index range.
+                    let probe_end = std::cmp::min(index_start + 63, index_end);
+                    let range_header = format!("bytes={index_start}-{probe_end}");
+                    let resp = match client
+                        .get(&url)
+                        .header(reqwest::header::RANGE, &range_header)
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status().is_success() => r,
+                        _ => return (format_ids, base, CuesProbeResult::ProbeFailed),
+                    };
+                    let bytes = match resp.bytes().await {
+                        Ok(b) => b,
+                        Err(_) => return (format_ids, base, CuesProbeResult::ProbeFailed),
+                    };
+
+                    // Cues already at the expected position.
+                    if bytes.len() >= 4 && bytes[0..4] == WEBM_CUES_ID {
+                        return (format_ids, base, CuesProbeResult::Aligned);
+                    }
+
+                    // YouTube sometimes places a few leading EBML
+                    // elements before the actual Cues. Adjust so the
+                    // index range starts exactly at the Cues — Shaka
+                    // requires the Cues ID at byte 0 of the index fetch.
+                    if let Some(offset) = find_cues_offset(&bytes) {
+                        let new_index_start = index_start + offset as u64;
+                        tracing::info!(
+                            format_ids = ?format_ids.iter().map(|(f, _)| f).collect::<Vec<_>>(),
+                            index_start,
+                            new_index_start,
+                            offset,
+                            "adjusted WebM Cues offset"
+                        );
+                        return (
+                            format_ids,
+                            base,
+                            CuesProbeResult::Adjusted(new_index_start),
+                        );
+                    }
+
+                    // Cues element not found anywhere in the probe window.
+                    tracing::warn!(
+                        format_ids = ?format_ids.iter().map(|(f, _)| f).collect::<Vec<_>>(),
+                        index_start,
+                        "WebM Cues not found in index range probe; dropping SegmentBase"
+                    );
+                    (format_ids, base, CuesProbeResult::NotFound)
+                }
+            })
+            .buffer_unordered(8)
+            .collect()
+            .await;
+
+    // Apply outcomes to result.format_box_ranges (per format_id).
+    // The per-itag `segment_ranges` map is left alone; it's the
+    // fallback for any format_id that didn't get probed.
+    for (format_ids, base, probe) in outcomes {
         match probe {
             CuesProbeResult::Aligned | CuesProbeResult::ProbeFailed => {
-                // No change needed.
+                // No adjustment needed — but we still need to register
+                // these ranges per-format_id so `resolve_segment_ranges`
+                // uses the same data for every variant. (When base
+                // ranges are correct, all variants get the same values
+                // as the itag-keyed fallback would have produced; the
+                // override is harmless but explicit.)
+                for (format_id, _) in format_ids {
+                    result.format_box_ranges.insert(format_id, base);
+                }
             }
             CuesProbeResult::Adjusted(new_index_start) => {
-                if let Some(sr) = result.segment_ranges.get_mut(&itag) {
-                    // Slide the index range forward by the same offset.
-                    // The innertube API sized index_end based on the
-                    // Cues starting at the original index_start, so
-                    // shifting start without shifting end would
-                    // truncate the Cues and cause Shaka's EBML parser
-                    // to hit BUFFER_READ_OUT_OF_BOUNDS. Leave init_end
-                    // unchanged — the gap is harmless.
-                    let delta = new_index_start - sr.index_start;
-                    sr.index_start = new_index_start;
-                    sr.index_end += delta;
+                // Three adjustments when the Cues is offset:
+                //
+                // 1. Slide index_start to the actual Cues position.
+                // 2. Slide index_end by the same delta — the innertube
+                //    API sized index_end assuming Cues started at the
+                //    original index_start, so shifting only start would
+                //    truncate the Cues and trigger Shaka's
+                //    BUFFER_READ_OUT_OF_BOUNDS.
+                // 3. Extend init_end to new_index_start - 1. The gap
+                //    bytes are sometimes valid Tracks-element
+                //    continuation (innertube's init_end is inaccurate
+                //    for those videos); including them in the init
+                //    segment lets MediaSource appendBuffer succeed.
+                //    When the gap is just Void/Tags elements, including
+                //    them is harmless — the EBML parser skips unknown
+                //    IDs.
+                let delta = new_index_start - base.index_start;
+                let adjusted = SegmentRanges {
+                    init_start: base.init_start,
+                    init_end: new_index_start - 1,
+                    index_start: new_index_start,
+                    index_end: base.index_end + delta,
+                };
+                for (format_id, _) in format_ids {
+                    result.format_box_ranges.insert(format_id, adjusted);
                 }
             }
             CuesProbeResult::NotFound => {
-                result.segment_ranges.remove(&itag);
+                // No SegmentBase will be emitted for these format_ids.
+                // We do NOT insert into format_box_ranges, and we leave
+                // segment_ranges alone (other variants of this itag may
+                // still be valid). The DASH builder only emits formats
+                // that resolve to box_ranges, so these get dropped from
+                // the manifest naturally.
+                for (format_id, _) in &format_ids {
+                    // Mark explicitly as unavailable by NOT inserting.
+                    // No-op, but keep the variable binding for clarity.
+                    let _ = format_id;
+                }
             }
         }
     }
@@ -623,44 +741,59 @@ fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
 async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
     use futures_util::stream::{self, StreamExt};
 
-    // Collect audio itags that are missing from segment_ranges.
-    let probes: Vec<(i64, String)> = result
+    // Probe each unique audio URL whose itag has no innertube ranges.
+    // Different language variants share an itag but are different
+    // files, so each URL gets its own probe and per-format_id ranges.
+    let max_pref = max_audio_language_preference(&result.formats);
+    let mut url_to_formats: std::collections::HashMap<
+        String,
+        Vec<String>,
+    > = std::collections::HashMap::new();
+    for f in result
         .formats
         .iter()
-        .filter(|f| !is_drc(f))
-        .filter(|f| {
-            let acodec = f.acodec.as_deref().unwrap_or("none");
-            let vcodec = f.vcodec.as_deref().unwrap_or("none");
-            acodec.starts_with("opus") && vcodec == "none"
-        })
-        .filter_map(|f| {
-            let url = f.url.as_ref()?;
-            let itag_str = f.format_id.split('-').next()?;
-            let itag: i64 = itag_str.parse().ok()?;
-            // Only probe if this itag is NOT already in segment_ranges.
-            if result.segment_ranges.contains_key(&itag) {
-                return None;
-            }
-            Some((itag, url.clone()))
-        })
-        // Deduplicate by itag.
-        .fold(Vec::new(), |mut acc, item| {
-            if !acc.iter().any(|(i, _)| *i == item.0) {
-                acc.push(item);
-            }
-            acc
-        });
+        .filter(|f| !is_drc(f) && !is_auto_dub(f, max_pref))
+    {
+        let acodec = f.acodec.as_deref().unwrap_or("none");
+        let vcodec = f.vcodec.as_deref().unwrap_or("none");
+        if !acodec.starts_with("opus") || vcodec != "none" {
+            continue;
+        }
+        let Some(url) = f.url.as_ref() else { continue };
+        let Some(itag_str) = f.format_id.split('-').next() else {
+            continue;
+        };
+        let Some(itag) = itag_str.parse::<i64>().ok() else {
+            continue;
+        };
+        // Only probe if no innertube ranges AND no fixup-produced
+        // override exists for this format_id already.
+        if result.segment_ranges.contains_key(&itag)
+            || result.format_box_ranges.contains_key(&f.format_id)
+        {
+            continue;
+        }
+        url_to_formats
+            .entry(url.clone())
+            .or_default()
+            .push(f.format_id.clone());
+    }
 
-    if probes.is_empty() {
+    if url_to_formats.is_empty() {
         return;
     }
 
-    tracing::debug!(count = probes.len(), "probing audio formats missing segment_ranges");
+    tracing::debug!(
+        count = url_to_formats.len(),
+        "probing audio URLs missing segment_ranges"
+    );
 
     let client = reqwest::Client::new();
 
-    let discovered: Vec<(i64, Option<SegmentRanges>)> = stream::iter(probes)
-        .map(|(itag, url)| {
+    let probes: Vec<(String, Vec<String>)> = url_to_formats.into_iter().collect();
+
+    let discovered: Vec<(Vec<String>, Option<SegmentRanges>)> = stream::iter(probes)
+        .map(|(url, format_ids)| {
             let client = &client;
             async move {
                 // Fetch the first 1024 bytes of the file.
@@ -671,11 +804,11 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
                     .await
                 {
                     Ok(r) if r.status().is_success() => r,
-                    _ => return (itag, None),
+                    _ => return (format_ids, None),
                 };
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
-                    Err(_) => return (itag, None),
+                    Err(_) => return (format_ids, None),
                 };
 
                 // Find the actual Cues element (use last occurrence to
@@ -683,8 +816,11 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
                 let cues_pos = match find_last_cues_offset(&bytes) {
                     Some(pos) => pos,
                     None => {
-                        tracing::debug!(itag, "Cues not found in first 1024 bytes");
-                        return (itag, None);
+                        tracing::debug!(
+                            format_ids = ?format_ids,
+                            "Cues not found in first 1024 bytes"
+                        );
+                        return (format_ids, None);
                     }
                 };
 
@@ -692,7 +828,7 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
                 let (size_width, cues_data_size) =
                     match read_ebml_vint(&bytes, cues_pos + 4) {
                         Some(v) => v,
-                        None => return (itag, None),
+                        None => return (format_ids, None),
                     };
 
                 let index_start = cues_pos as u64;
@@ -700,7 +836,7 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
                 let init_end = index_start - 1;
 
                 tracing::info!(
-                    itag,
+                    format_ids = ?format_ids,
                     index_start,
                     index_end,
                     init_end,
@@ -708,7 +844,7 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
                 );
 
                 (
-                    itag,
+                    format_ids,
                     Some(SegmentRanges {
                         init_start: 0,
                         init_end,
@@ -722,9 +858,11 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
         .collect()
         .await;
 
-    for (itag, ranges) in discovered {
+    for (format_ids, ranges) in discovered {
         if let Some(sr) = ranges {
-            result.segment_ranges.insert(itag, sr);
+            for format_id in format_ids {
+                result.format_box_ranges.insert(format_id, sr);
+            }
         }
     }
 }

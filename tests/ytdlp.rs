@@ -267,6 +267,7 @@ fn result_with_format(
         automatic_captions: Default::default(),
         manifest_url: None,
         segment_ranges,
+        format_box_ranges: Default::default(),
     }
 }
 
@@ -298,8 +299,8 @@ async fn fixup_webm_cues_keeps_correct_ranges() {
     hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
 
     // Range should be preserved — Cues was at the correct position.
-    assert!(result.segment_ranges.contains_key(&247));
-    let sr = result.segment_ranges[&247];
+    // The fixup writes per-format_id ranges to `format_box_ranges`.
+    let sr = result.format_box_ranges.get("247-dashy").expect("ranges for 247-dashy");
     assert_eq!(sr.index_start, 220);
     assert_eq!(sr.index_end, 1214);
 }
@@ -332,16 +333,18 @@ async fn fixup_webm_cues_adjusts_misaligned_range() {
 
     hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
 
-    // Both index_start and index_end shift by +7 (the Cues offset).
-    // init_end stays at 258 — the gap is harmless.
-    assert!(
-        result.segment_ranges.contains_key(&249),
-        "expected itag 249 to be preserved with adjusted offset"
-    );
-    let sr = result.segment_ranges[&249];
+    // index_start moves to 266 (Cues position), index_end shifts by
+    // same delta (+7), init_end extends to 265 so the init segment
+    // covers the gap bytes (which are sometimes Tracks continuation
+    // on videos where innertube's init_end is inaccurate). The
+    // adjustment is recorded per-format_id in `format_box_ranges`.
+    let sr = result
+        .format_box_ranges
+        .get("249-dashy-0")
+        .expect("adjusted ranges for 249-dashy-0");
     assert_eq!(sr.index_start, 266, "index_start should move to Cues position");
     assert_eq!(sr.index_end, 805, "index_end should shift by same delta (+7)");
-    assert_eq!(sr.init_end, 258, "init_end should remain unchanged");
+    assert_eq!(sr.init_end, 265, "init_end should extend to cover gap bytes");
     assert_eq!(sr.init_start, 0, "init_start should remain unchanged");
 }
 
@@ -368,10 +371,13 @@ async fn fixup_webm_cues_drops_range_when_cues_not_found() {
 
     hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
 
-    // Range should be removed — Cues wasn't found anywhere in the probe.
+    // No per-format_id ranges should be recorded — the format will
+    // fall through to itag-keyed lookup, but the manifest builder
+    // filters out formats that lack box_ranges, so it effectively
+    // gets dropped.
     assert!(
-        !result.segment_ranges.contains_key(&249),
-        "expected itag 249 to be removed when Cues not found"
+        !result.format_box_ranges.contains_key("249-dashy-0"),
+        "expected no override for 249-dashy-0 when Cues not found"
     );
 }
 
@@ -391,7 +397,11 @@ async fn fixup_webm_cues_keeps_range_on_probe_failure() {
 
     hometube::services::ytdlp::fixup_webm_cues_offsets(&mut result).await;
 
-    // Range should be kept when probe fails (graceful fallback).
+    // On probe failure the fixup writes the base ranges to
+    // format_box_ranges (graceful fallback — base ranges may still be
+    // correct; we just couldn't verify).
+    assert!(result.format_box_ranges.contains_key("249-dashy-0"));
+    // The itag-keyed innertube ranges are also preserved.
     assert!(result.segment_ranges.contains_key(&249));
 }
 

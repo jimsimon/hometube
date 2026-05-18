@@ -902,16 +902,21 @@ async fn resolve_segment_ranges(
 
     let mut out: std::collections::HashMap<String, BoxRanges> = std::collections::HashMap::new();
 
-    // Step 1: Convert itag-keyed segment_ranges to format_id-keyed map.
-    // A format_id like "303-dashy" shares itag 303 with "303". We
-    // parse the leading integer itag from each format_id.
+    // Step 1: Resolve box ranges for each format. The fixup probe in
+    // ytdlp.rs may have populated `format_box_ranges` per-format_id
+    // (different language variants are different files with different
+    // Cues offsets); prefer that map. Fall back to the itag-keyed
+    // `segment_ranges` from innertube when no per-format override
+    // exists.
     for f in &result.formats {
-        let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
-            continue;
-        };
-        let Some(sr) = result.segment_ranges.get(&itag) else {
-            continue;
-        };
+        let sr_opt = result
+            .format_box_ranges
+            .get(&f.format_id)
+            .or_else(|| {
+                parse_itag_from_format_id(&f.format_id)
+                    .and_then(|itag| result.segment_ranges.get(&itag))
+            });
+        let Some(sr) = sr_opt else { continue };
         let br = BoxRanges {
             init: ByteRange {
                 start: sr.init_start,
@@ -942,17 +947,21 @@ async fn resolve_segment_ranges(
         out.extend(cached);
     }
 
-    // Step 3: Persist only newly-resolved ranges (from Step 1) that
-    // weren't already in the DB (from Step 2). This avoids redundant
-    // INSERT OR REPLACE writes on warm-cache manifest loads.
+    // Step 3: Persist newly-resolved ranges from Step 1 (whether they
+    // came from format_box_ranges overrides or itag-keyed
+    // segment_ranges). The DB cache is per-format_id and outlives the
+    // in-memory extraction result.
     let new_from_innertube: Vec<(String, BoxRanges)> = result
         .formats
         .iter()
         .filter_map(|f| {
-            let itag = parse_itag_from_format_id(&f.format_id)?;
-            result.segment_ranges.get(&itag)?;
-            // Only persist if this format_id wasn't already served by
-            // the DB lookup in Step 2 (i.e. it came from segment_ranges).
+            let has_override = result.format_box_ranges.contains_key(&f.format_id);
+            let has_itag_range = parse_itag_from_format_id(&f.format_id)
+                .and_then(|itag| result.segment_ranges.get(&itag))
+                .is_some();
+            if !has_override && !has_itag_range {
+                return None;
+            }
             out.get(&f.format_id)
                 .copied()
                 .map(|br| (f.format_id.clone(), br))
@@ -1038,6 +1047,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1073,6 +1083,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(
             pick_thumbnail(&result),
@@ -1095,6 +1106,7 @@ mod tests {
             automatic_captions: Default::default(),
             manifest_url: None,
             segment_ranges: Default::default(),
+            format_box_ranges: Default::default(),
         };
         assert_eq!(pick_thumbnail(&result), None);
     }
