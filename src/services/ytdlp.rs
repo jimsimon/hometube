@@ -659,7 +659,7 @@ fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
-/// 2. `--extractor-args youtube-bgutilhttp:base_url=<url>` — PO token
+/// 2. `--extractor-args youtubepot-bgutilhttp:base_url=<url>` — PO token
 ///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
 ///    Compose sidecar at `http://pot-server:4416`).
 /// 3. `--cookies <path>` — if a cookies file exists on disk. The file
@@ -668,9 +668,10 @@ fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
 ///    it actually used. That gradually erodes the canonical cookie
 ///    set (auth cookies disappear after a few invocations) and breaks
 ///    authentication. The tempfile is owned by the returned guard.
-/// 4. `--js-runtimes node` — yt-dlp needs a JS runtime to decode
-///    YouTube's signature cipher; configurable via the
-///    `YTDLP_JS_RUNTIME` env var (defaults to `node`).
+/// 4. `--js-runtimes <runtime>` — yt-dlp needs a JS runtime (Deno,
+///    Node 20+, Bun, or QuickJS) to solve YouTube's n-parameter and
+///    signature challenges via the bundled `yt-dlp-ejs` component.
+///    Configurable via `YTDLP_JS_RUNTIME` (defaults to `deno`).
 fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
     // PO token plugin directory. Must be absolute because the caller
     // may set `.current_dir()` to a temp directory for `--write-pages`.
@@ -688,12 +689,18 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
         cmd.arg("--plugin-dirs").arg(&plugin_path_abs);
     }
 
-    // PO token server URL for the bgutil plugin.
+    // PO token server URL for the bgutil plugin. The extractor-arg key
+    // is `youtubepot-bgutilhttp` (note the `pot` infix) — this is the
+    // namespace the bgutil PoT provider framework registered with
+    // yt-dlp when it was split into a standalone plugin. Passing the
+    // older `youtube-bgutilhttp` key is silently ignored and the
+    // plugin falls back to `http://127.0.0.1:4416`, which produces
+    // confusing `TransportError`s in `yt-dlp -v` output.
     let pot_url =
         std::env::var("POT_SERVER_URL").unwrap_or_else(|_| "http://pot-server:4416".to_string());
     if !pot_url.is_empty() {
         cmd.arg("--extractor-args")
-            .arg(format!("youtube-bgutilhttp:base_url={pot_url}"));
+            .arg(format!("youtubepot-bgutilhttp:base_url={pot_url}"));
     }
 
     // YouTube extractor tuning. We deliberately request multiple player
@@ -746,10 +753,23 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
         }
     }
 
-    // JS runtime for YouTube signature cipher decoding. yt-dlp's default
-    // (`deno`) is broken on some systems, and YouTube extraction without
-    // a JS runtime has been deprecated upstream.
-    let js_runtime = std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "node".to_string());
+    // JS runtime for YouTube's n-parameter / signature challenge
+    // (handled by the `[jsc]` framework in current yt-dlp, separate
+    // from the legacy signature-cipher path). yt-dlp's default is
+    // `deno` and is enabled out-of-the-box; Node and Bun must be
+    // explicitly enabled via `--js-runtimes`. Minimum supported
+    // versions (per https://github.com/yt-dlp/yt-dlp/wiki/EJS):
+    //   - deno: 2.0.0
+    //   - node: 20.0.0
+    //   - bun:  1.0.31
+    // The runtime image must ship one of these at a supported version
+    // alongside the `yt-dlp-ejs` Python package, otherwise the
+    // n-challenge fails and every video errors with "Requested format
+    // is not available".
+    //
+    // Configurable via `YTDLP_JS_RUNTIME`. Set to empty string to omit
+    // the flag entirely (relying on yt-dlp's deno default).
+    let js_runtime = std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "deno".to_string());
     if !js_runtime.is_empty() {
         cmd.arg("--js-runtimes").arg(&js_runtime);
     }
