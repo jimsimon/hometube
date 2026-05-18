@@ -281,12 +281,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
             };
             // Fallback: if the itag has exactly one innertube entry,
             // there's no variant ambiguity — use it.
-            let sr = sr.or_else(|| {
-                by_itag
-                    .get(&itag)
-                    .filter(|v| v.len() == 1)
-                    .map(|v| v[0])
-            });
+            let sr = sr.or_else(|| by_itag.get(&itag).filter(|v| v.len() == 1).map(|v| v[0]));
             if let Some(sr) = sr {
                 result.format_box_ranges.insert(f.format_id.clone(), sr);
             }
@@ -319,13 +314,6 @@ fn tempdir_for_pages(video_id: &str) -> std::path::PathBuf {
     p
 }
 
-/// Scan a directory of yt-dlp `--write-pages` dumps for innertube
-/// `/player` responses and extract `initRange` / `indexRange` for
-/// each adaptive format.
-///
-/// Returns a map from itag (YouTube's integer format identifier) to
-/// the inclusive byte ranges for the initialization segment and the
-/// segment index. Missing or malformed entries are silently skipped.
 /// Extract the itag (integer prefix) from a yt-dlp format identifier.
 ///
 /// yt-dlp names formats like `"303"`, `"303-dashy"`, `"251-drc"`,

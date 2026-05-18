@@ -234,14 +234,13 @@ pub async fn get_stream_manifest(
 /// Representation's segment layout from a single small byte-range
 /// fetch instead of empirically probing each one.
 ///
-/// Primary source: `result.segment_ranges` — parsed from the
-/// innertube `/player` API dump at extract time. These are keyed by
-/// itag (integer) so we resolve each format's itag and look it up.
-/// The result is cached in `format_box_ranges` so subsequent
-/// manifest loads skip re-extraction entirely.
+/// Primary source: `result.format_box_ranges` — populated at extract
+/// time by matching each format's `filesize` against `contentLength`
+/// in innertube's adaptiveFormats. Keyed by `format_id`, so dubbed
+/// audio variants resolve to their own per-file ranges.
 ///
 /// Fallback: `format_box_ranges` SQLite table (populated on prior
-/// extractions or by the legacy background-probe path).
+/// extractions).
 ///
 /// Returns `Ok(None)` when no manifest can be produced.
 async fn fetch_and_rewrite_manifest(
@@ -953,7 +952,11 @@ async fn resolve_segment_ranges(
     let new_from_innertube: Vec<(String, BoxRanges)> = result
         .format_box_ranges
         .keys()
-        .filter_map(|format_id| out.get(format_id).copied().map(|br| (format_id.clone(), br)))
+        .filter_map(|format_id| {
+            out.get(format_id)
+                .copied()
+                .map(|br| (format_id.clone(), br))
+        })
         .collect();
     if !new_from_innertube.is_empty() {
         let pool_clone = pool.clone();
