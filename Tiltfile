@@ -67,7 +67,7 @@ local_resource(
     serve_env={
         'POT_SERVER_URL': 'http://127.0.0.1:4416',
         'DISCOVERY_SIDECAR_URL': 'http://127.0.0.1:3001',
-        'YTDLP_COOKIES_PATH': './data/cookies.txt',
+        'YTDLP_COOKIES_PATH': './data/tools/cookies.txt',
         # Point yt-dlp at the locally-installed bgutil plugin. The
         # path matches the one created by the `ytdlp-pot-plugin`
         # resource above, relative to the project root (which is

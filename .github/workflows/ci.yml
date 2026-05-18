@@ -218,7 +218,7 @@ jobs:
 
       - name: Run server + Playwright
         run: |
-          mkdir -p data
+          mkdir -p data/database data/tools data/cache
           ./target/release/hometube &
           SERVER_PID=$!
 
@@ -239,7 +239,7 @@ jobs:
           kill $SERVER_PID || true
           exit $EXIT
         env:
-          DATABASE_PATH: ./data/test.db
+          DATABASE_PATH: ./data/database/test.db
 
       - name: Upload Playwright report
         if: always()

@@ -508,10 +508,11 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
 }
 
 /// Returns the path where the yt-dlp cookies file is stored on disk.
-/// Configurable via `YTDLP_COOKIES_PATH` env var (default: `/data/cookies.txt`).
+/// Configurable via `YTDLP_COOKIES_PATH` env var (default: `./data/tools/cookies.txt`).
 pub fn cookies_file_path() -> std::path::PathBuf {
     std::path::PathBuf::from(
-        std::env::var("YTDLP_COOKIES_PATH").unwrap_or_else(|_| "/data/cookies.txt".to_string()),
+        std::env::var("YTDLP_COOKIES_PATH")
+            .unwrap_or_else(|_| "./data/tools/cookies.txt".to_string()),
     )
 }
 
@@ -891,10 +892,10 @@ pub async fn update_binary(pool: &sqlx::SqlitePool, cfg: &Config) -> AppResult<S
 
     // Resolve target path. The configured path may be a bare command
     // name (e.g. `yt-dlp`) on first boot — in that case we install into
-    // the data dir alongside `app.db`.
+    // the tools subdir of the data directory.
     let mut target = std::path::PathBuf::from(&cfg.ytdlp_path);
     if !target.is_absolute() && !target.exists() {
-        target = std::path::PathBuf::from("./data/yt-dlp");
+        target = std::path::PathBuf::from("./data/tools/yt-dlp");
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).await.ok();
         }
