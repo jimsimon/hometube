@@ -1,113 +1,106 @@
 # Deploying HomeTube
 
-HomeTube ships as a single Docker image. It's zero-config: every
-runtime setting (Google credentials, parent accounts, allowlists) is
-collected via the in-app setup wizard the first time you open the app.
+HomeTube runs as a three-container Docker Compose stack:
 
-## One-command deploy
+| Container | Image | Purpose |
+|---|---|---|
+| `app` | `ghcr.io/jimsimon/hometube` | Rust backend + Lit/Vite frontend |
+| `discovery` | `ghcr.io/jimsimon/hometube-discovery` | youtubei.js sidecar for search + metadata |
+| `pot-server` | `brainicism/bgutil-ytdlp-pot-provider` | Proof-of-Origin tokens for yt-dlp |
 
-```bash
-docker run -p 3000:3000 -v hometube-data:/app/data \
-  ghcr.io/jimsimon/hometube:latest
-```
+The app needs both sidecars at runtime — the discovery service replaces the YouTube Data API for search/channel/playlist lookups, and the PO-token server lets yt-dlp bypass YouTube's bot detection. None of the three are optional.
 
-That's it. Then open <http://localhost:3000>.
+After first boot, all configuration (parent accounts, child profiles, allowlists) is collected through an in-app setup wizard. There is no config file to edit.
 
-The named volume (`hometube-data`) holds the SQLite database, the
-on-disk segment cache, and any updated yt-dlp binary. Keep that volume
-around between restarts and you keep all of your family's data.
+## Compose deploy
 
-## Compose
-
-The reference Compose stack lives at [`docker/docker-compose.yml`](../docker/docker-compose.yml).
-It runs three containers — the app plus a youtubei.js discovery
-sidecar and a bgutil PO-token server — wired together on an internal
-Docker network. The `docker run` snippet above won't work on its own
-because the app needs both sidecars; use Compose for any real deploy.
+The reference stack is [`docker/docker-compose.yml`](../docker/docker-compose.yml).
 
 ```bash
 HOMETUBE_DATA=/srv/hometube docker compose -f docker/docker-compose.yml up -d
 ```
 
-See the comment header of the compose file for the full list of
-environment variables.
+`HOMETUBE_DATA` is the only required variable — it's the host path that backs the app's SQLite database, segment cache, and updated yt-dlp binary. Everything else (image registry, version, host port, runtime UID/GID) has a sensible default that you can override; see the comment header at the top of the compose file for the full list.
+
+Open the app at <http://localhost:30000> once the containers report healthy.
+
+## TrueNAS Scale
+
+The compose file is designed to paste into a TrueNAS Scale (ElectricEel 24.10+) **Custom App**.
+
+1. Create a dataset for persistent state, e.g. `tank/apps/hometube/data`, and `chown` it to `568:568` (the TrueNAS `apps` user).
+2. **Apps → Discover Apps → Custom App** → paste the compose file.
+3. Set `HOMETUBE_DATA` to the dataset path you created. Override `HOMETUBE_PORT` if 30000 is taken on your box.
+4. Deploy. The app reports healthy via `/api/health`; both sidecars have their own healthchecks gating the app's startup.
+
+Snapshots, replication, and backup happen at the ZFS layer on the data dataset — no application-aware backup hook needed.
 
 ## First-run walkthrough
 
-1. Visit <http://localhost:3000>. The app redirects you to `/setup`.
-2. Step 1 — **Welcome.** Click "Begin".
-3. Step 2 — **Google Cloud credentials.** Paste in your OAuth client ID
-   + secret + YouTube Data API key. The wizard auto-fills the redirect
-   URI based on the host you're connecting from. See
-   [Google Cloud project setup](google-cloud-setup.md) for how to get
-   those values.
-4. Step 3 — **Sign in with Google.** The wizard opens Google's consent
-   screen and brings you back. The first signed-in account is the
-   first parent.
-5. Step 4 — **Set a parent PIN.** Pick 4–6 numeric digits. You'll be
-   asked for this every time you switch into your parent profile from
-   the picker, but never for browsing on your own profile.
-6. Step 5 — **Add family members (optional).** You can add more
-   parents or children now or skip ahead and add them later from the
-   parent dashboard's *Family* tab.
-7. Step 6 — **Done.** You're in. The app drops you on `/parent/home`.
+1. Open the app. The wizard redirects you to `/setup`.
+2. **Welcome.** Click "Begin".
+3. **Create parent account.** Pick a username and a 4–6 digit PIN. This account becomes the first parent.
+4. **Invite family (optional).** Add more parents or children now, or skip and add them later from the parent dashboard's *Family* tab.
+5. **Done.** You land on `/parent/home`.
 
-After setup, every visit to `/` lands on the profile picker (Netflix
-style) until someone picks a profile. Children switch with one tap;
-parents enter their PIN.
+After setup, every visit to `/` lands on a profile picker. Children switch with one tap; parents enter their PIN.
 
 ## Health checks
 
-The image declares a `HEALTHCHECK` that hits `/api/health`. The route
-runs a `SELECT 1` against SQLite before returning `ok`, so a healthy
-container is one that can serve HTTP and read its database.
+All three containers declare healthchecks:
+
+- `app` — `GET /api/health`, which runs `SELECT 1` against SQLite.
+- `discovery` — `GET /health` on the sidecar's internal HTTP server.
+- `pot-server` — `GET /ping` on the bgutil service.
+
+`app` will not start until `discovery` and `pot-server` both report healthy, so a healthy `app` container implies the whole stack is up.
 
 ## Backups
 
-HomeTube's entire state lives in `/app/data` (SQLite database +
-segment cache + yt-dlp binary). To back up:
+The entire app state lives under your `HOMETUBE_DATA` path on the host. The two sidecars are stateless — destroy and recreate them freely.
+
+The cleanest backup is filesystem-level: snapshot or `tar` the data path while the app container is stopped.
 
 ```bash
-# Stop the container first so SQLite isn't being written.
-docker stop hometube
-
-# Copy the volume contents somewhere safe.
-docker run --rm -v hometube-data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/hometube-$(date +%F).tar.gz -C /data .
-
-# Restart.
-docker start hometube
+docker compose -f docker/docker-compose.yml stop app
+tar czf hometube-$(date +%F).tar.gz -C "$HOMETUBE_DATA" .
+docker compose -f docker/docker-compose.yml start app
 ```
 
-Restoring is the inverse — stop the container, untar into the volume,
-start it again.
+On TrueNAS, replace the tar step with a ZFS snapshot — atomic, instant, and replication-friendly:
 
-If you only care about the database (and don't mind re-warming the
-segment cache), you can copy `/app/data/app.db` directly with
-`docker cp`.
+```bash
+zfs snapshot tank/apps/hometube/data@$(date +%F)
+```
+
+If you only care about the SQLite database and don't mind re-warming the segment cache on next play, `$HOMETUBE_DATA/app.db` is the only file you need to copy.
 
 ## Updating
 
 ```bash
-docker pull ghcr.io/jimsimon/hometube:latest
-docker stop hometube && docker rm hometube
-docker run -d --name hometube -p 3000:3000 \
-  -v hometube-data:/app/data ghcr.io/jimsimon/hometube:latest
+docker compose -f docker/docker-compose.yml pull
+docker compose -f docker/docker-compose.yml up -d
 ```
 
-Migrations run automatically on startup.
+Database migrations run automatically on app startup. Take a snapshot first if you want a clean rollback path — see [Migrations and rollback](#migrations-and-rollback) below.
+
+## Migrations and rollback
+
+Migrations are embedded into the backend binary via `sqlx::migrate!` and run on every startup. They are **forward-only by convention** — there are no `.down.sql` files, and `sqlx`'s embedded runner has no `revert()` API.
+
+If a migration breaks something, the recovery path is:
+
+- **Schema problem you can fix forward.** Write a new migration that corrects it, deploy.
+- **Data corruption or a migration you can't unwind.** Restore from a backup snapshot of `$HOMETUBE_DATA`.
+
+This is the same reason ZFS snapshots before upgrades are worth the discipline — they give you instant atomic rollback for free.
 
 ## Reverse proxies / HTTPS
 
-HomeTube speaks plain HTTP on port 3000 inside the container. Put it
-behind nginx, Caddy, Traefik, or your reverse proxy of choice and let
-that proxy terminate TLS. Make sure the proxy passes the `Host` header
-through unchanged — the setup wizard uses `Host` to suggest a default
-OAuth redirect URI.
+The app speaks plain HTTP on its container port. Put it behind nginx, Caddy, Traefik, or your reverse proxy of choice and let that proxy terminate TLS. Pass the `Host` header through unchanged.
 
 ## Resource sizing
 
-A family of three browsing 1080p with the 50 GB segment cache uses on
-the order of 1 GB of RAM under load and a few GB of CPU-seconds per
-hour. SQLite plus the cache eats most of the disk; size the volume to
-your `cache_max_size` plus a few hundred MB of headroom.
+A family of three browsing 1080p with the 50 GB segment cache uses around 1 GB of RAM under load and a few GB of CPU-seconds per hour. SQLite plus the cache dominates disk usage — size the data dataset to your `cache_max_size` plus a few hundred MB of headroom.
+
+The sidecars are tiny: ~50 MB RAM each at idle, more under search load.
