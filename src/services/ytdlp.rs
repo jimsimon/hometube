@@ -436,16 +436,20 @@ fn max_audio_language_preference(formats: &[Format]) -> Option<i64> {
         .max()
 }
 
-/// Returns `true` for YouTube auto-generated audio dubs (AI
-/// translations). A format is a dub when another audio format has a
-/// strictly higher `language_preference` for the same video — yt-dlp
-/// scores the original track highest.
+/// Returns `true` for YouTube AI-generated audio dubs. We keep
+/// channel-author-uploaded multi-language audio (real human dubs) so
+/// users can switch languages via the player UI. AI dubs are
+/// detected by the conjunction of:
 ///
-/// This relative check (rather than `pref < 0`) avoids dropping
-/// legitimate single-language audio that YouTube still marks
-/// `pref=-1` and `"TV-D"` (observed on some kids-content channels).
-/// `max_pref` is the maximum across all audio formats; pass `None`
-/// when no format declares a preference (no dubs to filter).
+/// 1. `"TV-D"` in `format_note` — yt-dlp's marker for AI translations
+///    (also appears on the original-language track and on video
+///    formats, so it's necessary but not sufficient).
+/// 2. `language_preference` strictly lower than the max across audio
+///    formats — yt-dlp scores the original-language track highest,
+///    so anything below max with a `"TV-D"` tag is an AI translation.
+///
+/// Author-uploaded dubs typically lack the `"TV-D"` marker, so they
+/// pass condition 1 and remain in the manifest.
 fn is_auto_dub(f: &Format, max_pref: Option<i64>) -> bool {
     let vcodec = f.vcodec.as_deref().unwrap_or("none");
     let acodec = f.acodec.as_deref().unwrap_or("none");
@@ -453,10 +457,15 @@ fn is_auto_dub(f: &Format, max_pref: Option<i64>) -> bool {
     if !is_audio_only {
         return false;
     }
-    match (f.language_preference, max_pref) {
-        (Some(pref), Some(max)) => pref < max,
-        _ => false,
+    let has_tv_d = f
+        .format_note
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase().contains("tv-d"))
+        .unwrap_or(false);
+    if !has_tv_d {
+        return false;
     }
+    matches!((f.language_preference, max_pref), (Some(p), Some(max)) if p < max)
 }
 
 /// Result of probing one format's index range for the WebM Cues element.

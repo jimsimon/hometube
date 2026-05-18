@@ -230,16 +230,26 @@ pub fn synthesize_manifest(
         let is_video_only = vcodec != "none" && acodec == "none";
         let is_audio_only = acodec != "none" && vcodec == "none";
 
-        // Exclude YouTube auto-generated dubs (AI translations).
-        // A format is a dub iff another audio format has a strictly
-        // higher `language_preference` — yt-dlp scores the original
-        // track highest. This relative check avoids dropping the only
-        // audio on single-language videos where YouTube nonetheless
-        // marks `pref=-1` and `"TV-D"`.
+        // Exclude YouTube AI-generated dubs but keep channel-author-
+        // uploaded multi-language audio (so users can switch languages
+        // in the player). AI dubs satisfy BOTH conditions:
+        //   1. `"TV-D"` in `format_note` (yt-dlp's AI-translation
+        //      marker; also present on the original and on video
+        //      formats, so necessary but not sufficient).
+        //   2. `language_preference` strictly below the max — yt-dlp
+        //      scores the original-language track highest.
+        // Author-uploaded dubs lack `"TV-D"` and pass through.
         if is_audio_only {
-            if let (Some(pref), Some(max)) = (f.language_preference, max_audio_pref) {
-                if pref < max {
-                    return false;
+            let has_tv_d = f
+                .format_note
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase().contains("tv-d"))
+                .unwrap_or(false);
+            if has_tv_d {
+                if let (Some(pref), Some(max)) = (f.language_preference, max_audio_pref) {
+                    if pref < max {
+                        return false;
+                    }
                 }
             }
         }
