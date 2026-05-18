@@ -133,7 +133,7 @@ async fn list_captions_returns_empty_when_none() {
 }
 
 #[tokio::test]
-async fn stream_manifest_404_when_no_manifest_url() {
+async fn stream_manifest_404_when_no_usable_formats() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
@@ -153,7 +153,7 @@ async fn stream_manifest_404_when_no_manifest_url() {
         .server
         .get("/api/videos/vid-1/stream/manifest.mpd")
         .await;
-    // No manifest_url in the seeded metadata → 404 from the handler.
+    // No usable formats in the seeded metadata → 404 from the handler.
     assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
 }
 

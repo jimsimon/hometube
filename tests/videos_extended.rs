@@ -47,8 +47,7 @@ fn base_metadata(video_id: &str, channel_id: &str) -> serde_json::Value {
         "automatic_captions": {
             "fr": [{"ext": "vtt", "url": "https://subs.example/fr.vtt"}],
             "de": [{"ext": "srv1", "url": "https://subs.example/de.srv1"}]
-        },
-        "manifest_url": null
+        }
     })
 }
 
@@ -248,9 +247,9 @@ async fn stream_with_no_quality_setting_returns_all() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn manifest_returns_404_without_manifest_url() {
+async fn manifest_returns_404_without_usable_formats() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    // Seed metadata without a manifest_url and without any format having one.
+    // Seed metadata without any usable formats.
     let json = serde_json::json!({
         "id": "vid-no-m",
         "title": "No Manifest",
