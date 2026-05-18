@@ -426,7 +426,6 @@ pub fn read_ebml_vint_pub(data: &[u8], offset: usize) -> Option<(usize, u64)> {
     read_ebml_vint(data, offset)
 }
 
-
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
 /// single language and return the resulting WebVTT body.
 ///

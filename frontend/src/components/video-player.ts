@@ -127,10 +127,7 @@ const QUALITY_CAP: Record<string, number> = {
  * Read an EBML variable-width integer at `offset`.
  * Returns `[width, value]` or `null` if the data is too short/invalid.
  */
-function readEbmlVint(
-  buf: Uint8Array,
-  offset: number,
-): [number, number] | null {
+function readEbmlVint(buf: Uint8Array, offset: number): [number, number] | null {
   if (offset >= buf.length) return null;
   const first = buf[offset];
   if (first === 0) return null;
@@ -596,12 +593,7 @@ export class VideoPlayer extends LitElement {
         if (data.byteLength < 8 || data.byteLength > 8192) return;
         const u8 = new Uint8Array(data);
         // Only inspect things that look like a WebM init (EBML header).
-        if (
-          u8[0] !== 0x1a ||
-          u8[1] !== 0x45 ||
-          u8[2] !== 0xdf ||
-          u8[3] !== 0xa3
-        ) {
+        if (u8[0] !== 0x1a || u8[1] !== 0x45 || u8[2] !== 0xdf || u8[3] !== 0xa3) {
           return;
         }
         const info = extractAndStripProjection(u8);

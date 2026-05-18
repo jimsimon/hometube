@@ -171,18 +171,13 @@ pub async fn get_stream(
     // formats with "equi" or "hequ" in `format_note`. Check any
     // video-only format (has vcodec, no acodec).
     let is_spherical = result.formats.iter().any(|f| {
-        let is_video_only = f
-            .vcodec
-            .as_deref()
-            .is_some_and(|v| v != "none")
+        let is_video_only = f.vcodec.as_deref().is_some_and(|v| v != "none")
             && f.acodec.as_deref().is_none_or(|a| a == "none");
         is_video_only
-            && f.format_note
-                .as_deref()
-                .is_some_and(|n| {
-                    let lower = n.to_ascii_lowercase();
-                    lower.contains("equi") || lower.contains("hequ")
-                })
+            && f.format_note.as_deref().is_some_and(|n| {
+                let lower = n.to_ascii_lowercase();
+                lower.contains("equi") || lower.contains("hequ")
+            })
     });
 
     Ok(Json(StreamResponse {
@@ -521,7 +516,6 @@ pub struct FormatQuery {
     pub sig: String,
 }
 
-
 /// Scan `data` for the WebM Cues element ID (`0x1C53BB6B`).
 /// Returns the byte offset within `data` where it starts, or `None`.
 fn cues_scan_offset(data: &[u8]) -> Option<usize> {
@@ -738,10 +732,7 @@ pub async fn get_format(
 
     if is_small_range {
         // Buffer the entire small response.
-        let body_bytes = res
-            .bytes()
-            .await
-            .map_err(AppError::Http)?;
+        let body_bytes = res.bytes().await.map_err(AppError::Http)?;
 
         if body_bytes.len() >= 4 && body_bytes[0..4] != WEBM_CUES_ID {
             // Not a Cues element at byte 0 — scan for it.
@@ -795,8 +786,14 @@ pub async fn get_format(
                     tokio::spawn(async move {
                         use crate::services::segment_ranges::{self, BoxRanges, ByteRange};
                         let br = BoxRanges {
-                            init: ByteRange { start: 0, end: init_end },
-                            index: ByteRange { start: new_start, end: idx_end },
+                            init: ByteRange {
+                                start: 0,
+                                end: init_end,
+                            },
+                            index: ByteRange {
+                                start: new_start,
+                                end: idx_end,
+                            },
                         };
                         segment_ranges::store(&pool, &vid, &fmt, br).await;
                     });
@@ -807,7 +804,10 @@ pub async fn get_format(
                 let mut response = Response::new(Body::from(corrected));
                 *response.status_mut() = StatusCode::PARTIAL_CONTENT;
                 let h = response.headers_mut();
-                h.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+                h.insert(
+                    header::CONTENT_TYPE,
+                    "application/octet-stream".parse().unwrap(),
+                );
                 h.insert(header::CONTENT_LENGTH, content_length.into());
                 let range_str = match effective_total {
                     Some(total) => format!("bytes {}-{}/{}", original_start, original_end, total),
@@ -840,11 +840,8 @@ pub async fn get_format(
     // DB that's larger than what the manifest declared, re-fetch with
     // the extended range so MSE gets a complete init segment.
     // ---------------------------------------------------------------
-    if byte_start == 0 && byte_end.is_some() {
-        if let Some(stored) =
-            segment_ranges::lookup(&state.db, &q.video_id, &q.format).await
-        {
-            let requested_end = byte_end.unwrap();
+    if let (0, Some(requested_end)) = (byte_start, byte_end) {
+        if let Some(stored) = segment_ranges::lookup(&state.db, &q.video_id, &q.format).await {
             if stored.init.end > requested_end {
                 tracing::info!(
                     video_id = %q.video_id,
@@ -866,7 +863,10 @@ pub async fn get_format(
                 let mut response = Response::new(Body::from(ext_bytes));
                 *response.status_mut() = StatusCode::PARTIAL_CONTENT;
                 let h = response.headers_mut();
-                h.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+                h.insert(
+                    header::CONTENT_TYPE,
+                    "application/octet-stream".parse().unwrap(),
+                );
                 h.insert(header::CONTENT_LENGTH, content_length.into());
                 let range_str = match effective_total {
                     Some(total) => format!("bytes 0-{}/{}", stored.init.end, total),
@@ -937,7 +937,6 @@ pub async fn get_format(
     }
     Ok(response)
 }
-
 
 /// Parse a `Range: bytes=START-END` header.
 /// Returns `(start, Option<end>)`. `end` is `None` for open-ended ranges like `bytes=1000-`.
@@ -1109,13 +1108,10 @@ async fn resolve_segment_ranges(
     // `segment_ranges` from innertube when no per-format override
     // exists.
     for f in &result.formats {
-        let sr_opt = result
-            .format_box_ranges
-            .get(&f.format_id)
-            .or_else(|| {
-                parse_itag_from_format_id(&f.format_id)
-                    .and_then(|itag| result.segment_ranges.get(&itag))
-            });
+        let sr_opt = result.format_box_ranges.get(&f.format_id).or_else(|| {
+            parse_itag_from_format_id(&f.format_id)
+                .and_then(|itag| result.segment_ranges.get(&itag))
+        });
         let Some(sr) = sr_opt else { continue };
         let br = BoxRanges {
             init: ByteRange {

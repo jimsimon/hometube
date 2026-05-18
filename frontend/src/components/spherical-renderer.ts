@@ -55,9 +55,7 @@ export interface SphericalRenderer {
  * draws it onto a sphere viewed from inside. The user rotates the camera
  * via pointer drag (mouse or touch).
  */
-export function createSphericalRenderer(
-  opts: SphericalRendererOptions,
-): SphericalRenderer {
+export function createSphericalRenderer(opts: SphericalRendererOptions): SphericalRenderer {
   const { video, canvas } = opts;
   const dragTarget = opts.dragTarget ?? canvas;
 
@@ -121,8 +119,7 @@ export function createSphericalRenderer(
     if (!pointerActive || e.pointerId !== activePointerId) return;
     if (!isDragging) {
       // Check dead zone.
-      const distSq =
-        (e.clientX - startX) ** 2 + (e.clientY - startY) ** 2;
+      const distSq = (e.clientX - startX) ** 2 + (e.clientY - startY) ** 2;
       if (distSq < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
       // Exceeded threshold — start dragging and capture.
       isDragging = true;
