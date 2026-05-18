@@ -431,10 +431,10 @@ export class VideoPlayer extends LitElement {
     // "en-GB"). Users can switch via the language button in the
     // overflow menu when multiple languages are present.
     //
-    // Shaka v5 replaced the flat `preferredAudioLanguage` string with
-    // a `preferredAudio` object that bundles language, role, channel
-    // count, label, etc.
-    player.configure("preferredAudio", { language: "en" });
+    // Shaka v5.1 replaced the flat `preferredAudioLanguage` with
+    // `preferredAudio`, an *array* of preference objects (each may
+    // specify language, role, channelCount, label, etc).
+    player.configure("preferredAudio", [{ language: "en" }]);
 
     // Apply quality cap if set.
     if (this.settings?.max_quality) {
