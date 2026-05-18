@@ -123,6 +123,79 @@ const QUALITY_CAP: Record<string, number> = {
   "1080p": 1080,
 };
 
+/**
+ * Read an EBML variable-width integer at `offset`.
+ * Returns `[width, value]` or `null` if the data is too short/invalid.
+ */
+function readEbmlVint(
+  buf: Uint8Array,
+  offset: number,
+): [number, number] | null {
+  if (offset >= buf.length) return null;
+  const first = buf[offset];
+  if (first === 0) return null;
+  let width = 1;
+  let mask = 0x80;
+  while ((first & mask) === 0 && width < 8) {
+    width++;
+    mask >>= 1;
+  }
+  if (offset + width > buf.length || width > 8) return null;
+  let value = first & (mask - 1);
+  for (let i = 1; i < width; i++) {
+    value = value * 256 + buf[offset + i];
+  }
+  return [width, value];
+}
+
+/**
+ * Scan `buf` for a WebM Projection master element (ID 0x7670) and
+ * overwrite it byte-for-byte with a Void element (ID 0xEC). Both element
+ * IDs are valid at any position; the Tracks/TrackEntry/Video parent
+ * size fields remain correct because the total byte count is preserved.
+ *
+ * Returns `true` if a Projection element was found and rewritten.
+ *
+ * The function only rewrites when the bytes immediately following the
+ * size VINT look like a real Projection content (`0x7671` ProjectionType
+ * as the first child) — this avoids false positives on random 0x76 0x70
+ * byte pairs inside binary data (CodecPrivate, etc.).
+ */
+function rewriteWebmProjectionToVoid(buf: Uint8Array): boolean {
+  for (let i = 0; i + 4 < buf.length; i++) {
+    if (buf[i] !== 0x76 || buf[i + 1] !== 0x70) continue;
+    const sizeRead = readEbmlVint(buf, i + 2);
+    if (!sizeRead) continue;
+    const [sizeWidth, sizeValue] = sizeRead;
+    const total = 2 + sizeWidth + sizeValue;
+    if (i + total > buf.length) continue;
+    // First child should be ProjectionType (0x7671).
+    const childOffset = i + 2 + sizeWidth;
+    if (
+      buf[childOffset] !== 0x76 ||
+      buf[childOffset + 1] !== 0x71
+    ) {
+      continue;
+    }
+    // Rewrite as Void: 0xEC + 1-byte VINT size + (total - 2) zero bytes.
+    // Void element data length = total - 2 (1 byte ID, 1 byte size).
+    // 1-byte VINT can encode sizes up to 126; Projection in WebM is
+    // typically <60 bytes, so this always fits.
+    const voidDataLen = total - 2;
+    if (voidDataLen > 126) {
+      // Would need a wider size VINT to stay byte-equivalent. Bail.
+      continue;
+    }
+    buf[i] = 0xec;
+    buf[i + 1] = 0x80 | voidDataLen;
+    for (let j = i + 2; j < i + total; j++) {
+      buf[j] = 0;
+    }
+    return true;
+  }
+  return false;
+}
+
 @customElement("hometube-video-player")
 export class VideoPlayer extends LitElement {
   @property({ type: String, attribute: "video-id" })
@@ -425,6 +498,39 @@ export class VideoPlayer extends LitElement {
     player.getNetworkingEngine()!.registerRequestFilter((_type, request) => {
       request.allowCrossSiteCredentials = true;
     });
+
+    // Rewrite WebM init segments to neutralize the Projection element.
+    // YouTube serves 360°/VR videos as WebM with a `Projection` master
+    // element inside the Video track. Chromium's MSE VP9 path rejects
+    // those init segments (MEDIA_SOURCE_OPERATION_FAILED, error 3014).
+    // We overwrite the Projection element byte-for-byte with a WebM Void
+    // element (ID 0xEC) of identical size. MSE ignores Void entirely, so
+    // the surrounding Tracks/TrackEntry/Video size fields stay correct.
+    // The video then plays as a flat equirectangular image (we lose VR
+    // remapping, but Chromium wouldn't do VR remapping anyway).
+    (player.getNetworkingEngine() as any).registerResponseFilter(
+      (type: number, response: { data: ArrayBuffer | Uint8Array }) => {
+        // SEGMENT == 1 in Shaka; init segments are fetched as SEGMENT.
+        if (type !== 1) return;
+        const data = response.data;
+        if (!(data instanceof ArrayBuffer)) return;
+        if (data.byteLength < 8 || data.byteLength > 8192) return;
+        const u8 = new Uint8Array(data);
+        // Only inspect things that look like a WebM init (EBML header).
+        if (
+          u8[0] !== 0x1a ||
+          u8[1] !== 0x45 ||
+          u8[2] !== 0xdf ||
+          u8[3] !== 0xa3
+        ) {
+          return;
+        }
+        if (rewriteWebmProjectionToVoid(u8)) {
+          // eslint-disable-next-line no-console
+          console.info("[video-player] neutralized WebM Projection element");
+        }
+      },
+    );
 
     // Default audio language to English. Shaka picks any AdaptationSet
     // whose `lang` attribute starts with "en" (e.g. "en", "en-US",
