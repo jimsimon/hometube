@@ -291,10 +291,12 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // first 64 bytes of each index range and adjust if needed.
     fixup_webm_cues_offsets(&mut result).await;
 
-    // Fallback: for opus audio formats that have NO segment_ranges at
-    // all (innertube sometimes omits them), probe the file header to
-    // find the Cues element position.
-    probe_missing_audio_ranges(&mut result).await;
+    // NOTE: probe_missing_audio_ranges is NOT called here on the
+    // critical path. It runs as a background task after the extraction
+    // result is cached (see video_cache.rs). This avoids blocking the
+    // first page load for videos with many dubbed audio languages.
+    // The dub ranges appear in the manifest after the background probe
+    // completes (typically within a few seconds).
 
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
@@ -465,18 +467,30 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
         return;
     }
 
-    // Probe each unique URL once. Different language variants of the
-    // same itag (audio dubs) are *different files* with different Cues
-    // byte offsets, so probing only one variant per itag would produce
-    // wrong ranges for the other languages. DRC variants are skipped
-    // entirely — they share an itag with the standard variant but the
-    // DASH manifest excludes them.
+    // Only probe video formats and original-language audio on the
+    // critical extraction path. Non-original audio dubs are probed in
+    // a background task after extraction completes (see video_cache.rs)
+    // to avoid blocking the first page load — a video with 35 dubbed
+    // languages would otherwise add ~35 sequential CDN round-trips.
+    //
+    // DRC variants are always skipped (the DASH manifest excludes them).
     //
     // For each probed URL, we apply the resulting adjustment to ALL
     // format_ids that share that URL (e.g. `249-7` and `249-dashy-7`
     // are the same file, different protocol labels).
     //
     // Group: URL -> list of (format_id, itag).
+    let max_audio_pref: Option<i64> = result
+        .formats
+        .iter()
+        .filter(|f| {
+            let v = f.vcodec.as_deref().unwrap_or("none");
+            let a = f.acodec.as_deref().unwrap_or("none");
+            a != "none" && v == "none"
+        })
+        .filter_map(|f| f.language_preference)
+        .max();
+
     let mut url_to_formats: std::collections::HashMap<
         String,
         Vec<(String, i64)>,
@@ -495,6 +509,17 @@ pub async fn fixup_webm_cues_offsets(result: &mut ExtractResult) {
         };
         if !result.segment_ranges.contains_key(&itag) {
             continue;
+        }
+        // Defer non-original audio dubs to the background probe.
+        let vcodec = f.vcodec.as_deref().unwrap_or("none");
+        let acodec = f.acodec.as_deref().unwrap_or("none");
+        let is_audio_only = acodec != "none" && vcodec == "none";
+        if is_audio_only {
+            if let (Some(pref), Some(max)) = (f.language_preference, max_audio_pref) {
+                if pref < max {
+                    continue;
+                }
+            }
         }
         url_to_formats
             .entry(url.clone())
@@ -706,7 +731,14 @@ fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
 /// `<SegmentBase>` and the format is excluded. This function fills the
 /// gap by fetching the first ~1 KiB of each audio URL and scanning
 /// for the Cues element.
-async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
+/// Probe audio formats that lack `format_box_ranges` entries.
+/// Returns a map of `format_id → SegmentRanges` for any formats
+/// whose Cues element was successfully discovered.
+///
+/// Called as a background task after extraction — the results are
+/// persisted to the `format_box_ranges` DB table so the next manifest
+/// request picks them up.
+pub async fn probe_missing_audio_ranges(result: &ExtractResult) -> std::collections::HashMap<String, SegmentRanges> {
     use futures_util::stream::{self, StreamExt};
 
     // Probe each unique audio URL that still lacks format_box_ranges.
@@ -759,12 +791,12 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
     }
 
     if url_to_formats.is_empty() {
-        return;
+        return std::collections::HashMap::new();
     }
 
-    tracing::debug!(
+    tracing::info!(
         count = url_to_formats.len(),
-        "probing audio URLs missing segment_ranges"
+        "probing dub audio URLs in background"
     );
 
     let client = reqwest::Client::new();
@@ -837,13 +869,15 @@ async fn probe_missing_audio_ranges(result: &mut ExtractResult) {
         .collect()
         .await;
 
+    let mut out = std::collections::HashMap::new();
     for (format_ids, ranges) in discovered {
         if let Some(sr) = ranges {
             for format_id in format_ids {
-                result.format_box_ranges.insert(format_id, sr);
+                out.insert(format_id, sr);
             }
         }
     }
+    out
 }
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
