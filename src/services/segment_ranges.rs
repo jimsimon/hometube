@@ -16,11 +16,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::warn;
 
-/// WebM Cues element ID (4 bytes, big-endian). Used by the extraction-time
-/// and manifest-time validators to locate the Cues element within an
-/// `indexRange` byte window.
-pub const WEBM_CUES_ID: [u8; 4] = [0x1C, 0x53, 0xBB, 0x6B];
-
 /// Inclusive byte range `[start, end]` (matching the HTTP `Range:`
 /// header convention and the DASH `range="A-B"` attribute).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

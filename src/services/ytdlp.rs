@@ -129,21 +129,11 @@ pub struct ExtractResult {
     /// (sidx / Cues). These are used by the DASH synthesizer
     /// to emit `<SegmentBase indexRange>` + `<Initialization range>`.
     ///
-    /// Populated at extract time and immediately cached in
-    /// `format_box_ranges` so probing is never needed.
-    #[serde(default)]
-    pub segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
-
-    /// Per-format-id ranges, populated by the WebM Cues fixup probe.
-    /// Different language variants of the same itag are *different
-    /// files* with different Cues byte offsets, so the per-itag
-    /// `segment_ranges` map can't represent them correctly. When this
-    /// map has an entry for a `format_id`, it overrides whatever the
-    /// itag-keyed map would produce.
-    ///
-    /// Serialized so the metadata cache preserves the probe results
-    /// across server restarts (yt-dlp itself doesn't emit this field,
-    /// hence `serde(default)`).
+    /// Populated at extract time by matching each format's `filesize`
+    /// against the `contentLength` field in innertube's adaptiveFormats
+    /// array. This per-format-id keying correctly handles dubbed audio
+    /// tracks (different files sharing an itag but with different
+    /// byte offsets).
     #[serde(default)]
     pub format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
@@ -189,8 +179,6 @@ struct ExtractResultRaw {
     #[serde(default)]
     manifest_url: Option<String>,
     #[serde(default)]
-    segment_ranges: std::collections::HashMap<i64, SegmentRanges>,
-    #[serde(default)]
     format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
@@ -212,7 +200,6 @@ impl From<ExtractResultRaw> for ExtractResult {
             subtitles: raw.subtitles,
             automatic_captions: raw.automatic_captions,
             manifest_url: raw.manifest_url,
-            segment_ranges: raw.segment_ranges,
             format_box_ranges: raw.format_box_ranges,
         }
     }
@@ -275,19 +262,53 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     let mut result: ExtractResult = serde_json::from_str(&stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("parsing yt-dlp JSON: {e}")))?;
 
-    // Parse SegmentBase ranges from the innertube player dump(s).
-    result.segment_ranges = parse_player_page_dumps(&pages_dir).await;
-    if result.segment_ranges.is_empty() {
-        debug!(%video_id, "no segment ranges found in player dumps");
+    // Parse SegmentBase ranges from the innertube player dump(s) and
+    // resolve them per-format-id. Innertube's `adaptiveFormats` array
+    // contains one entry per file variant — for itag 249 there may be
+    // three entries (different language dubs), each with its own byte
+    // ranges. We match against yt-dlp's per-format `filesize` using
+    // innertube's `contentLength` to assign the right ranges to each
+    // `format_id`.
+    let innertube_ranges = parse_player_page_dumps(&pages_dir).await;
+    if !innertube_ranges.is_empty() {
+        // Build itag → [entries] index to enable single-entry fallback
+        // when a format has no `filesize`.
+        let mut by_itag: std::collections::HashMap<i64, Vec<((i64, u64), SegmentRanges)>> =
+            std::collections::HashMap::new();
+        for ((itag, cl), sr) in &innertube_ranges {
+            by_itag.entry(*itag).or_default().push(((*itag, *cl), *sr));
+        }
+        for f in &result.formats {
+            let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
+                continue;
+            };
+            // Match by (itag, filesize) — the canonical path.
+            let sr = if let Some(fs) = f.filesize.and_then(|s| u64::try_from(s).ok()) {
+                innertube_ranges.get(&(itag, fs)).copied()
+            } else {
+                None
+            };
+            // Fallback: if the itag has exactly one innertube entry,
+            // there's no variant ambiguity — use it.
+            let sr = sr.or_else(|| {
+                by_itag
+                    .get(&itag)
+                    .filter(|v| v.len() == 1)
+                    .map(|v| v[0].1)
+            });
+            if let Some(sr) = sr {
+                result.format_box_ranges.insert(f.format_id.clone(), sr);
+            }
+        }
+        debug!(
+            %video_id,
+            innertube_entries = innertube_ranges.len(),
+            resolved = result.format_box_ranges.len(),
+            "resolved per-format-id segment ranges from innertube"
+        );
     } else {
-        debug!(%video_id, count = result.segment_ranges.len(), "parsed segment ranges from player dump");
+        debug!(%video_id, "no segment ranges found in player dumps");
     }
-
-    // WebM Cues offset correction is handled lazily by the proxy
-    // (see get_format in routes/videos.rs). When a range response
-    // doesn't start with the Cues ID, the proxy scans for it, shifts
-    // the bytes, fetches the missing tail, and persists the corrected
-    // ranges. Zero CDN probes needed at extraction time.
 
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
@@ -314,9 +335,34 @@ fn tempdir_for_pages(video_id: &str) -> std::path::PathBuf {
 /// Returns a map from itag (YouTube's integer format identifier) to
 /// the inclusive byte ranges for the initialization segment and the
 /// segment index. Missing or malformed entries are silently skipped.
+/// Extract the itag (integer prefix) from a yt-dlp format identifier.
+///
+/// yt-dlp names formats like `"303"`, `"303-dashy"`, `"251-drc"`,
+/// `"251-0"`, `"251-dashy-1"`. The itag is always the leading integer
+/// prefix before the first `-` (or the entire string if no `-`).
+pub fn parse_itag_from_format_id(format_id: &str) -> Option<i64> {
+    let numeric_prefix: String = format_id
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    numeric_prefix.parse::<i64>().ok()
+}
+
+/// Scan yt-dlp's `--write-pages` dumps for innertube `/player`
+/// responses and extract `initRange` / `indexRange` for each adaptive
+/// format entry.
+///
+/// Innertube's `adaptiveFormats` array contains *one entry per file
+/// variant* — multiple entries for itag 249 represent different
+/// language dubs, each with its own byte ranges. We key the returned
+/// map by `(itag, contentLength)` so the caller can disambiguate
+/// variants by matching against yt-dlp's per-format `filesize`.
+///
+/// Entries missing any of itag / contentLength / initRange / indexRange
+/// are silently skipped.
 async fn parse_player_page_dumps(
     dir: &std::path::Path,
-) -> std::collections::HashMap<i64, SegmentRanges> {
+) -> std::collections::HashMap<(i64, u64), SegmentRanges> {
     let mut ranges = std::collections::HashMap::new();
 
     let mut entries = match tokio::fs::read_dir(dir).await {
@@ -351,42 +397,40 @@ async fn parse_player_page_dumps(
             let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) else {
                 continue;
             };
-            let Some(init_range) = fmt.get("initRange") else {
-                continue;
-            };
-            let Some(index_range) = fmt.get("indexRange") else {
-                continue;
-            };
-            let Some(init_start) = init_range
-                .get("start")
+            // `contentLength` is a stringified integer in innertube's
+            // response. Used to match the variant against yt-dlp's
+            // `filesize` field.
+            let Some(content_length) = fmt
+                .get("contentLength")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<u64>().ok())
             else {
                 continue;
             };
-            let Some(init_end) = init_range
-                .get("end")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u64>().ok())
-            else {
+            let init_range = fmt.get("initRange");
+            let index_range = fmt.get("indexRange");
+            let (Some(init_range), Some(index_range)) = (init_range, index_range) else {
                 continue;
             };
-            let Some(index_start) = index_range
-                .get("start")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u64>().ok())
-            else {
+            let parse_pair = |obj: &serde_json::Value| -> Option<(u64, u64)> {
+                let s = obj
+                    .get("start")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())?;
+                let e = obj
+                    .get("end")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())?;
+                Some((s, e))
+            };
+            let Some((init_start, init_end)) = parse_pair(init_range) else {
                 continue;
             };
-            let Some(index_end) = index_range
-                .get("end")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u64>().ok())
-            else {
+            let Some((index_start, index_end)) = parse_pair(index_range) else {
                 continue;
             };
             ranges.insert(
-                itag,
+                (itag, content_length),
                 SegmentRanges {
                     init_start,
                     init_end,
@@ -397,33 +441,6 @@ async fn parse_player_page_dumps(
         }
     }
     ranges
-}
-
-/// Read an EBML variable-width integer (VINT) at `offset` in `data`.
-/// Returns `(width, value)` or `None` if the data is too short.
-fn read_ebml_vint(data: &[u8], offset: usize) -> Option<(usize, u64)> {
-    if offset >= data.len() {
-        return None;
-    }
-    let first = data[offset];
-    if first == 0 {
-        return None;
-    }
-    let width = first.leading_zeros() as usize + 1;
-    if offset + width > data.len() || width > 8 {
-        return None;
-    }
-    let mut value = (first as u64) & ((1u64 << (8 - width)) - 1);
-    for i in 1..width {
-        value = (value << 8) | data[offset + i] as u64;
-    }
-    Some((width, value))
-}
-
-/// Public wrapper for read_ebml_vint, used by the proxy's Cues
-/// auto-correction to compute index_end from the Cues size VINT.
-pub fn read_ebml_vint_pub(data: &[u8], offset: usize) -> Option<(usize, u64)> {
-    read_ebml_vint(data, offset)
 }
 
 /// Run yt-dlp with `--write-sub --convert-subs vtt --skip-download` for a
