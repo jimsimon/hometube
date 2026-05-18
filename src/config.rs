@@ -52,7 +52,7 @@ impl Config {
         // on entirely separate filesystems. The tools directory is
         // created lazily by its writers (cookies, yt-dlp binary).
         // to open files inside them. Each subtree is independent —
-        // operators may mount them on entirely separate filesystems.
+        // created lazily by its writers (cookies, yt-dlp binary).
         if let Some(parent) = std::path::Path::new(&database_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).ok();
