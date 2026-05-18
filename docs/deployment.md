@@ -19,13 +19,18 @@ around between restarts and you keep all of your family's data.
 
 ## Compose
 
-A reference Compose file lives at [`docker/docker-compose.yml`](../docker/docker-compose.yml):
+The reference Compose stack lives at [`docker/docker-compose.yml`](../docker/docker-compose.yml).
+It runs three containers — the app plus a youtubei.js discovery
+sidecar and a bgutil PO-token server — wired together on an internal
+Docker network. The `docker run` snippet above won't work on its own
+because the app needs both sidecars; use Compose for any real deploy.
 
 ```bash
-cd docker && docker compose up -d
+HOMETUBE_DATA=/srv/hometube docker compose -f docker/docker-compose.yml up -d
 ```
 
-It uses the same named volume and exposes port 3000.
+See the comment header of the compose file for the full list of
+environment variables.
 
 ## First-run walkthrough
 

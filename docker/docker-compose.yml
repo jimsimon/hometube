@@ -1,28 +1,55 @@
 # HomeTube — Docker Compose stack.
 #
+# Local development runs via Tilt (see Tiltfile), not via this file.
+# This stack is for production-style deployments: a Linux host with
+# Docker installed, or TrueNAS Scale (ElectricEel 24.10+) Custom Apps.
+#
 # Three services:
-#   app        — the HomeTube backend + frontend
+#   app        — HomeTube backend + frontend (pulled from GHCR)
 #   discovery  — youtubei.js sidecar for YouTube content discovery
-#   pot-server — bgutil PO token generator for YouTube bot-detection bypass
+#   pot-server — bgutil PO token generator for bot-detection bypass
+#
+# Conventions:
+#   - Pulls pre-built images from GHCR — no `build:` (TrueNAS does not
+#     build images, and pre-built images are faster everywhere else).
+#   - Uses host bind mounts so backups/snapshots happen at the
+#     filesystem layer (ZFS on TrueNAS, your tool of choice elsewhere).
+#   - Runs containers as UID/GID 568 by default — matches TrueNAS's
+#     `apps` user. Override with HOMETUBE_UID/GID on other hosts.
+#   - Defaults to `:latest`. Override HOMETUBE_VERSION to pin a build.
+#
+# Deployment (TrueNAS Scale):
+#   1. Create a dataset on your pool, e.g. tank/apps/hometube/data,
+#      chown'd to 568:568.
+#   2. Apps → Discover Apps → Custom App → paste this YAML. Set
+#      HOMETUBE_DATA (required); override others as needed.
+#
+# Deployment (plain Docker host):
+#   HOMETUBE_DATA=/srv/hometube docker compose up -d
+#
+# Env vars:
+#   HOMETUBE_REGISTRY  — registry/namespace prefix (default ghcr.io/jimsimon)
+#   HOMETUBE_VERSION   — image tag for hometube + discovery (default latest)
+#   HOMETUBE_PORT      — host port to expose the web UI on (default 30000)
+#   HOMETUBE_DATA      — host path for persistent data (REQUIRED, no default)
+#   HOMETUBE_UID/GID   — runtime user (default 568:568, TrueNAS `apps`)
 
 services:
   app:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: hometube:local
+    image: ${HOMETUBE_REGISTRY:-ghcr.io/jimsimon}/hometube:${HOMETUBE_VERSION:-latest}
+    user: "${HOMETUBE_UID:-568}:${HOMETUBE_GID:-568}"
     ports:
-      - "3000:3000"
+      - "${HOMETUBE_PORT:-30000}:3000"
     volumes:
-      # SQLite DB, segment cache, downloaded yt-dlp binary updates.
-      - app-data:/app/data
+      - ${HOMETUBE_DATA}:/app/data
     environment:
       DISCOVERY_SIDECAR_URL: http://discovery:3000
+      POT_SERVER_URL: http://pot-server:4416
     depends_on:
       discovery:
         condition: service_healthy
       pot-server:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
@@ -31,17 +58,16 @@ services:
       retries: 3
       start_period: 10s
 
-  # YouTube content discovery sidecar — uses youtubei.js (InnerTube API)
-  # to provide search, channel/playlist/video metadata without the
-  # official YouTube Data API v3. No API key required.
+  # YouTube content discovery sidecar — youtubei.js (InnerTube API).
+  # Not exposed to the host; only reachable by `app` on the internal
+  # Docker network at discovery:3000.
   discovery:
-    build:
-      context: ../sidecar/discovery
-    image: hometube-discovery:local
-    # No ports exposed to host — only reachable by the app container
-    # via Docker's internal network at discovery:3000.
-    # Node as PID 1 doesn't reap zombies or handle SIGTERM cleanly;
-    # `init: true` runs tini in front of it.
+    image: ${HOMETUBE_REGISTRY:-ghcr.io/jimsimon}/hometube-discovery:${HOMETUBE_VERSION:-latest}
+    # Override the image's baked-in `node` user (UID 1000) so files
+    # written by the container — should there ever be any — match the
+    # TrueNAS apps user.
+    user: "${HOMETUBE_UID:-568}:${HOMETUBE_GID:-568}"
+    # Run tini as PID 1 so Node receives SIGTERM cleanly on restart.
     init: true
     restart: unless-stopped
     healthcheck:
@@ -51,14 +77,19 @@ services:
       retries: 3
       start_period: 5s
 
-  # PO (Proof-of-Origin) token server — generates tokens that prove
-  # requests come from a legitimate browser. yt-dlp's bgutil plugin
-  # fetches tokens from this server automatically.
+  # PO (Proof-of-Origin) token server. Upstream image — tracks `:latest`
+  # by convention with the rest of this stack. Pin to a specific tag
+  # from https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
+  # if you want deliberate upgrades instead of recreate-time drift.
   pot-server:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
-    # No ports exposed to host — only reachable by the app container
-    # via Docker's internal network at pot-server:4416.
     restart: unless-stopped
-
-volumes:
-  app-data:
+    # The bgutil image is Node-Alpine-based and exposes /ping on 4416.
+    # If a future upstream rebuild drops busybox `wget`, remove this
+    # block and fall back to `condition: service_started` in `app`.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4416/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
