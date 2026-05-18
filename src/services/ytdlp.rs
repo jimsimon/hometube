@@ -49,9 +49,6 @@ pub struct Format {
     pub filesize: Option<i64>,
     #[serde(default)]
     pub url: Option<String>,
-    /// DASH manifest URL (some formats only expose a manifest).
-    #[serde(default)]
-    pub manifest_url: Option<String>,
     /// `"https"`, `"http_dash_segments"`, etc.
     #[serde(default)]
     pub protocol: Option<String>,
@@ -118,9 +115,6 @@ pub struct ExtractResult {
     pub subtitles: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     /// Auto-generated captions, keyed by language code.
     pub automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
-    /// Some formats expose a single DASH manifest URL alongside the
-    /// per-format URLs; yt-dlp also exposes it at top level.
-    pub manifest_url: Option<String>,
     /// SegmentBase byte ranges parsed from YouTube's innertube
     /// `/player` response (via yt-dlp `--write-pages`). Keyed by itag
     /// (the integer format identifier YouTube assigns). Each value
@@ -177,8 +171,6 @@ struct ExtractResultRaw {
     #[serde(default)]
     automatic_captions: std::collections::HashMap<String, Vec<SubtitleTrack>>,
     #[serde(default)]
-    manifest_url: Option<String>,
-    #[serde(default)]
     format_box_ranges: std::collections::HashMap<String, SegmentRanges>,
 }
 
@@ -199,7 +191,6 @@ impl From<ExtractResultRaw> for ExtractResult {
             formats: raw.formats,
             subtitles: raw.subtitles,
             automatic_captions: raw.automatic_captions,
-            manifest_url: raw.manifest_url,
             format_box_ranges: raw.format_box_ranges,
         }
     }
@@ -271,12 +262,12 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // `format_id`.
     let innertube_ranges = parse_player_page_dumps(&pages_dir).await;
     if !innertube_ranges.is_empty() {
-        // Build itag → [entries] index to enable single-entry fallback
+        // Build itag → [ranges] index to enable single-entry fallback
         // when a format has no `filesize`.
-        let mut by_itag: std::collections::HashMap<i64, Vec<((i64, u64), SegmentRanges)>> =
+        let mut by_itag: std::collections::HashMap<i64, Vec<SegmentRanges>> =
             std::collections::HashMap::new();
-        for ((itag, cl), sr) in &innertube_ranges {
-            by_itag.entry(*itag).or_default().push(((*itag, *cl), *sr));
+        for ((itag, _cl), sr) in &innertube_ranges {
+            by_itag.entry(*itag).or_default().push(*sr);
         }
         for f in &result.formats {
             let Some(itag) = parse_itag_from_format_id(&f.format_id) else {
@@ -294,7 +285,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
                 by_itag
                     .get(&itag)
                     .filter(|v| v.len() == 1)
-                    .map(|v| v[0].1)
+                    .map(|v| v[0])
             });
             if let Some(sr) = sr {
                 result.format_box_ranges.insert(f.format_id.clone(), sr);

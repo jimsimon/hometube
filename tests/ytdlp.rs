@@ -79,8 +79,7 @@ fn extract_result_deserializes_full() {
             "en": [
                 {"ext": "srv3", "url": "https://example.com/auto/en.srv3"}
             ]
-        },
-        "manifest_url": "https://manifest.example.com/dash.mpd"
+        }
     }"#;
 
     let result: ExtractResult = serde_json::from_str(json).unwrap();
@@ -97,10 +96,6 @@ fn extract_result_deserializes_full() {
     assert_eq!(result.formats.len(), 2);
     assert_eq!(result.subtitles.len(), 1);
     assert_eq!(result.automatic_captions.len(), 1);
-    assert_eq!(
-        result.manifest_url.as_deref(),
-        Some("https://manifest.example.com/dash.mpd")
-    );
 
     // Check format details.
     let video_fmt = &result.formats[0];
@@ -133,18 +128,13 @@ fn extract_result_handles_uploader_alias() {
 }
 
 #[test]
-fn format_deserializes_with_manifest_url() {
+fn format_deserializes_with_protocol() {
     let json = r#"{
         "format_id": "dash-video",
-        "manifest_url": "https://manifest.example.com/dash.mpd",
         "protocol": "http_dash_segments"
     }"#;
     let fmt: Format = serde_json::from_str(json).unwrap();
     assert_eq!(fmt.format_id, "dash-video");
-    assert_eq!(
-        fmt.manifest_url.as_deref(),
-        Some("https://manifest.example.com/dash.mpd")
-    );
     assert_eq!(fmt.protocol.as_deref(), Some("http_dash_segments"));
 }
 

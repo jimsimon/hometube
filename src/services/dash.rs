@@ -693,7 +693,6 @@ mod tests {
             url: Some(format!(
                 "https://example.googlevideo.com/videoplayback?id={id}"
             )),
-            manifest_url: None,
             protocol: Some("https".into()),
             language: language.map(str::to_owned),
             language_preference: None,

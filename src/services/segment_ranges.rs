@@ -50,7 +50,7 @@ pub struct BoxRanges {
 /// `(video_id, format_id)` primary key of the `format_box_ranges`
 /// table; a single row covers both `init` (moov) and `index` (sidx)
 /// ranges.
-pub async fn lookup(pool: &SqlitePool, video_id: &str, format_id: &str) -> Option<BoxRanges> {
+async fn lookup(pool: &SqlitePool, video_id: &str, format_id: &str) -> Option<BoxRanges> {
     let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(
         "SELECT init_start, init_end, index_start, index_end \
          FROM format_box_ranges WHERE video_id = ? AND format_id = ?",

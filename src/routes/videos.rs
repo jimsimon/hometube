@@ -994,9 +994,6 @@ fn best_audio_format(formats: &[Format]) -> Option<&Format> {
         .max_by_key(|f| f.abr.map(|b| (b * 1000.0) as u64).unwrap_or(0))
 }
 
-/// Extract the leading integer itag from a yt-dlp format_id.
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,7 +1020,6 @@ mod tests {
             formats: vec![],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
-            manifest_url: None,
             format_box_ranges: Default::default(),
         };
         assert_eq!(
@@ -1058,7 +1054,6 @@ mod tests {
             formats: vec![],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
-            manifest_url: None,
             format_box_ranges: Default::default(),
         };
         assert_eq!(
@@ -1080,7 +1075,6 @@ mod tests {
             formats: vec![],
             subtitles: Default::default(),
             automatic_captions: Default::default(),
-            manifest_url: None,
             format_box_ranges: Default::default(),
         };
         assert_eq!(pick_thumbnail(&result), None);
