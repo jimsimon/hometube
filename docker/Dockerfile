@@ -98,22 +98,26 @@ RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-
 # without manual setup.
 RUN groupadd --system --gid 568 hometube \
     && useradd --system --uid 568 --gid 568 --home /app --shell /usr/sbin/nologin hometube \
-    && mkdir -p /app/data \
+    && mkdir -p /app/data/database /app/data/tools /app/data/cache \
     && chown -R 568:568 /app
 
 WORKDIR /app
 USER 568:568
 EXPOSE 3000
-VOLUME ["/app/data"]
+# Three independent volumes so operators can place each on different
+# storage tiers (e.g. database + tools on SSD, cache on spinning disk
+# or a NAS). Each path is self-contained — the app never reads across
+# them, so they can live on entirely separate filesystems.
+VOLUME ["/app/data/database", "/app/data/tools", "/app/data/cache"]
 
 ENV STATIC_DIR=/app/static \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
-    YTDLP_COOKIES_PATH=/app/data/cookies.txt \
+    YTDLP_COOKIES_PATH=/app/data/tools/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
     DISCOVERY_SIDECAR_URL=http://discovery:3000 \
-    DATABASE_PATH=/app/data/app.db \
-    CACHE_DIR=/app/data/segment_cache
+    DATABASE_PATH=/app/data/database/app.db \
+    CACHE_DIR=/app/data/cache
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health || exit 1

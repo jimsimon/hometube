@@ -18,20 +18,37 @@
 #     `apps` user. Override with HOMETUBE_UID/GID on other hosts.
 #   - Defaults to `:latest`. Override HOMETUBE_VERSION to pin a build.
 #
+# Persistent state is split across three independent bind mounts so
+# each can live on different storage. The app never reads across them:
+#   HOMETUBE_DATABASE → /app/data/database  (SQLite — small, fsync-heavy;
+#                                            put on SSD/NVMe)
+#   HOMETUBE_TOOLS    → /app/data/tools     (yt-dlp binary + cookies.txt;
+#                                            small, latency-sensitive)
+#   HOMETUBE_CACHE    → /app/data/cache     (DASH segment cache — large,
+#                                            regeneratable; fine on
+#                                            spinning disk or a NAS)
+#
 # Deployment (TrueNAS Scale):
-#   1. Create a dataset on your pool, e.g. tank/apps/hometube/data,
-#      chown'd to 568:568.
+#   1. Create three datasets (or reuse one for all three), e.g.
+#      tank/ssd/hometube/database, tank/ssd/hometube/tools,
+#      tank/bulk/hometube/cache. chown each to 568:568.
 #   2. Apps → Discover Apps → Custom App → paste this YAML. Set
-#      HOMETUBE_DATA (required); override others as needed.
+#      HOMETUBE_DATABASE / HOMETUBE_TOOLS / HOMETUBE_CACHE; override
+#      others as needed.
 #
 # Deployment (plain Docker host):
-#   HOMETUBE_DATA=/srv/hometube docker compose up -d
+#   HOMETUBE_DATABASE=/srv/hometube/database \
+#   HOMETUBE_TOOLS=/srv/hometube/tools \
+#   HOMETUBE_CACHE=/srv/hometube/cache \
+#     docker compose up -d
 #
 # Env vars:
 #   HOMETUBE_REGISTRY  — registry/namespace prefix (default ghcr.io/jimsimon)
 #   HOMETUBE_VERSION   — image tag for hometube + discovery (default latest)
 #   HOMETUBE_PORT      — host port to expose the web UI on (default 30000)
-#   HOMETUBE_DATA      — host path for persistent data (REQUIRED, no default)
+#   HOMETUBE_DATABASE  — host path for the SQLite database (REQUIRED)
+#   HOMETUBE_TOOLS     — host path for yt-dlp + cookies (REQUIRED)
+#   HOMETUBE_CACHE     — host path for the segment cache (REQUIRED)
 #   HOMETUBE_UID/GID   — runtime user (default 568:568, TrueNAS `apps`)
 
 services:
@@ -41,7 +58,9 @@ services:
     ports:
       - "${HOMETUBE_PORT:-30000}:3000"
     volumes:
-      - ${HOMETUBE_DATA}:/app/data
+      - ${HOMETUBE_DATABASE:?HOMETUBE_DATABASE must be set}:/app/data/database
+      - ${HOMETUBE_TOOLS:?HOMETUBE_TOOLS must be set}:/app/data/tools
+      - ${HOMETUBE_CACHE:?HOMETUBE_CACHE must be set}:/app/data/cache
     environment:
       DISCOVERY_SIDECAR_URL: http://discovery:3000
       POT_SERVER_URL: http://pot-server:4416

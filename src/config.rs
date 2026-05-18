@@ -38,23 +38,22 @@ impl Config {
             .unwrap_or(3000);
 
         let database_path =
-            env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/app.db".to_string());
+            env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/database/app.db".to_string());
+        let database_url = format!("sqlite://{database_path}?mode=rwc");
 
-        // Ensure the parent directory exists so SQLite can create the file.
+        let ytdlp_path = env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
+        let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
+        let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "./data/cache".to_string());
+
+        // Ensure the persistent-state directories exist before any
+        // consumer (SQLite, segment store, yt-dlp cookies writer) tries
+        // to open files inside them. Each subtree is independent —
+        // operators may mount them on entirely separate filesystems.
         if let Some(parent) = std::path::Path::new(&database_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).ok();
             }
         }
-
-        let database_url = format!("sqlite://{database_path}?mode=rwc");
-
-        let ytdlp_path = env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
-        let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
-        let cache_dir =
-            env::var("CACHE_DIR").unwrap_or_else(|_| "./data/segment_cache".to_string());
-
-        // Ensure the cache directory exists.
         std::fs::create_dir_all(&cache_dir).ok();
 
         Ok(Self {
