@@ -22,6 +22,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import { api, ApiError } from "../services/api.js";
+import { debounce } from "../services/debounce.js";
 
 const DEBOUNCE_MS = 200;
 const MAX_SUGGESTIONS = 5;
@@ -81,9 +82,12 @@ export class SearchBar extends LitElement {
   @state() private compact = false;
   @state() private expanded = false;
 
-  private debounceTimer: number | null = null;
   private lastFetchToken = 0;
   private mql: MediaQueryList | null = null;
+
+  private readonly scheduleFetch = debounce(() => {
+    void this.fetchSuggestions();
+  }, DEBOUNCE_MS);
 
   static styles = css`
     :host {
@@ -227,9 +231,7 @@ export class SearchBar extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener("click", this.onDocumentClick);
     this.mql?.removeEventListener("change", this.onMediaChange);
-    if (this.debounceTimer != null) {
-      window.clearTimeout(this.debounceTimer);
-    }
+    this.scheduleFetch.cancel();
   }
 
   private onMediaChange = (e: MediaQueryListEvent): void => {
@@ -248,17 +250,13 @@ export class SearchBar extends LitElement {
   private onInput = (event: Event): void => {
     this.query = (event.target as HTMLInputElement).value;
     this.highlighted = -1;
-    if (this.debounceTimer != null) {
-      window.clearTimeout(this.debounceTimer);
-    }
     if (!this.query.trim()) {
+      this.scheduleFetch.cancel();
       this.suggestions = [];
       this.suggestionsOpen = false;
       return;
     }
-    this.debounceTimer = window.setTimeout(() => {
-      void this.fetchSuggestions();
-    }, DEBOUNCE_MS);
+    this.scheduleFetch();
   };
 
   private async fetchSuggestions(): Promise<void> {
