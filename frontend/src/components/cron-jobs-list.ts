@@ -68,10 +68,7 @@ export class CronJobsList extends LitElement {
       </div>
       ${this.jobs.map(
         (job) => html`
-          <hometube-cron-job-card
-            job-id=${String(job.id)}
-            .job=${job}
-          ></hometube-cron-job-card>
+          <hometube-cron-job-card job-id=${String(job.id)} .job=${job}></hometube-cron-job-card>
         `,
       )}
       ${count === 0 ? html`<p>No scheduled jobs.</p>` : nothing}
