@@ -207,12 +207,7 @@ export class SearchResults extends LitElement {
     if (!detail) return;
     // Validate the kind against the known union — otherwise a stray
     // string would flow straight into the `/api/search?type=...` URL.
-    const allowedKinds: ReadonlyArray<typeof this.type> = [
-      "all",
-      "channel",
-      "playlist",
-      "video",
-    ];
+    const allowedKinds: ReadonlyArray<typeof this.type> = ["all", "channel", "playlist", "video"];
     const nextType: typeof this.type = allowedKinds.includes(detail.kind as typeof this.type)
       ? (detail.kind as typeof this.type)
       : "all";
