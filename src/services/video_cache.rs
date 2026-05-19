@@ -214,14 +214,93 @@ pub async fn set_cache_size(pool: &SqlitePool, label: &str) -> AppResult<()> {
     set_config_value(pool, KEY_CACHE_MAX_SIZE, label).await
 }
 
+// ---------------------------------------------------------------------------
+// Eviction reasons + audit log
+// ---------------------------------------------------------------------------
+
+/// Why a cache eviction happened. Persisted as a TEXT column so it can
+/// surface in the parent UI alongside the `cache_evictions` table.
+pub mod reason {
+    /// Parent clicked "Clear video cache" in the UI.
+    pub const MANUAL: &str = "manual";
+    /// Parent clicked "Clear entire cache" in the UI.
+    pub const CLEAR_ALL: &str = "clear_all";
+    /// Scheduled cleanup: video no longer on any allowlist.
+    pub const NOT_ALLOWLISTED: &str = "not_allowlisted";
+    /// Scheduled cleanup: total cache size exceeded the configured max.
+    pub const LRU_SIZE_LIMIT: &str = "lru_size_limit";
+}
+
+/// Append a row to `cache_evictions`. Best-effort: failures are logged
+/// but do not abort the surrounding eviction (we'd rather succeed at
+/// freeing space than fail the cron run because of an audit insert).
+async fn log_eviction(
+    pool: &SqlitePool,
+    video_id: &str,
+    segment_count: u64,
+    bytes_freed: u64,
+    reason: &str,
+) {
+    let res = sqlx::query(
+        "INSERT INTO cache_evictions (video_id, segment_count, bytes_freed, reason) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(video_id)
+    .bind(segment_count as i64)
+    .bind(bytes_freed as i64)
+    .bind(reason)
+    .execute(pool)
+    .await;
+    if let Err(err) = res {
+        debug!(%video_id, %reason, %err, "failed to record cache eviction");
+    }
+}
+
+/// One row of the eviction audit log, ready for JSON serialization.
+#[derive(Debug, Clone)]
+pub struct EvictionRecord {
+    pub id: i64,
+    pub video_id: String,
+    pub segment_count: i64,
+    pub bytes_freed: i64,
+    pub reason: String,
+    pub evicted_at: i64,
+}
+
+/// Most-recent evictions, newest first.
+pub async fn recent_evictions(pool: &SqlitePool, limit: i64) -> AppResult<Vec<EvictionRecord>> {
+    let rows: Vec<(i64, String, i64, i64, String, i64)> = sqlx::query_as(
+        "SELECT id, video_id, segment_count, bytes_freed, reason, evicted_at \
+         FROM cache_evictions ORDER BY evicted_at DESC, id DESC LIMIT ?",
+    )
+    .bind(limit.max(1))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, video_id, segment_count, bytes_freed, reason, evicted_at)| EvictionRecord {
+                id,
+                video_id,
+                segment_count,
+                bytes_freed,
+                reason,
+                evicted_at,
+            },
+        )
+        .collect())
+}
+
 /// Return `(human-message, detailed-output)` after running the cleanup.
 ///
 /// Step 1 (allowlist cleanup): for every distinct `video_id` in
 /// `segment_cache`, drop it if no child has it allowlisted directly,
-/// via channel, or via playlist.
+/// via channel, or via playlist.  Logged with reason `not_allowlisted`.
 ///
-/// Step 2 (LRU eviction): if a max size is configured and the cache
-/// is still over the limit, evict by `last_accessed_at ASC` until under.
+/// Step 2 (LRU eviction): if a max size is configured (i.e. not
+/// "Unlimited") and the cache is still over the limit, evict by
+/// `last_accessed_at ASC` until under. Logged with reason
+/// `lru_size_limit` (one row per video, aggregating its segments).
 pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, String)> {
     let mut output = String::new();
     let mut evicted_videos: u64 = 0;
@@ -236,26 +315,27 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
     for (video_id,) in &video_ids {
         let allowlisted = video_is_anywhere_allowlisted(pool, video_id).await?;
         if !allowlisted {
-            let (segs, bytes) = evict_video(pool, video_id).await?;
+            let (segs, bytes) = evict_video(pool, video_id, reason::NOT_ALLOWLISTED).await?;
             evicted_videos += 1;
             evicted_segments += segs;
             evicted_bytes += bytes;
             output.push_str(&format!(
-                "Evicted {video_id} ({segs} segments, {} KB)\n",
+                "Evicted {video_id} ({segs} segments, {} KB) — not on any allowlist\n",
                 bytes / 1024
             ));
         }
     }
 
-    // LRU eviction down to the configured size.
+    // LRU eviction down to the configured size. Skipped entirely when
+    // `Unlimited` is selected (preset → 0 bytes).
     let label = current_cache_size_label(pool).await;
     let limit = cache_size_preset_to_bytes(&label);
     if limit > 0 {
         let mut current_total = total_cache_bytes(pool).await?;
         if current_total > limit {
             output.push_str(&format!(
-                "LRU eviction: cache {} bytes > limit {} bytes\n",
-                current_total, limit
+                "LRU eviction: cache {} bytes > limit {} bytes ({})\n",
+                current_total, limit, label
             ));
             // Pull the LRU-ordered list of (id, bytes, video_id, file_path).
             let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
@@ -264,6 +344,9 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
             )
             .fetch_all(pool)
             .await?;
+            // Aggregate per-video so the eviction log has one row per
+            // video instead of one row per segment.
+            let mut per_video: HashMap<String, (u64, u64)> = HashMap::new();
             for (id, size, video_id, path) in rows {
                 if current_total <= limit {
                     break;
@@ -278,9 +361,22 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
                 current_total = current_total.saturating_sub(size as u64);
                 evicted_segments += 1;
                 evicted_bytes += size as u64;
-                let _ = video_id;
+                let entry = per_video.entry(video_id).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += size as u64;
+            }
+            for (video_id, (segs, bytes)) in per_video {
+                log_eviction(pool, &video_id, segs, bytes, reason::LRU_SIZE_LIMIT).await;
+                output.push_str(&format!(
+                    "LRU evicted {video_id} ({segs} segments, {} KB) — over {label} size limit\n",
+                    bytes / 1024
+                ));
             }
         }
+    } else {
+        output.push_str(
+            "LRU eviction skipped (cache size set to Unlimited).\n",
+        );
     }
 
     let msg = format!(
@@ -344,7 +440,11 @@ async fn video_is_anywhere_allowlisted(pool: &SqlitePool, video_id: &str) -> App
     Ok(n > 0)
 }
 
-async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)> {
+async fn evict_video(
+    pool: &SqlitePool,
+    video_id: &str,
+    why: &str,
+) -> AppResult<(u64, u64)> {
     let rows: Vec<(i64, i64, String)> = sqlx::query_as(
         "SELECT id, file_size_bytes, file_path FROM segment_cache WHERE video_id = ?",
     )
@@ -367,11 +467,11 @@ async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)>
         bytes_total += *size as u64;
         segs += 1;
     }
-    sqlx::query("DELETE FROM segment_cache WHERE video_id = ?")
+    let seg_delete = sqlx::query("DELETE FROM segment_cache WHERE video_id = ?")
         .bind(video_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM video_metadata_cache WHERE video_id = ?")
+    let meta_delete = sqlx::query("DELETE FROM video_metadata_cache WHERE video_id = ?")
         .bind(video_id)
         .execute(pool)
         .await?;
@@ -382,6 +482,16 @@ async fn evict_video(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)>
         if let Some(shard_dir) = vdir.parent() {
             let _ = tokio::fs::remove_dir(shard_dir).await;
         }
+    }
+
+    // Record the eviction in the audit log. Skip the no-op case where
+    // nothing was actually cached for this id (so e.g. clicking "Clear"
+    // on a video that has no cache row doesn't create a phantom entry).
+    if seg_delete.rows_affected() > 0
+        || meta_delete.rows_affected() > 0
+        || bytes_total > 0
+    {
+        log_eviction(pool, video_id, segs, bytes_total, why).await;
     }
 
     Ok((segs, bytes_total))
@@ -418,25 +528,76 @@ pub async fn list_cached_videos(pool: &SqlitePool) -> AppResult<Vec<(String, i64
     Ok(rows)
 }
 
-/// Manually evict a single video (parent UI).
+/// Manually evict a single video (parent UI). Records the eviction in
+/// the audit log with reason [`reason::MANUAL`].
 pub async fn evict_video_public(pool: &SqlitePool, video_id: &str) -> AppResult<(u64, u64)> {
-    evict_video(pool, video_id).await
+    evict_video(pool, video_id, reason::MANUAL).await
 }
 
-/// Wipe the entire segment cache + on-disk files we know about.
+/// Wipe the entire segment cache + on-disk files we know about. Records
+/// one audit row per affected video with reason [`reason::CLEAR_ALL`].
+///
+/// Aggregation, file deletion, and the two `DELETE` statements run
+/// inside a single transaction (`BEGIN IMMEDIATE`) so a concurrent
+/// `TeeStream` writer cannot slip a segment row in between the aggregate
+/// snapshot and the delete and be wiped without an audit entry.
 pub async fn clear_all(pool: &SqlitePool) -> AppResult<()> {
-    let rows: Vec<(String,)> = sqlx::query_as("SELECT file_path FROM segment_cache")
-        .fetch_all(pool)
-        .await?;
-    for (path,) in rows {
-        let _ = tokio::fs::remove_file(&path).await;
+    let mut tx = pool.begin().await?;
+
+    // Aggregate per-video totals from segment_cache.
+    let mut per_video: HashMap<String, (i64, i64)> = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT video_id, COUNT(*), COALESCE(SUM(file_size_bytes), 0) \
+         FROM segment_cache GROUP BY video_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|(v, c, b)| (v, (c, b)))
+    .collect();
+
+    // Include metadata-only rows (no segments cached) so the wipe still
+    // records an audit entry for them, with segs=0 / bytes=0.
+    let metadata_only: Vec<(String,)> = sqlx::query_as(
+        "SELECT video_id FROM video_metadata_cache \
+         WHERE video_id NOT IN (SELECT DISTINCT video_id FROM segment_cache)",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for (vid,) in metadata_only {
+        per_video.entry(vid).or_insert((0, 0));
     }
+
+    // Collect file paths inside the same transaction snapshot.
+    let paths: Vec<(String,)> = sqlx::query_as("SELECT file_path FROM segment_cache")
+        .fetch_all(&mut *tx)
+        .await?;
+
     sqlx::query("DELETE FROM segment_cache")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM video_metadata_cache")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
+
+    // File and audit-log writes happen after commit. If a file removal
+    // fails the DB is still consistent (the segment row is gone), and
+    // an audit-insert failure only loses an entry — the wipe itself
+    // succeeded.
+    for (path,) in paths {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    for (video_id, (segs, bytes)) in per_video {
+        log_eviction(
+            pool,
+            &video_id,
+            segs.max(0) as u64,
+            bytes.max(0) as u64,
+            reason::CLEAR_ALL,
+        )
+        .await;
+    }
     Ok(())
 }
 

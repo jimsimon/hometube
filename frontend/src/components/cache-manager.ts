@@ -26,6 +26,7 @@ interface CacheStats {
   hit_rate: number;
   max_size_label: string;
   max_size_bytes: number;
+  unlimited: boolean;
   top_videos: Array<{
     video_id: string;
     total_bytes: number;
@@ -38,15 +39,43 @@ interface CacheSettings {
   metadata_ttl_hours: number;
 }
 
-const PRESETS = ["5 GB", "10 GB", "25 GB", "50 GB", "100 GB", "Unlimited"];
+interface EvictionEntry {
+  id: number;
+  video_id: string;
+  segment_count: number;
+  bytes_freed: number;
+  reason: string;
+  evicted_at: number;
+}
+
+// Must stay in sync with `CACHE_SIZE_PRESETS` in
+// `src/services/video_cache.rs` — the backend rejects unknown labels.
+const PRESETS = [
+  "10 GB",
+  "25 GB",
+  "50 GB",
+  "100 GB",
+  "250 GB",
+  "500 GB",
+  "Unlimited",
+];
+
+const REASON_LABELS: Record<string, string> = {
+  manual: "Manually cleared",
+  clear_all: "Entire cache cleared",
+  not_allowlisted: "Not on any allowlist",
+  lru_size_limit: "Over cache size limit",
+};
 
 @customElement("hometube-cache-manager")
 export class CacheManager extends LitElement {
   @state() private stats: CacheStats | null = null;
   @state() private settings: CacheSettings | null = null;
+  @state() private evictions: EvictionEntry[] = [];
   @state() private busy = false;
   @state() private status = "";
   @state() private confirmOpen = false;
+  @state() private videoIdInput = "";
 
   @query("wa-dialog") private dialog!: HTMLElement & {
     show?: () => void;
@@ -134,6 +163,45 @@ export class CacheManager extends LitElement {
       clip: rect(0 0 0 0);
       white-space: nowrap;
     }
+    .evictions-heading {
+      margin: 1.5rem 0 0.25rem;
+      font-size: 1rem;
+    }
+    .hint {
+      display: block;
+      font-weight: 400;
+      font-size: 0.85rem;
+      color: var(--wa-color-text-quiet);
+      margin-top: 0.15rem;
+    }
+    .clear-by-id {
+      margin: 1rem 0;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--wa-color-surface-border);
+      border-radius: 0.375rem;
+      background: var(--wa-color-surface-raised);
+    }
+    .clear-by-id label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .clear-by-id-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .clear-by-id input {
+      flex: 1 1 14rem;
+      padding: 0.4rem 0.6rem;
+      border-radius: 0.375rem;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      background: var(--wa-color-surface-default);
+      color: var(--wa-color-text-normal);
+      font: inherit;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
     .dialog-actions {
       display: flex;
       gap: 0.5rem;
@@ -149,15 +217,26 @@ export class CacheManager extends LitElement {
 
   private async load(): Promise<void> {
     try {
-      const [stats, settings] = await Promise.all([
+      const [stats, settings, evictions] = await Promise.all([
         api.get<CacheStats>("/api/cache/stats"),
         api.get<CacheSettings>("/api/cache/settings"),
+        api.get<EvictionEntry[]>("/api/cache/evictions?limit=50"),
       ]);
       this.stats = stats;
       this.settings = settings;
+      this.evictions = evictions;
     } catch (err) {
       this.status = `Failed to load cache: ${(err as Error).message}`;
     }
+  }
+
+  private fmtTimestamp(ts: number): string {
+    // `evicted_at` is unix seconds.
+    return new Date(ts * 1000).toLocaleString();
+  }
+
+  private fmtReason(reason: string): string {
+    return REASON_LABELS[reason] ?? reason;
   }
 
   private fmtBytes(bytes: number): string {
@@ -187,13 +266,31 @@ export class CacheManager extends LitElement {
     this.busy = true;
     try {
       await api.delete(`/api/cache/videos/${encodeURIComponent(videoId)}`);
-      this.status = `Evicted ${videoId}.`;
+      this.status = `Cleared cache for ${videoId}.`;
       await this.load();
     } catch (err) {
-      this.status = `Failed to evict: ${(err as Error).message}`;
+      this.status = `Failed to clear: ${(err as Error).message}`;
     } finally {
       this.busy = false;
     }
+  }
+
+  /** Parent-entered video ID: YouTube IDs are 11 chars of [A-Za-z0-9_-]. */
+  private static readonly VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+  private onVideoIdChange(e: Event): void {
+    this.videoIdInput = (e.target as HTMLInputElement).value.trim();
+  }
+
+  private async onClearVideo(e: Event): Promise<void> {
+    e.preventDefault();
+    const id = this.videoIdInput.trim();
+    if (!CacheManager.VIDEO_ID_RE.test(id)) {
+      this.status = "Enter a valid 11-character YouTube video ID.";
+      return;
+    }
+    await this.onEvict(id);
+    this.videoIdInput = "";
   }
 
   private openConfirm(): void {
@@ -227,7 +324,7 @@ export class CacheManager extends LitElement {
   override render() {
     if (!this.stats || !this.settings) return html`<p>Loading cache…</p>`;
     const usedPct =
-      this.stats.max_size_bytes > 0
+      !this.stats.unlimited && this.stats.max_size_bytes > 0
         ? Math.min(100, (this.stats.total_bytes / this.stats.max_size_bytes) * 100)
         : 0;
     return html`
@@ -246,8 +343,13 @@ export class CacheManager extends LitElement {
           <dt>Limit</dt>
           <dd>
             ${this.stats.max_size_label}
-            ${this.stats.max_size_bytes > 0
-              ? html`<div
+            ${this.stats.unlimited
+              ? html`<span class="hint">
+                  No size-based (LRU) eviction will run. Videos can still be
+                  evicted by the cleanup job when they're removed from every
+                  allowlist, or manually below.
+                </span>`
+              : html`<div
                   class="progress"
                   role="progressbar"
                   aria-valuenow=${Math.round(usedPct)}
@@ -255,8 +357,7 @@ export class CacheManager extends LitElement {
                   aria-valuemax="100"
                 >
                   <span style="width: ${usedPct}%"></span>
-                </div>`
-              : nothing}
+                </div>`}
           </dd>
         </dl>
 
@@ -279,6 +380,39 @@ export class CacheManager extends LitElement {
             Clear entire cache
           </button>
         </div>
+
+        <form class="clear-by-id" @submit=${this.onClearVideo}>
+          <label for="cache-video-id">
+            Clear cache for a specific video
+            <span id="cache-video-id-hint" class="hint">
+              Removes the DB metadata cache and on-disk segments for one
+              YouTube video ID (11 characters).
+            </span>
+          </label>
+          <div class="clear-by-id-row">
+            <input
+              id="cache-video-id"
+              type="text"
+              inputmode="latin"
+              autocomplete="off"
+              spellcheck="false"
+              maxlength="11"
+              placeholder="e.g. dQw4w9WgXcQ"
+              .value=${this.videoIdInput}
+              ?disabled=${this.busy}
+              @input=${this.onVideoIdChange}
+              aria-describedby="cache-video-id-hint"
+            />
+            <button
+              type="submit"
+              class="danger"
+              ?disabled=${this.busy ||
+              !CacheManager.VIDEO_ID_RE.test(this.videoIdInput)}
+            >
+              Clear video cache
+            </button>
+          </div>
+        </form>
 
         ${this.stats.top_videos.length > 0
           ? html`<table>
@@ -310,6 +444,36 @@ export class CacheManager extends LitElement {
               </tbody>
             </table>`
           : html`<p>No segments cached yet.</p>`}
+        <h3 class="evictions-heading">Recent evictions</h3>
+        ${this.evictions.length === 0
+          ? html`<p class="hint">No cache evictions recorded yet.</p>`
+          : html`<table>
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Video</th>
+                  <th scope="col">Segments</th>
+                  <th scope="col">Freed</th>
+                  <th scope="col">Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${this.evictions.map(
+                  (e) => html`<tr>
+                    <td>
+                      <time datetime=${new Date(e.evicted_at * 1000).toISOString()}>
+                        ${this.fmtTimestamp(e.evicted_at)}
+                      </time>
+                    </td>
+                    <td><code>${e.video_id}</code></td>
+                    <td>${e.segment_count}</td>
+                    <td>${this.fmtBytes(e.bytes_freed)}</td>
+                    <td>${this.fmtReason(e.reason)}</td>
+                  </tr>`,
+                )}
+              </tbody>
+            </table>`}
+
         <div class="live" role="status" aria-live="polite">${this.status}</div>
 
         ${this.confirmOpen

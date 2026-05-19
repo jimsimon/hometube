@@ -219,3 +219,94 @@ async fn cleanup_noop_when_empty() {
     assert!(msg.contains("0 videos"), "msg was: {msg}");
     assert!(msg.contains("0 segments"), "msg was: {msg}");
 }
+
+#[tokio::test]
+async fn allowlist_eviction_logs_reason_with_timestamp() {
+    let app = boot().await;
+    seed_segment(&app.pool, "orphan-vid", 2048).await;
+
+    let before = Utc::now().timestamp();
+    cleanup_segment_cache(&app.pool).await.unwrap();
+    let after = Utc::now().timestamp();
+
+    let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT video_id, reason, segment_count, bytes_freed, evicted_at \
+         FROM cache_evictions",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "expected one eviction row, got {rows:?}");
+    let (video_id, reason, segs, bytes, evicted_at) = &rows[0];
+    assert_eq!(video_id, "orphan-vid");
+    assert_eq!(reason, "not_allowlisted");
+    assert_eq!(*segs, 1);
+    assert_eq!(*bytes, 2048);
+    assert!(
+        *evicted_at >= before && *evicted_at <= after,
+        "evicted_at {evicted_at} not in [{before}, {after}]"
+    );
+}
+
+#[tokio::test]
+async fn unlimited_size_skips_lru_eviction_even_when_huge() {
+    use hometube::services::video_cache::set_cache_size;
+    let app = boot().await;
+    set_cache_size(&app.pool, "Unlimited").await.unwrap();
+
+    // Allowlist + seed a huge segment so the allowlist pass keeps it
+    // and only the LRU path could possibly evict it.
+    let child_id = common::insert_account(
+        &app.pool,
+        "Kid",
+        hometube::models::account::AccountType::Child,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+         VALUES (?, 'huge-vid', 'V', ?)",
+    )
+    .bind(child_id)
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO segment_cache (video_id, format_id, segment_number, file_path, file_size_bytes, last_accessed_at) \
+         VALUES ('huge-vid', '137', 0, '/tmp/nonexistent_huge', ?, 1000)",
+    )
+    .bind(999_i64 * 1024 * 1024 * 1024) // 999 GB
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    cleanup_segment_cache(&app.pool).await.unwrap();
+
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segment_cache")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1, "Unlimited must not LRU-evict");
+    let lru_log: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_evictions WHERE reason = 'lru_size_limit'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(lru_log, 0, "no LRU eviction rows should be logged");
+}
+
+#[tokio::test]
+async fn manual_evict_logs_reason() {
+    use hometube::services::video_cache::evict_video_public;
+    let app = boot().await;
+    seed_segment(&app.pool, "manual-vid", 1024).await;
+    evict_video_public(&app.pool, "manual-vid").await.unwrap();
+
+    let reason: String =
+        sqlx::query_scalar("SELECT reason FROM cache_evictions WHERE video_id = 'manual-vid'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason, "manual");
+}
