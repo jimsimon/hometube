@@ -33,14 +33,17 @@
     <li><a href="/child/playlists">Playlists</a></li>
     <li><a href="/child/bookmarks">Bookmarks</a></li>
     <li><a href="/child/downloads">Downloads</a></li>
+    <li><a href="/child/hidden">Hidden Videos</a></li>
   </ul>
 </nav>
 {% endblock %}
 
 {% block scripts %}
+<hometube-hidden-undo-toast></hometube-hidden-undo-toast>
 <script type="module" src="/assets/components/search-bar.js"></script>
 <script type="module" src="/assets/components/user-menu.js"></script>
 <script type="module" src="/assets/components/usage-limit-overlay.js"></script>
+<script type="module" src="/assets/components/hidden-undo-toast.js"></script>
 <script>
   // Mark the active nav link based on the current URL path.
   (function() {

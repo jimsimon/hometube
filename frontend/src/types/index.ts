@@ -56,6 +56,17 @@ export interface BlockedVideo {
   created_at: number;
 }
 
+export interface HiddenVideo {
+  id: number;
+  video_id: string;
+  video_title: string | null;
+  channel_id: string | null;
+  channel_title: string | null;
+  video_thumbnail_url: string | null;
+  duration_seconds: number | null;
+  hidden_at: number;
+}
+
 export interface ChildSettings {
   child_account_id: number;
   downloads_enabled: boolean;
