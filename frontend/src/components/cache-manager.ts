@@ -50,15 +50,7 @@ interface EvictionEntry {
 
 // Must stay in sync with `CACHE_SIZE_PRESETS` in
 // `src/services/video_cache.rs` — the backend rejects unknown labels.
-const PRESETS = [
-  "10 GB",
-  "25 GB",
-  "50 GB",
-  "100 GB",
-  "250 GB",
-  "500 GB",
-  "Unlimited",
-];
+const PRESETS = ["10 GB", "25 GB", "50 GB", "100 GB", "250 GB", "500 GB", "Unlimited"];
 
 const REASON_LABELS: Record<string, string> = {
   manual: "Manually cleared",
@@ -345,9 +337,8 @@ export class CacheManager extends LitElement {
             ${this.stats.max_size_label}
             ${this.stats.unlimited
               ? html`<span class="hint">
-                  No size-based (LRU) eviction will run. Videos can still be
-                  evicted by the cleanup job when they're removed from every
-                  allowlist, or manually below.
+                  No size-based (LRU) eviction will run. Videos can still be evicted by the cleanup
+                  job when they're removed from every allowlist, or manually below.
                 </span>`
               : html`<div
                   class="progress"
@@ -385,8 +376,8 @@ export class CacheManager extends LitElement {
           <label for="cache-video-id">
             Clear cache for a specific video
             <span id="cache-video-id-hint" class="hint">
-              Removes the DB metadata cache and on-disk segments for one
-              YouTube video ID (11 characters).
+              Removes the DB metadata cache and on-disk segments for one YouTube video ID (11
+              characters).
             </span>
           </label>
           <div class="clear-by-id-row">
@@ -406,8 +397,7 @@ export class CacheManager extends LitElement {
             <button
               type="submit"
               class="danger"
-              ?disabled=${this.busy ||
-              !CacheManager.VIDEO_ID_RE.test(this.videoIdInput)}
+              ?disabled=${this.busy || !CacheManager.VIDEO_ID_RE.test(this.videoIdInput)}
             >
               Clear video cache
             </button>
