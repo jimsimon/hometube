@@ -178,6 +178,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(cache::delete_video),
         )
         .route("/api/cache/clear", post(cache::clear_all))
+        .route("/api/cache/evictions", get(cache::recent_evictions))
         // Parental preview (Phase 16)
         .route("/api/preview/video/{video_id}", get(preview::preview_video))
         .route(

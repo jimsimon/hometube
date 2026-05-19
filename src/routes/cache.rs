@@ -3,7 +3,7 @@
 //! Wraps [`crate::services::video_cache`] helpers as JSON endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -25,6 +25,10 @@ pub struct CacheStats {
     pub hit_rate: f64,
     pub max_size_label: String,
     pub max_size_bytes: u64,
+    /// `true` when the configured cache size is "Unlimited" (no LRU
+    /// eviction will run). Convenience for the UI so it can avoid
+    /// rendering a progress bar against a zero limit.
+    pub unlimited: bool,
     pub top_videos: Vec<CachedVideoSummary>,
 }
 
@@ -59,6 +63,7 @@ pub async fn stats(State(state): State<AppState>) -> AppResult<Json<CacheStats>>
     };
     let max_size_label = video_cache::current_cache_size_label(&state.db).await;
     let max_size_bytes = video_cache::cache_size_preset_to_bytes(&max_size_label);
+    let unlimited = max_size_label.eq_ignore_ascii_case("Unlimited");
     Ok(Json(CacheStats {
         total_bytes,
         segment_count,
@@ -68,8 +73,48 @@ pub async fn stats(State(state): State<AppState>) -> AppResult<Json<CacheStats>>
         hit_rate,
         max_size_label,
         max_size_bytes,
+        unlimited,
         top_videos,
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct EvictionEntry {
+    pub id: i64,
+    pub video_id: String,
+    pub segment_count: i64,
+    pub bytes_freed: i64,
+    pub reason: String,
+    pub evicted_at: i64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EvictionsQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// `GET /api/cache/evictions?limit=50` — recent cache evictions, newest
+/// first. Each row includes the reason it was evicted (manual, clear-all,
+/// not_allowlisted, or lru_size_limit).
+pub async fn recent_evictions(
+    State(state): State<AppState>,
+    Query(params): Query<EvictionsQuery>,
+) -> AppResult<Json<Vec<EvictionEntry>>> {
+    let limit = params.limit.unwrap_or(50).clamp(1, 500);
+    let rows = video_cache::recent_evictions(&state.db, limit).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| EvictionEntry {
+                id: r.id,
+                video_id: r.video_id,
+                segment_count: r.segment_count,
+                bytes_freed: r.bytes_freed,
+                reason: r.reason,
+                evicted_at: r.evicted_at,
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Serialize)]
