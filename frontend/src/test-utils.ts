@@ -34,9 +34,30 @@ interface MaybeLitElement {
  * current cycle and we wait for the next one.
  */
 export async function flushAsync(el?: MaybeLitElement): Promise<void> {
+  // 1. Drain microtasks for in-process promise chains.
   for (let i = 0; i < 20; i++) {
     await Promise.resolve();
   }
+  // 2. Yield one macrotask cycle. This is what `setTimeout(_, 0)`
+  //    is for: it lets the event loop process any platform-scheduled
+  //    tasks (e.g. real `Response` body stream reads in browser mode)
+  //    that are not microtasks. This is NOT a wall-clock wait — the
+  //    `0` means "as soon as currently-queued work is done", which is
+  //    exactly what we need. The flaky `setTimeout(_, 10)` pattern
+  //    this helper replaces was problematic because it assumed all
+  //    work would complete within 10 ms; `setTimeout(_, 0)` makes no
+  //    such assumption.
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+  // 3. Final microtask drain to catch promise continuations spawned
+  //    during the macrotask above.
+  for (let i = 0; i < 5; i++) {
+    await Promise.resolve();
+  }
+  // 4. Wait for Lit to settle. `updateComplete` resolves with `false`
+  //    if another update was scheduled during the render; loop until
+  //    it returns `true`.
   if (el?.updateComplete) {
     for (let i = 0; i < 5; i++) {
       const settled = await el.updateComplete;
