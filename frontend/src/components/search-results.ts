@@ -141,8 +141,18 @@ export class SearchResults extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if ((changed.has("q") || changed.has("type")) && this.q) {
-      void this.runSearch(false);
+    if (changed.has("q") || changed.has("type")) {
+      if (this.q) {
+        void this.runSearch(false);
+      } else {
+        // Query cleared — drop any stale results so the UI doesn't
+        // keep showing matches for the previous query.
+        this.channels = [];
+        this.playlists = [];
+        this.videos = [];
+        this.nextPageToken = null;
+        this.error = "";
+      }
     }
   }
 
@@ -186,6 +196,42 @@ export class SearchResults extends LitElement {
     void this.runSearch(true);
   };
 
+  /**
+   * React to debounced query / filter changes from the embedded
+   * `<hometube-search-bar>`. We update component state (which triggers
+   * `runSearch` via `updated()`) and reflect the new query in the URL
+   * so refresh / share links stay accurate, without a full navigation.
+   */
+  private onSearchChange = (event: Event): void => {
+    const detail = (event as CustomEvent<{ q: string; kind: string }>).detail;
+    if (!detail) return;
+    // Validate the kind against the known union — otherwise a stray
+    // string would flow straight into the `/api/search?type=...` URL.
+    const allowedKinds: ReadonlyArray<typeof this.type> = [
+      "all",
+      "channel",
+      "playlist",
+      "video",
+    ];
+    const nextType: typeof this.type = allowedKinds.includes(detail.kind as typeof this.type)
+      ? (detail.kind as typeof this.type)
+      : "all";
+    const nextQ = detail.q ?? "";
+    if (nextQ === this.q && nextType === this.type) return;
+    this.q = nextQ;
+    this.type = nextType;
+    try {
+      const url = new URL(window.location.href);
+      if (this.q) url.searchParams.set("q", this.q);
+      else url.searchParams.delete("q");
+      url.searchParams.set("type", this.type);
+      window.history.replaceState(null, "", url.toString());
+    } catch {
+      // history API failures are non-fatal — the in-page state already
+      // reflects the new query.
+    }
+  };
+
   override render() {
     const hasResults =
       this.channels.length > 0 || this.playlists.length > 0 || this.videos.length > 0;
@@ -193,7 +239,11 @@ export class SearchResults extends LitElement {
 
     return html`
       <div class="bar">
-        <hometube-search-bar initial-q=${this.q} initial-type=${this.type}></hometube-search-bar>
+        <hometube-search-bar
+          initial-q=${this.q}
+          initial-type=${this.type}
+          @search-change=${this.onSearchChange}
+        ></hometube-search-bar>
       </div>
 
       <div class="live" role="status" aria-live="polite">
