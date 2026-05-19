@@ -363,7 +363,7 @@ export class VideoCard extends LitElement {
           aria-expanded=${this.menuOpen ? "true" : "false"}
           @click=${this.toggleMenu}
         >
-          \u22ee
+          ⋮
         </button>
         ${this.menuOpen
           ? html`<div class="menu" role="menu">

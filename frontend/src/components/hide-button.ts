@@ -106,7 +106,7 @@ export class HideButton extends LitElement {
   override render() {
     return html`
       <button type="button" ?disabled=${this.busy} @click=${this.onClick}>
-        \u{1F648} Hide this video
+        🙈 Hide this video
       </button>
       ${this.error ? html`<span class="error">${this.error}</span>` : null}
     `;

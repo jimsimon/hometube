@@ -10,7 +10,9 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{boot_setup_complete, boot_with_parent_and_child, insert_account, mint_session_cookie};
+use common::{
+    boot_setup_complete, boot_with_parent_and_child, insert_account, mint_session_cookie,
+};
 use hometube::models::account::AccountType;
 use hometube::services::access::{can_child_view, is_hidden_for_child};
 use serde_json::json;
@@ -99,7 +101,8 @@ async fn hide_is_per_child_isolated() {
     // Switch session to child B by clearing cookies and adding B's cookie.
     app.server.clear_cookies();
     let auth_b = mint_session_cookie(&app, child_b).await;
-    app.server.add_cookie(Cookie::new(auth_b.name, auth_b.value));
+    app.server
+        .add_cookie(Cookie::new(auth_b.name, auth_b.value));
 
     // Child B sees no hidden videos.
     let res = app.server.get("/api/hidden").await;

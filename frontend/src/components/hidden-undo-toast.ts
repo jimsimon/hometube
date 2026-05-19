@@ -24,6 +24,7 @@ export class HiddenUndoToast extends LitElement {
   @state() private videoId: string | null = null;
   @state() private hiddenTitle: string | null = null;
   @state() private busy = false;
+  @state() private error = "";
 
   /**
    * `true` when the pending hide was performed on a different page
@@ -75,6 +76,10 @@ export class HiddenUndoToast extends LitElement {
     button[disabled] {
       opacity: 0.5;
       cursor: not-allowed;
+    }
+    .err {
+      color: #fda4af;
+      font-size: 0.8rem;
     }
     .msg {
       flex: 1;
@@ -147,6 +152,7 @@ export class HiddenUndoToast extends LitElement {
   private async onUndo() {
     if (!this.videoId || this.busy) return;
     this.busy = true;
+    this.error = "";
     const id = this.videoId;
     const shouldReload = this.needsReload;
     try {
@@ -170,8 +176,10 @@ export class HiddenUndoToast extends LitElement {
     } catch (err) {
       if (err instanceof ApiError) {
         console.warn("Undo failed", err.status, err.body);
+        this.error = `Couldn't undo (${err.status})`;
       } else {
         console.warn("Undo failed", err);
+        this.error = "Couldn't undo";
       }
       this.busy = false;
     }
@@ -183,6 +191,7 @@ export class HiddenUndoToast extends LitElement {
     return html`
       <div class="toast" role="status" aria-live="polite">
         <span class="msg">${label}</span>
+        ${this.error ? html`<span class="err" role="alert">${this.error}</span>` : null}
         <button type="button" ?disabled=${this.busy} @click=${this.onUndo}>Undo</button>
       </div>
     `;
