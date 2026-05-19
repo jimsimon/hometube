@@ -384,7 +384,7 @@ export class CacheManager extends LitElement {
             <input
               id="cache-video-id"
               type="text"
-              inputmode="latin"
+              inputmode="text"
               autocomplete="off"
               spellcheck="false"
               maxlength="11"

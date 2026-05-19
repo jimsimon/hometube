@@ -12,7 +12,9 @@ CREATE TABLE cache_evictions (
     --   'clear_all'       — parent clicked "Clear entire cache"
     --   'not_allowlisted' — cleanup job: video no longer on any allowlist
     --   'lru_size_limit'  — cleanup job: cache over configured max size
-    reason          TEXT    NOT NULL,
+    reason          TEXT    NOT NULL CHECK (
+        reason IN ('manual', 'clear_all', 'not_allowlisted', 'lru_size_limit')
+    ),
     evicted_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

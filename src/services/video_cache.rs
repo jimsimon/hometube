@@ -256,6 +256,21 @@ async fn log_eviction(
     }
 }
 
+/// Delete `cache_evictions` rows older than `keep_days`. Best-effort:
+/// failures are logged but never propagated, since pruning is purely
+/// housekeeping. Called once per scheduled cleanup run so the audit
+/// log can't grow unboundedly on a long-lived instance.
+async fn prune_eviction_log(pool: &SqlitePool, keep_days: i64) {
+    let cutoff = Utc::now().timestamp() - keep_days * 86_400;
+    let res = sqlx::query("DELETE FROM cache_evictions WHERE evicted_at < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await;
+    if let Err(err) = res {
+        debug!(%err, %keep_days, "failed to prune cache_evictions");
+    }
+}
+
 /// One row of the eviction audit log, ready for JSON serialization.
 #[derive(Debug, Clone)]
 pub struct EvictionRecord {
@@ -366,6 +381,22 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
                 entry.1 += size as u64;
             }
             for (video_id, (segs, bytes)) in per_video {
+                // If LRU evicted every remaining segment for this video,
+                // drop the orphaned metadata row too so the cache state
+                // stays consistent with the allowlist + manual paths.
+                let remaining: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM segment_cache WHERE video_id = ?")
+                        .bind(&video_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                if remaining == 0 {
+                    sqlx::query("DELETE FROM video_metadata_cache WHERE video_id = ?")
+                        .bind(&video_id)
+                        .execute(pool)
+                        .await?;
+                }
+                evicted_videos += 1;
                 log_eviction(pool, &video_id, segs, bytes, reason::LRU_SIZE_LIMIT).await;
                 output.push_str(&format!(
                     "LRU evicted {video_id} ({segs} segments, {} KB) — over {label} size limit\n",
@@ -376,6 +407,11 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
     } else {
         output.push_str("LRU eviction skipped (cache size set to Unlimited).\n");
     }
+
+    // Prune the eviction audit log so it can't grow unboundedly. Keep
+    // the most recent 90 days; the parent UI only ever queries the
+    // newest 500 anyway.
+    prune_eviction_log(pool, 90).await;
 
     let msg = format!(
         "Cleanup: {evicted_videos} videos / {evicted_segments} segments / {} KB freed.",
