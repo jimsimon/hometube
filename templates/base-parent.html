@@ -6,9 +6,15 @@
 #}
 {% extends "base.html" %}
 
-{# Enable the navigation toggle (hamburger) — base.html disables it
-   by default for unauthenticated pages that have no navigation. #}
-{% block page_attrs %}{% endblock %}
+{# The hamburger button is provided by our own `nav_toggle` block (below),
+   so `disable-navigation-toggle` from base.html stays set and wa-page's
+   built-in toggle is never rendered — no risk of a duplicate button. #}
+
+{% block nav_toggle %}
+<wa-button data-toggle-nav appearance="plain" class="nav-toggle" aria-label="Toggle navigation">
+  <wa-icon name="bars"></wa-icon>
+</wa-button>
+{% endblock %}
 
 {% block header_actions %}
 <div class="header-actions">
