@@ -374,9 +374,7 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
             }
         }
     } else {
-        output.push_str(
-            "LRU eviction skipped (cache size set to Unlimited).\n",
-        );
+        output.push_str("LRU eviction skipped (cache size set to Unlimited).\n");
     }
 
     let msg = format!(
@@ -440,11 +438,7 @@ async fn video_is_anywhere_allowlisted(pool: &SqlitePool, video_id: &str) -> App
     Ok(n > 0)
 }
 
-async fn evict_video(
-    pool: &SqlitePool,
-    video_id: &str,
-    why: &str,
-) -> AppResult<(u64, u64)> {
+async fn evict_video(pool: &SqlitePool, video_id: &str, why: &str) -> AppResult<(u64, u64)> {
     let rows: Vec<(i64, i64, String)> = sqlx::query_as(
         "SELECT id, file_size_bytes, file_path FROM segment_cache WHERE video_id = ?",
     )
@@ -487,10 +481,7 @@ async fn evict_video(
     // Record the eviction in the audit log. Skip the no-op case where
     // nothing was actually cached for this id (so e.g. clicking "Clear"
     // on a video that has no cache row doesn't create a phantom entry).
-    if seg_delete.rows_affected() > 0
-        || meta_delete.rows_affected() > 0
-        || bytes_total > 0
-    {
+    if seg_delete.rows_affected() > 0 || meta_delete.rows_affected() > 0 || bytes_total > 0 {
         log_eviction(pool, video_id, segs, bytes_total, why).await;
     }
 

@@ -287,12 +287,11 @@ async fn unlimited_size_skips_lru_eviction_even_when_huge() {
         .await
         .unwrap();
     assert_eq!(remaining, 1, "Unlimited must not LRU-evict");
-    let lru_log: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM cache_evictions WHERE reason = 'lru_size_limit'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let lru_log: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cache_evictions WHERE reason = 'lru_size_limit'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(lru_log, 0, "no LRU eviction rows should be logged");
 }
 
