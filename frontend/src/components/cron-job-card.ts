@@ -22,7 +22,7 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import { api } from "../services/api.js";
 
-interface CronJob {
+export interface CronJob {
   id: number;
   name: string;
   description: string | null;
@@ -217,7 +217,10 @@ export class CronJobCard extends LitElement {
   }
 
   private dispatchChanged(): void {
-    document.dispatchEvent(
+    // Bubble through the shadow boundary so the surrounding
+    // <hometube-cron-jobs-list> (or any ancestor / document listener)
+    // can refresh.
+    this.dispatchEvent(
       new CustomEvent("hometube:cron-changed", {
         bubbles: true,
         composed: true,
