@@ -88,13 +88,45 @@ async fn switch_to_parent_without_pin_is_rejected() {
 }
 
 #[tokio::test]
-async fn switch_to_child_without_pin_succeeds() {
+async fn switch_to_child_requires_parent_pin() {
+    // Switching into a child profile is gated by *any* parent's PIN.
+    // With no parent PIN configured, the request is rejected with 400.
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
     let res = app
         .server
         .post("/api/auth/switch")
         .json(&json!({ "account_id": child_id }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn switch_to_child_with_correct_parent_pin_succeeds() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    // Set the current parent's PIN.
+    let res = app
+        .server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "1234" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
+
+    // Wrong PIN → forbidden.
+    let res = app
+        .server
+        .post("/api/auth/switch")
+        .json(&json!({ "account_id": child_id, "pin": "9999" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
+
+    // Correct parent PIN → child switch succeeds.
+    let res = app
+        .server
+        .post("/api/auth/switch")
+        .json(&json!({ "account_id": child_id, "pin": "1234" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();

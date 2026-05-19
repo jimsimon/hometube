@@ -179,22 +179,59 @@ pub async fn switch(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if matches!(target.typed(), AccountType::Parent) {
-        let provided = body.pin.as_deref().unwrap_or("");
-        let stored = target.pin_hash.as_deref().ok_or_else(|| {
-            AppError::BadRequest(
-                "this parent profile doesn't have a PIN yet; visit /setup/pin while signed in"
-                    .into(),
-            )
-        })?;
-        if let Err(err) = verify_pin(stored, provided) {
-            warn!(account_id = target.id, "PIN attempt failed");
-            // Track recent failures via parent_notifications metadata.
-            // We never fail the request because of this bookkeeping.
-            if let Err(e) = record_failed_pin(&state, target.id).await {
-                warn!(error = %e, "could not record failed PIN attempt");
+    match target.typed() {
+        AccountType::Parent => {
+            let provided = body.pin.as_deref().unwrap_or("");
+            let stored = target.pin_hash.as_deref().ok_or_else(|| {
+                AppError::BadRequest(
+                    "this parent profile doesn't have a PIN yet; visit /setup/pin while signed in"
+                        .into(),
+                )
+            })?;
+            if let Err(err) = verify_pin(stored, provided) {
+                warn!(account_id = target.id, "PIN attempt failed");
+                // Track recent failures via parent_notifications metadata.
+                // We never fail the request because of this bookkeeping.
+                if let Err(e) = record_failed_pin(&state, target.id).await {
+                    warn!(error = %e, "could not record failed PIN attempt");
+                }
+                return Err(err);
             }
-            return Err(err);
+        }
+        AccountType::Child => {
+            // Switching into a child profile is gated by *any* parent's
+            // PIN — this prevents a child from independently hopping
+            // between profiles without parental approval.
+            let provided = body.pin.as_deref().unwrap_or("");
+            let hashes = account::list_parent_pin_hashes(&state.db).await?;
+            if hashes.is_empty() {
+                return Err(AppError::BadRequest(
+                    "no parent has set a PIN yet; a parent must visit /setup/pin first"
+                        .into(),
+                ));
+            }
+            // Reject malformed PINs *before* doing any Argon2 work.
+            // Argon2 is intentionally expensive, and verifying every
+            // parent's hash against garbage input would let a single
+                // request burn N × Argon2 of CPU.
+            if !is_valid_pin(provided) {
+                warn!(
+                    account_id = target.id,
+                    "PIN attempt failed (child switch, malformed)"
+                );
+                if let Err(e) = record_failed_child_switch(&state).await {
+                    warn!(error = %e, "could not record failed PIN attempt");
+                }
+                return Err(AppError::Forbidden);
+            }
+            let matched = hashes.iter().any(|h| verify_pin(h, provided).is_ok());
+            if !matched {
+                warn!(account_id = target.id, "PIN attempt failed (child switch)");
+                if let Err(e) = record_failed_child_switch(&state).await {
+                    warn!(error = %e, "could not record failed PIN attempt");
+                }
+                return Err(AppError::Forbidden);
+            }
         }
     }
 
@@ -208,6 +245,44 @@ pub async fn switch(
     set_session_cookie(&signed, &sess.id);
 
     Ok((StatusCode::OK, Json(account::AccountSummary::from(&target))).into_response())
+}
+
+/// Insert a soft "system_update" notification for every parent if more
+/// than five wrong PIN attempts have happened against a *child* profile
+/// (any child) in the past five minutes. Bucketed separately from
+/// parent-switch failures so the two attack patterns don't mask each
+/// other.
+async fn record_failed_child_switch(state: &AppState) -> AppResult<()> {
+    let now = Utc::now().timestamp();
+    let window_start = now - 5 * 60;
+    let metadata = serde_json::json!({
+        "kind": "pin_attempt_failed_child_switch",
+        "at": now,
+    });
+
+    let recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parent_notifications \
+         WHERE notification_type = ? \
+           AND metadata LIKE '%pin_attempt_failed_child_switch%' \
+           AND created_at >= ?",
+    )
+    .bind(crate::services::notifications::TYPE_SYSTEM_UPDATE)
+    .bind(window_start)
+    .fetch_one(&state.db)
+    .await?;
+
+    if recent_count >= 5 && recent_count % 5 != 0 {
+        return Ok(());
+    }
+
+    crate::services::notifications::broadcast(
+        &state.db,
+        crate::services::notifications::TYPE_SYSTEM_UPDATE,
+        "Failed PIN attempt",
+        "Someone tried to switch to a child profile and entered the wrong PIN.",
+        &metadata,
+    )
+    .await
 }
 
 /// Insert a soft "system_update" notification for every parent if more

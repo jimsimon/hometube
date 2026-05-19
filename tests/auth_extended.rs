@@ -65,10 +65,16 @@ async fn switch_to_child_from_parent_works() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
 
+    // Switching into a child profile now requires any parent's PIN.
+    app.server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "2468" }))
+        .await;
+
     let res = app
         .server
         .post("/api/auth/switch")
-        .json(&json!({ "account_id": child_id }))
+        .json(&json!({ "account_id": child_id, "pin": "2468" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::OK);
 }
