@@ -50,6 +50,7 @@ pub mod family_playlists;
 pub mod feed;
 pub mod likes;
 pub mod notifications;
+pub mod notifications_config;
 pub mod pages;
 pub mod playlists;
 pub mod preview;
@@ -223,6 +224,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/notifications/{id}",
             axum::routing::delete(notifications::delete),
+        )
+        // External-notification forwarder (Apprise / ntfy.sh / Gotify)
+        .route(
+            "/api/notifications/config",
+            get(notifications_config::get_config).put(notifications_config::put_config),
+        )
+        .route(
+            "/api/notifications/config/test",
+            post(notifications_config::test),
         )
         .route_layer(axum::middleware::from_fn(require_parent));
 

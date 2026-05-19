@@ -38,19 +38,17 @@ const YTDLP_FAILURE_DEDUP: Duration = Duration::from_secs(24 * 60 * 60);
 /// One day in seconds — used by the per-day dedup helpers.
 const ONE_DAY_SECS: i64 = 24 * 60 * 60;
 
-/// Insert a single notification for one parent.
-///
-/// `metadata` is serialised to JSON; pass `&serde_json::Value::Null` (or
-/// any small struct) when you have nothing structured to attach.
-pub async fn dispatch<T: Serialize>(
+/// Low-level insert. Does **not** forward to external services — that
+/// is the caller's responsibility, since broadcast-style callers want
+/// exactly one external delivery for N row inserts.
+async fn insert_one(
     pool: &SqlitePool,
     parent_id: i64,
     notification_type: &str,
     title: &str,
     message: &str,
-    metadata: &T,
+    metadata_json: &str,
 ) -> AppResult<()> {
-    let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
     sqlx::query(
         "INSERT INTO parent_notifications \
             (parent_account_id, notification_type, title, message, metadata) \
@@ -60,9 +58,49 @@ pub async fn dispatch<T: Serialize>(
     .bind(notification_type)
     .bind(title)
     .bind(message)
-    .bind(&metadata_json)
+    .bind(metadata_json)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Insert a single notification for one parent.
+///
+/// `metadata` is serialised to JSON; pass `&serde_json::Value::Null` (or
+/// any small struct) when you have nothing structured to attach.
+///
+/// **External delivery**: after the in-app row is persisted this also
+/// triggers a single fire-and-forget push via
+/// [`crate::services::notification_forwarders::forward_if_enabled`] (if
+/// a self-hosted forwarder is configured). Callers that fan out via
+/// [`broadcast`] / [`broadcast_once_within`] must **not** loop over
+/// `dispatch` — use [`insert_one`] directly to avoid N external pushes
+/// for one logical notification.
+pub async fn dispatch<T: Serialize>(
+    pool: &SqlitePool,
+    parent_id: i64,
+    notification_type: &str,
+    title: &str,
+    message: &str,
+    metadata: &T,
+) -> AppResult<()> {
+    let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
+    insert_one(
+        pool,
+        parent_id,
+        notification_type,
+        title,
+        message,
+        &metadata_json,
+    )
+    .await?;
+    crate::services::notification_forwarders::forward_if_enabled(
+        pool,
+        notification_type,
+        title,
+        message,
+    )
+    .await;
     Ok(())
 }
 
@@ -74,13 +112,29 @@ pub async fn broadcast<T: Serialize>(
     message: &str,
     metadata: &T,
 ) -> AppResult<()> {
+    let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
     let parents: Vec<(i64,)> =
         sqlx::query_as("SELECT id FROM accounts WHERE account_type = 'parent'")
             .fetch_all(pool)
             .await?;
     for (parent_id,) in parents {
-        dispatch(pool, parent_id, notification_type, title, message, metadata).await?;
+        insert_one(
+            pool,
+            parent_id,
+            notification_type,
+            title,
+            message,
+            &metadata_json,
+        )
+        .await?;
     }
+    crate::services::notification_forwarders::forward_if_enabled(
+        pool,
+        notification_type,
+        title,
+        message,
+    )
+    .await;
     Ok(())
 }
 
@@ -111,6 +165,7 @@ pub async fn broadcast_once_within<T: Serialize>(
             .await?;
     let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
     let pattern = format!("%{dedup_key}%");
+    let mut inserted_any = false;
     for (parent_id,) in parents {
         let exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM parent_notifications \
@@ -129,18 +184,25 @@ pub async fn broadcast_once_within<T: Serialize>(
         if exists > 0 {
             continue;
         }
-        sqlx::query(
-            "INSERT INTO parent_notifications \
-                (parent_account_id, notification_type, title, message, metadata) \
-             VALUES (?, ?, ?, ?, ?)",
+        insert_one(
+            pool,
+            parent_id,
+            notification_type,
+            title,
+            message,
+            &metadata_json,
         )
-        .bind(parent_id)
-        .bind(notification_type)
-        .bind(title)
-        .bind(message)
-        .bind(&metadata_json)
-        .execute(pool)
         .await?;
+        inserted_any = true;
+    }
+    if inserted_any {
+        crate::services::notification_forwarders::forward_if_enabled(
+            pool,
+            notification_type,
+            title,
+            message,
+        )
+        .await;
     }
     Ok(())
 }

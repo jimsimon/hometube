@@ -15,6 +15,7 @@
 pub mod access;
 pub mod cron;
 pub mod dash;
+pub mod notification_forwarders;
 pub mod notifications;
 pub mod segment_ranges;
 pub mod segment_store;
