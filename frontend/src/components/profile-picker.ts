@@ -183,6 +183,24 @@ export class ProfilePicker extends LitElement {
     this.pinTarget = profile;
   }
 
+  /** User explicitly cancelled the switch — return them to the page
+   *  they came from. The session cookie is untouched, so they land
+   *  back on the previous page under their existing account. If
+   *  there's no in-app history (fresh entry, off-origin referrer),
+   *  stay on the picker. */
+  private onCancelClicked(): void {
+    try {
+      const ref = document.referrer;
+      const sameOrigin =
+        ref && new URL(ref, window.location.href).origin === window.location.origin;
+      if (sameOrigin && window.history.length > 1) {
+        window.history.back();
+      }
+    } catch {
+      // No-op: stay on the picker.
+    }
+  }
+
   override render() {
     if (this.loading)
       return html`<hometube-loading-spinner label="Loading profiles…"></hometube-loading-spinner>`;
@@ -200,6 +218,7 @@ export class ProfilePicker extends LitElement {
         display-name=${this.pinTarget?.display_name ?? ""}
         ?require-parent-pin=${this.pinTarget?.account_type === "child"}
         @pin-cancelled=${() => (this.pinTarget = null)}
+        @pin-cancel-clicked=${this.onCancelClicked}
       ></hometube-pin-entry-dialog>
     `;
   }

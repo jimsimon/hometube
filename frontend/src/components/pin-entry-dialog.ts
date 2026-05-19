@@ -113,22 +113,14 @@ export class PinEntryDialog extends LitElement {
     this.dispatchEvent(new CustomEvent("pin-cancelled", { bubbles: true, composed: true }));
   }
 
-  /** Explicit Cancel button — user is abandoning the whole switch, so
-   *  return them to the page they were on before opening the picker.
-   *  The session cookie is untouched until the switch is confirmed, so
-   *  going back simply restores the previous page under the user's
-   *  existing account. */
+  /** Explicit Cancel button — emits `pin-cancel-clicked` in addition to
+   *  the regular `pin-cancelled` event. The host page can listen for
+   *  the explicit-cancel event to navigate the user back to where they
+   *  came from; we don't navigate from the dialog itself so that the
+   *  dialog stays self-contained and easy to test in isolation. */
   private onCancelClick(): void {
+    this.dispatchEvent(new CustomEvent("pin-cancel-clicked", { bubbles: true, composed: true }));
     this.close();
-    try {
-      const ref = document.referrer;
-      const sameOrigin = ref && new URL(ref, window.location.href).origin === window.location.origin;
-      if (sameOrigin && window.history.length > 1) {
-        window.history.back();
-      }
-    } catch {
-      // No-op: stay on the picker.
-    }
   }
 
   private async onSubmit(e: Event): Promise<void> {
