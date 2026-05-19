@@ -53,6 +53,14 @@ export class SearchResults extends LitElement {
   @state() private error = "";
   @state() private nextPageToken: string | null = null;
 
+  /**
+   * Monotonic token used to discard stale `/api/search` responses
+   * when the user clears the query or starts a new search before the
+   * previous one resolves. Without it, a late reply could overwrite
+   * fresh empty state with stale matches.
+   */
+  private searchToken = 0;
+
   static styles = css`
     :host {
       display: block;
@@ -147,10 +155,10 @@ export class SearchResults extends LitElement {
         void this.runSearch(false);
       } else {
         // Query cleared — drop any stale results so the UI doesn't
-        // keep showing matches for the previous query. Reset
-        // `loading` as well in case an in-flight request was still
-        // pending; its `finally` block will be a no-op once it
-        // returns since the token check supersedes it.
+        // keep showing matches for the previous query. Bump the
+        // token so any in-flight `runSearch` discards its response,
+        // and reset `loading` immediately for visual consistency.
+        this.searchToken++;
         this.channels = [];
         this.playlists = [];
         this.videos = [];
@@ -163,6 +171,7 @@ export class SearchResults extends LitElement {
 
   private async runSearch(append: boolean): Promise<void> {
     if (!this.q) return;
+    const token = ++this.searchToken;
     this.loading = true;
     this.error = "";
     if (!append) {
@@ -179,6 +188,8 @@ export class SearchResults extends LitElement {
         params.set("page_token", this.nextPageToken);
       }
       const res = await api.get<ChildSearchResponse>(`/api/search?${params.toString()}`);
+      // Discard if a newer search (or a clear) superseded us.
+      if (token !== this.searchToken) return;
       if (append) {
         this.channels = [...this.channels, ...res.results.channels];
         this.playlists = [...this.playlists, ...res.results.playlists];
@@ -190,10 +201,13 @@ export class SearchResults extends LitElement {
       }
       this.nextPageToken = res.next_page_token;
     } catch (err) {
+      if (token !== this.searchToken) return;
       this.error =
         err instanceof ApiError ? `Search failed (HTTP ${err.status}).` : (err as Error).message;
     } finally {
-      this.loading = false;
+      if (token === this.searchToken) {
+        this.loading = false;
+      }
     }
   }
 

@@ -152,6 +152,51 @@ describe("<hometube-search-results> onSearchChange", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it("discards a late-arriving response after the query is cleared", async () => {
+    // Set up a fetch that we resolve manually so we can interleave
+    // with the clear-query path.
+    let resolveFetch: ((value: unknown) => void) | null = null;
+    const slowBody = {
+      q: "cats",
+      kind: "all",
+      results: {
+        channels: [{ channel_id: "UC1", channel_title: "Stale", channel_thumbnail_url: null }],
+        playlists: [],
+        videos: [],
+      },
+      next_page_token: null,
+    };
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: () => Promise.resolve(slowBody),
+              text: () => Promise.resolve(JSON.stringify(slowBody)),
+            });
+        }),
+    );
+
+    const el = await mount("cats", "all");
+    expect((el as unknown as { loading: boolean }).loading).toBe(true);
+
+    // Clear the query before the in-flight request resolves.
+    dispatchChange(el, { q: "", kind: "all" });
+    await el.updateComplete;
+
+    // Now resolve the stale response. It must not overwrite the
+    // empty state.
+    resolveFetch!(null);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect((el as unknown as { channels: unknown[] }).channels).toEqual([]);
+    expect((el as unknown as { loading: boolean }).loading).toBe(false);
+  });
+
   it("is a no-op when q and type are unchanged", async () => {
     const el = await mount("cats", "all");
     fetchSpy.mockClear();
