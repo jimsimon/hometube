@@ -635,12 +635,50 @@ export class VideoPlayer extends LitElement {
     // Create UI overlay (controls, quality menu, language menu, etc.).
     const ui = new Shaka.ui.Overlay(player, this.containerEl, this.videoEl);
     this.ui = ui;
-    // Always include captions in the overflow menu. When playback speed
-    // is locked, omit the speed button; otherwise use the full set.
+    // YouTube-style control bar layout:
+    //   left  → play, volume (mute + slider), time
+    //   right → captions, settings (overflow), PiP, cast, fullscreen
+    // A `spacer` between the two clusters pushes the right side to the
+    // far edge.
+    //
+    // Captions live directly on the bar (not just the overflow menu)
+    // so the "CC" button is one click away, matching YouTube. The
+    // overflow_menu icon becomes the "settings gear" and hosts quality,
+    // language, and playback-speed pickers.
     const overflowButtons = this.settings?.playback_speed_locked
-      ? ["quality", "language", "captions", "picture_in_picture"]
-      : ["quality", "language", "captions", "playback_rate", "picture_in_picture"];
-    ui.configure({ overflowMenuButtons: overflowButtons });
+      ? ["quality", "language", "captions"]
+      : ["quality", "language", "captions", "playback_rate"];
+    // Only surface the PiP button when the browser actually supports
+    // Picture-in-Picture. Otherwise Shaka leaves an inert slot in the
+    // control bar on iOS Safari (PWA mode) and Firefox Android, which
+    // misaligns the right-side cluster.
+    const supportsPip =
+      typeof document !== "undefined" &&
+      "pictureInPictureEnabled" in document &&
+      (document as Document & { pictureInPictureEnabled?: boolean }).pictureInPictureEnabled ===
+        true;
+    ui.configure({
+      controlPanelElements: [
+        "play_pause",
+        "mute",
+        "volume",
+        "time_and_duration",
+        "spacer",
+        "captions",
+        "overflow_menu",
+        ...(supportsPip ? ["picture_in_picture"] : []),
+        "cast",
+        "fullscreen",
+      ],
+      overflowMenuButtons: overflowButtons,
+      // Tint the scrubber YouTube-red. `played` is the filled portion,
+      // `buffered` is the ahead-of-playhead loaded region; the default
+      // base track color is fine, so we leave it unset.
+      seekBarColors: {
+        played: "rgb(255, 0, 0)",
+        buffered: "rgba(255, 255, 255, 0.4)",
+      },
+    });
 
     // Error handling.
     player.addEventListener("error", (event: Event) => {
