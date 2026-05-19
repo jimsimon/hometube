@@ -1,0 +1,27 @@
+{% extends "base-child.html" %}
+
+{% block title %}Hidden Videos — HomeTube{% endblock %}
+
+{% block content %}
+<section class="page-content" aria-label="Hidden videos" style="max-width: 56rem;">
+  <header class="page-header">
+    <h1>Hidden videos</h1>
+    <p class="subtitle">Videos you've chosen to hide. Tap "Unhide" to bring one back to your feed.</p>
+  </header>
+
+  <hometube-hidden-page></hometube-hidden-page>
+
+  <noscript>
+    {% if videos.is_empty() %}
+    <p>You haven't hidden any videos yet.</p>
+    {% else %}
+    {% include "partials/video-grid.html" %}
+    {% endif %}
+  </noscript>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script type="module" src="/assets/components/hidden-page.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+{% endblock %}

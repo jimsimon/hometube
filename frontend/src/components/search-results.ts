@@ -148,6 +148,21 @@ export class SearchResults extends LitElement {
   // intentionally do **not** kick off a request from
   // `connectedCallback` — doing both would issue two `/api/search`
   // requests on mount.
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.addEventListener("video-hidden", this.onVideoHidden as EventListener);
+  }
+
+  override disconnectedCallback(): void {
+    this.removeEventListener("video-hidden", this.onVideoHidden as EventListener);
+    super.disconnectedCallback();
+  }
+
+  private onVideoHidden = (e: CustomEvent<{ videoId: string }>) => {
+    const videoId = e.detail?.videoId;
+    if (!videoId) return;
+    this.videos = this.videos.filter((v) => v.video_id !== videoId);
+  };
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has("q") || changed.has("type")) {

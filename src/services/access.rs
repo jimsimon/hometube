@@ -35,6 +35,11 @@ pub async fn can_child_view(
     if is_blocked(pool, child_id, video_id).await? {
         return Ok(false);
     }
+    // A child's personal "hide" also denies access — the video should
+    // not surface anywhere except the dedicated `/child/hidden` page.
+    if is_hidden_for_child(pool, child_id, video_id).await? {
+        return Ok(false);
+    }
     if is_allowlisted_video(pool, child_id, video_id).await? {
         return Ok(true);
     }
@@ -49,6 +54,22 @@ pub async fn can_child_view(
         }
     }
     Ok(false)
+}
+
+/// True if this child has personally hidden this video.
+pub async fn is_hidden_for_child(
+    pool: &SqlitePool,
+    child_id: i64,
+    video_id: &str,
+) -> AppResult<bool> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM hidden_videos WHERE child_account_id = ? AND video_id = ?",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0 > 0)
 }
 
 async fn is_blocked(pool: &SqlitePool, child_id: i64, video_id: &str) -> AppResult<bool> {

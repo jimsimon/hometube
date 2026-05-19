@@ -48,6 +48,7 @@ pub mod downloads;
 pub mod family;
 pub mod family_playlists;
 pub mod feed;
+pub mod hidden;
 pub mod likes;
 pub mod notifications;
 pub mod notifications_config;
@@ -379,6 +380,9 @@ pub fn router(state: AppState) -> Router {
                 .put(bookmarks::update)
                 .delete(bookmarks::delete),
         )
+        // Per-child hidden videos
+        .route("/api/hidden", get(hidden::list).post(hidden::add))
+        .route("/api/hidden/{video_id}", delete_route(hidden::remove))
         // Sleep timer
         .route(
             "/api/timer",
@@ -449,6 +453,7 @@ pub fn router(state: AppState) -> Router {
         .route("/child/playlists", get(pages::child_playlists))
         .route("/child/playlist/{id}", get(pages::child_playlist))
         .route("/child/bookmarks", get(pages::child_bookmarks))
+        .route("/child/hidden", get(pages::child_hidden))
         .route("/child/downloads", get(pages::child_downloads))
         .route("/child/search", get(pages::child_search));
 

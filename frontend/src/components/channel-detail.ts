@@ -110,7 +110,19 @@ export class ChannelDetail extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    this.addEventListener("video-hidden", this.onVideoHidden as EventListener);
   }
+
+  override disconnectedCallback(): void {
+    this.removeEventListener("video-hidden", this.onVideoHidden as EventListener);
+    super.disconnectedCallback();
+  }
+
+  private onVideoHidden = (e: CustomEvent<{ videoId: string }>) => {
+    const videoId = e.detail?.videoId;
+    if (!videoId) return;
+    this.videos = this.videos.filter((v) => v.video_id !== videoId);
+  };
 
   private async load(): Promise<void> {
     this.loading = true;

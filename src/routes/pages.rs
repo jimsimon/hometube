@@ -330,6 +330,68 @@ pub async fn child_bookmarks(current: Option<CurrentAccount>) -> AppResult<Respo
 }
 
 #[derive(Template)]
+#[template(path = "pages/child/hidden.html")]
+struct ChildHiddenTemplate {
+    display_name: String,
+    /// SSR fallback grid for browsers without JavaScript. Pulls
+    /// the child's hidden videos straight from `hidden_videos` so the
+    /// page is useful even when the Lit component can't hydrate.
+    videos: Vec<VideoCardData>,
+}
+
+/// `GET /child/hidden` — list of videos this child has personally hidden.
+pub async fn child_hidden(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            let videos = fetch_hidden_video_cards(&state, c.id).await;
+            let tpl = ChildHiddenTemplate {
+                display_name: c.display_name,
+                videos,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            Ok(Redirect::to("/parent/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+/// Pull all hidden videos for `child_id` shaped as `VideoCardData` for
+/// the `<noscript>` fallback grid. Best-effort: errors collapse to an
+/// empty list so the page still renders.
+async fn fetch_hidden_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCardData> {
+    type Row = (String, Option<String>, Option<String>, Option<String>);
+    let rows: Result<Vec<Row>, _> = sqlx::query_as(
+        "SELECT video_id, video_title, video_thumbnail_url, channel_title \
+         FROM hidden_videos \
+         WHERE child_account_id = ? \
+         ORDER BY hidden_at DESC",
+    )
+    .bind(child_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rs) => rs
+            .into_iter()
+            .map(
+                |(video_id, title, thumbnail_url, channel_title)| VideoCardData {
+                    video_id,
+                    title: title.unwrap_or_default(),
+                    thumbnail_url,
+                    channel_title,
+                    duration_label: None,
+                },
+            )
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[derive(Template)]
 #[template(path = "pages/child/downloads.html")]
 struct ChildDownloadsTemplate {
     display_name: String,
@@ -447,9 +509,13 @@ async fn fetch_allowlisted_video_cards(
         "SELECT video_id, video_title, video_thumbnail_url, channel_title \
          FROM allowlisted_videos \
          WHERE child_account_id = ? \
+           AND video_id NOT IN ( \
+                SELECT video_id FROM hidden_videos WHERE child_account_id = ? \
+           ) \
          ORDER BY created_at DESC \
          LIMIT ?",
     )
+    .bind(child_id)
     .bind(child_id)
     .bind(limit)
     .fetch_all(&state.db)
@@ -612,6 +678,14 @@ struct ChildVideoTemplate {
     /// beginning"; the template only emits a `start-at` attribute when
     /// this is non-zero.
     start_at: i64,
+    /// Metadata surfaced to `<hometube-hide-button>` so the
+    /// `hidden_videos` row stores useful title / channel / thumbnail
+    /// fields. All best-effort; empty strings when yt-dlp didn't expose
+    /// them.
+    video_title: String,
+    channel_id: String,
+    channel_title: String,
+    thumbnail_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -666,6 +740,10 @@ pub async fn child_video(
                 from: q.from.unwrap_or_default(),
                 unavailable: !allowed,
                 start_at: q.t.unwrap_or(0).max(0),
+                video_title: result.title.clone().unwrap_or_default(),
+                channel_id: result.channel_id.clone().unwrap_or_default(),
+                channel_title: result.channel_title.clone().unwrap_or_default(),
+                thumbnail_url: result.thumbnail.clone().unwrap_or_default(),
             };
             Ok(Html(tpl.render()?).into_response())
         }

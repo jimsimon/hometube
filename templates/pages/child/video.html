@@ -28,6 +28,15 @@
       video-id="{{ video_id }}"
       {% if start_at > 0 %}start-at="{{ start_at }}"{% endif %}
     ></hometube-video-player>
+    <div class="player-actions">
+      <hometube-hide-button
+        video-id="{{ video_id }}"
+        video-title="{{ video_title }}"
+        channel-id="{{ channel_id }}"
+        channel-title="{{ channel_title }}"
+        thumbnail-url="{{ thumbnail_url }}"
+      ></hometube-hide-button>
+    </div>
   </div>
 
   <aside class="up-next-column" aria-label="Up next">
@@ -60,6 +69,12 @@
   .player-column {
     min-width: 0;
   }
+  .player-actions {
+    margin-top: 0.75rem;
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
   .up-next-column {
     position: sticky;
     top: 1rem;
@@ -91,6 +106,7 @@
 <script type="module" src="/assets/components/like-button.js"></script>
 <script type="module" src="/assets/components/subscribe-button.js"></script>
 <script type="module" src="/assets/components/bookmark-button.js"></script>
+<script type="module" src="/assets/components/hide-button.js"></script>
 <script type="module" src="/assets/components/sleep-timer.js"></script>
 <script type="module" src="/assets/components/wind-down-overlay.js"></script>
 {% endblock %}
