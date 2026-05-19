@@ -11,6 +11,12 @@
    by default for unauthenticated pages that have no navigation. #}
 {% block page_attrs %}{% endblock %}
 
+{% block nav_toggle %}
+<wa-button data-toggle-nav appearance="plain" class="nav-toggle" aria-label="Toggle navigation">
+  <wa-icon name="bars"></wa-icon>
+</wa-button>
+{% endblock %}
+
 {% block header_actions %}
 <div class="header-actions">
   <hometube-search-bar></hometube-search-bar>

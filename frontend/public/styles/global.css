@@ -41,6 +41,14 @@ a {
 header[slot="header"] {
   background: var(--wa-color-surface-raised);
   border-bottom: 1px solid var(--wa-color-surface-border);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+/* On desktop, the nav is a permanent sidebar — hide the hamburger. */
+wa-page[view="desktop"] [data-toggle-nav] {
+  display: none;
 }
 
 nav[slot="navigation"] {
@@ -89,6 +97,8 @@ footer[slot="footer"] {
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
+  /* Push right-aligned actions to the end of the header row. */
+  margin-inline-start: auto;
 }
 
 /* ─── Navigation drawer link list ────────────────────────────── */
