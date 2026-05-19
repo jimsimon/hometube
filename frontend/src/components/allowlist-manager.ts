@@ -14,6 +14,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
+import { debounce } from "../services/debounce.js";
 import {
   pickThumbnail,
   type AllowlistedChannel,
@@ -31,6 +32,14 @@ import "./error-banner.js";
 import "./content-card.js";
 
 type Kind = "channel" | "playlist" | "video";
+
+/**
+ * Delay (ms) between the last keystroke in the search box and the
+ * `/api/parent/search` request. Long enough to avoid a request per
+ * character on typical typing speed, short enough that results feel
+ * live.
+ */
+const SEARCH_DEBOUNCE_MS = 300;
 
 @customElement("hometube-allowlist-manager")
 export class AllowlistManager extends LitElement {
@@ -61,6 +70,27 @@ export class AllowlistManager extends LitElement {
     show?: () => void;
     hide?: () => void;
   };
+
+  /**
+   * Monotonic token used to discard stale `/api/parent/search`
+   * responses — a fast typist can have multiple requests in flight at
+   * once and we only want the most recent one to update the UI.
+   */
+  private searchToken = 0;
+
+  /**
+   * Debounced search trigger. Created in the constructor so the timer
+   * state is per-instance. Cancelled on disconnect to avoid firing
+   * after the component is torn down.
+   */
+  private readonly scheduleSearch = debounce(() => {
+    void this.runSearch();
+  }, SEARCH_DEBOUNCE_MS);
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.scheduleSearch.cancel();
+  }
 
   static styles = css`
     :host {
@@ -173,21 +203,61 @@ export class AllowlistManager extends LitElement {
     this.activeTab = kind;
     this.searchResults = [];
     this.searchQ = "";
+    // Drop any in-flight debounce + invalidate pending responses so a
+    // late reply from the previous tab can't repopulate the new tab.
+    this.scheduleSearch.cancel();
+    this.searchToken++;
+  }
+
+  /**
+   * Called whenever the user types in the search box. Updates state
+   * immediately so the input stays responsive, and schedules a
+   * debounced request. Clearing the input cancels any pending request
+   * and empties the results.
+   */
+  private onSearchInput(value: string): void {
+    this.searchQ = value;
+    if (!value.trim()) {
+      this.scheduleSearch.cancel();
+      this.searchToken++;
+      this.searchResults = [];
+      this.searching = false;
+      return;
+    }
+    this.scheduleSearch();
+  }
+
+  /**
+   * Fire the search immediately, bypassing the debounce. Used by the
+   * Enter key and the Search button so power users don't pay the
+   * debounce delay.
+   */
+  private runSearchNow(): void {
+    this.scheduleSearch.cancel();
+    void this.runSearch();
   }
 
   private async runSearch(): Promise<void> {
-    if (!this.searchQ.trim()) return;
+    const q = this.searchQ.trim();
+    if (!q) return;
+    const token = ++this.searchToken;
+    const tabAtRequest = this.activeTab;
     this.searching = true;
     this.error = "";
     try {
       const res = await api.get<SearchResponse>(
-        `/api/parent/search?q=${encodeURIComponent(this.searchQ)}&type=${this.activeTab}`,
+        `/api/parent/search?q=${encodeURIComponent(q)}&type=${tabAtRequest}`,
       );
+      // Discard if a newer search (or tab change / clear) superseded us.
+      if (token !== this.searchToken || tabAtRequest !== this.activeTab) return;
       this.searchResults = res.items;
     } catch (err) {
+      if (token !== this.searchToken) return;
       this.error = err instanceof ApiError ? String(err.body) : (err as Error).message;
     } finally {
-      this.searching = false;
+      if (token === this.searchToken) {
+        this.searching = false;
+      }
     }
   }
 
@@ -198,12 +268,23 @@ export class AllowlistManager extends LitElement {
   private async addItemForKind(item: SearchItem, kind: Kind): Promise<void> {
     if (this.childId == null) return;
     const base = `/api/children/${this.childId}/allowlist/${kind}s`;
+    // The parent search response already carries title / channel /
+    // thumbnail. We pass them through to the backend so the row can be
+    // persisted with searchable metadata even when the YouTube
+    // discovery sidecar can't resolve the video (rate-limited,
+    // age-gated, offline, …). The backend treats body metadata as a
+    // fallback — it prefers sidecar data when available.
     const payload =
       kind === "channel"
         ? { channel_id: item.id }
         : kind === "playlist"
           ? { playlist_id: item.id }
-          : { video_id: item.id };
+          : {
+              video_id: item.id,
+              title: item.title,
+              channel_title: item.channel_title,
+              thumbnail_url: pickThumbnail(item.thumbnails),
+            };
     try {
       await api.post(base, payload);
       await this.refreshAll();
@@ -273,14 +354,14 @@ export class AllowlistManager extends LitElement {
           type="search"
           placeholder=${`Search ${this.activeTab}s on YouTube`}
           .value=${this.searchQ}
-          @input=${(e: Event) => (this.searchQ = (e.target as HTMLInputElement).value)}
+          @input=${(e: Event) => this.onSearchInput((e.target as HTMLInputElement).value)}
           @keydown=${(e: KeyboardEvent) => {
-            if (e.key === "Enter") void this.runSearch();
+            if (e.key === "Enter") this.runSearchNow();
           }}
         />
         <wa-button
           variant="brand"
-          @click=${() => void this.runSearch()}
+          @click=${() => this.runSearchNow()}
           ?disabled=${this.searching}
           ?loading=${this.searching}
         >

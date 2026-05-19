@@ -237,6 +237,90 @@ describe("<hometube-allowlist-manager>", () => {
     expect(searchCalls.length).toBeGreaterThan(0);
   });
 
+  it("auto-searches after typing once the debounce elapses", async () => {
+    mockFetch({
+      "allowlist/channels": [],
+      "allowlist/playlists": [],
+      "allowlist/videos": [],
+      "parent/search": { items: [] },
+    });
+    const el = await mount(1);
+    const callsBefore = fetchSpy.mock.calls.length;
+
+    // Type without pressing Enter / clicking the button.
+    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+    input.value = "kittens";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    // Immediately afterwards the request has not yet been made.
+    let searchCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .filter((c: string[]) => c[0].includes("parent/search"));
+    expect(searchCalls.length).toBe(0);
+
+    // Wait past the 300 ms debounce window.
+    await new Promise((r) => setTimeout(r, 350));
+    await el.updateComplete;
+
+    searchCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .filter((c: string[]) => c[0].includes("parent/search"));
+    expect(searchCalls.length).toBe(1);
+    expect(searchCalls[0][0]).toContain("q=kittens");
+  });
+
+  it("collapses rapid keystrokes into a single debounced request", async () => {
+    mockFetch({
+      "allowlist/channels": [],
+      "allowlist/playlists": [],
+      "allowlist/videos": [],
+      "parent/search": { items: [] },
+    });
+    const el = await mount(1);
+    const callsBefore = fetchSpy.mock.calls.length;
+
+    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+    for (const value of ["k", "ki", "kit", "kitt", "kitte", "kitten", "kittens"]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      // Spread keystrokes well inside the 300 ms window.
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await new Promise((r) => setTimeout(r, 350));
+    await el.updateComplete;
+
+    const searchCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .filter((c: string[]) => c[0].includes("parent/search"));
+    expect(searchCalls.length).toBe(1);
+    expect(searchCalls[0][0]).toContain("q=kittens");
+  });
+
+  it("clearing the search box cancels any pending debounced request", async () => {
+    mockFetch({
+      "allowlist/channels": [],
+      "allowlist/playlists": [],
+      "allowlist/videos": [],
+      "parent/search": { items: [] },
+    });
+    const el = await mount(1);
+    const callsBefore = fetchSpy.mock.calls.length;
+
+    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+    input.value = "kittens";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // Clear immediately, before the debounce fires.
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await new Promise((r) => setTimeout(r, 350));
+
+    const searchCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .filter((c: string[]) => c[0].includes("parent/search"));
+    expect(searchCalls.length).toBe(0);
+  });
+
   it("does not search with empty query", async () => {
     mockFetch({
       "allowlist/channels": [],

@@ -204,9 +204,28 @@ pub struct AllowlistedVideo {
     pub created_at: i64,
 }
 
+/// Body for `POST /api/children/:id/allowlist/videos`.
+///
+/// `video_id` is required; the rest are caller-supplied metadata used
+/// **as a fallback** when the discovery sidecar fails to resolve the
+/// video. The parent-side allowlist UI already has these fields from
+/// the parent search response and passes them through so the row in
+/// `allowlisted_videos` always has a non-empty `video_title` (the
+/// column the child-side `/api/search` query matches on).
+///
+/// Sidecar data wins when present and non-empty — the sidecar tends
+/// to have canonical, normalised titles. Body data only fills in
+/// blanks (e.g. when youtubei.js returns `title: ""`, the video is
+/// age-gated, or the network is down).
 #[derive(Debug, Deserialize)]
 pub struct AddVideoBody {
     pub video_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub channel_title: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
 }
 
 /// `GET /api/children/:id/allowlist/videos`.
@@ -226,6 +245,13 @@ pub async fn list_videos(
 }
 
 /// `POST /api/children/:id/allowlist/videos`.
+///
+/// Resolves a title / channel / thumbnail for the video by combining
+/// (1) the discovery sidecar response and (2) caller-supplied metadata
+/// from the body. Both can be missing or partial, but **at least one**
+/// must yield a non-empty title — otherwise we'd write a row that the
+/// child-side `LIKE` search could never find, which is exactly the
+/// bug this endpoint used to ship.
 pub async fn add_video(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -234,12 +260,55 @@ pub async fn add_video(
 ) -> AppResult<Json<AllowlistedVideo>> {
     require_child_id(&state, child_id).await?;
     let video_id = parse_video_id(&body.video_id);
+
+    // Best-effort sidecar lookup. We deliberately don't propagate
+    // sidecar failures — if the caller provided usable metadata we'd
+    // rather write a searchable row than 500.
     let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_video(&video_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("video not found on YouTube".into()))?;
-    let thumb = preferred_thumbnail(&info.thumbnails);
+    let info = yt.get_video(&video_id).await.ok().flatten();
+
+    // Treat empty strings from the sidecar as "missing" — youtubei.js
+    // emits `title: ""` when it can't parse the basic info response.
+    let body_title = body
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let sidecar_title = info
+        .as_ref()
+        .map(|i| i.title.trim())
+        .filter(|s| !s.is_empty());
+    let Some(title) = sidecar_title.or(body_title) else {
+        return Err(AppError::BadRequest(
+            "video not found on YouTube and no title provided".into(),
+        ));
+    };
+    let title = title.to_string();
+
+    // Trim sidecar `channel_title` for consistency with how we treat
+    // the sidecar `title` above and the body-supplied `channel_title`
+    // below — a whitespace-only value is functionally identical to an
+    // empty one and should not be persisted.
+    let channel_title = info
+        .as_ref()
+        .and_then(|i| i.channel_title.as_ref().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            body.channel_title
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let thumb = info
+        .as_ref()
+        .and_then(|i| preferred_thumbnail(&i.thumbnails))
+        .or_else(|| {
+            body.thumbnail_url
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let canonical_id = info.as_ref().map(|i| i.id.clone()).unwrap_or(video_id);
 
     let row: AllowlistedVideo = sqlx::query_as(
         "INSERT INTO allowlisted_videos \
@@ -252,10 +321,10 @@ pub async fn add_video(
          RETURNING id, video_id, video_title, video_thumbnail_url, channel_title, created_at",
     )
     .bind(child_id)
-    .bind(&info.id)
-    .bind(&info.title)
+    .bind(&canonical_id)
+    .bind(&title)
     .bind(thumb)
-    .bind(info.channel_title.clone())
+    .bind(channel_title)
     .bind(current.id)
     .fetch_one(&state.db)
     .await?;
