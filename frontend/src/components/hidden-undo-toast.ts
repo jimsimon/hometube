@@ -130,6 +130,7 @@ export class HiddenUndoToast extends LitElement {
     this.videoId = videoId;
     this.hiddenTitle = title ?? null;
     this.busy = false;
+    this.error = "";
     this.clearTimer();
     this.timer = window.setTimeout(() => this.dismiss(), UNDO_TIMEOUT_MS);
   }
@@ -147,6 +148,7 @@ export class HiddenUndoToast extends LitElement {
     this.hiddenTitle = null;
     this.busy = false;
     this.needsReload = false;
+    this.error = "";
   }
 
   private async onUndo() {

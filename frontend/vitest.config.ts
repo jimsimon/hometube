@@ -31,6 +31,7 @@ export default defineConfig({
       include: [
         'src/services/**/*.ts',
         'src/components/video-card.ts',
+        'src/components/hidden-undo-toast.ts',
         'src/components/nav-bar.ts',
         'src/components/nav-parent.ts',
         'src/components/nav-child.ts',
