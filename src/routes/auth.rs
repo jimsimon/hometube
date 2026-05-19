@@ -16,11 +16,18 @@
 //! All session cookies are signed with the application's master
 //! [`tower_cookies::Key`] from [`crate::state::AppState`].
 
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, FromRequestParts, State},
+    http::request::Parts,
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
     Json,
@@ -173,8 +180,21 @@ pub async fn switch(
     State(state): State<AppState>,
     cookies: Cookies,
     current: Option<CurrentAccount>,
+    ClientIp(peer_ip): ClientIp,
     Json(body): Json<SwitchBody>,
 ) -> AppResult<Response> {
+    // Per-IP throttle: bound the CPU an attacker can burn against the
+    // switch endpoint. Each wrong PIN attempt for a child triggers
+    // Argon2 verification across every parent's hash, so we cap how
+    // many failures a single peer can produce in a short window
+    // *before* doing any of that work.
+    if let Some(ip) = peer_ip {
+        if switch_throttle().is_blocked(ip) {
+            warn!(%ip, "switch request throttled");
+            return Err(AppError::TooManyRequests);
+        }
+    }
+
     let target = account::find_by_id(&state.db, body.account_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -190,6 +210,9 @@ pub async fn switch(
             })?;
             if let Err(err) = verify_pin(stored, provided) {
                 warn!(account_id = target.id, "PIN attempt failed");
+                if let Some(ip) = peer_ip {
+                    switch_throttle().record_failure(ip);
+                }
                 // Track recent failures via parent_notifications metadata.
                 // We never fail the request because of this bookkeeping.
                 if let Err(e) = record_failed_pin(&state, target.id).await {
@@ -218,6 +241,9 @@ pub async fn switch(
                     account_id = target.id,
                     "PIN attempt failed (child switch, malformed)"
                 );
+                if let Some(ip) = peer_ip {
+                    switch_throttle().record_failure(ip);
+                }
                 if let Err(e) = record_failed_child_switch(&state).await {
                     warn!(error = %e, "could not record failed PIN attempt");
                 }
@@ -226,6 +252,9 @@ pub async fn switch(
             let matched = hashes.iter().any(|h| verify_pin(h, provided).is_ok());
             if !matched {
                 warn!(account_id = target.id, "PIN attempt failed (child switch)");
+                if let Some(ip) = peer_ip {
+                    switch_throttle().record_failure(ip);
+                }
                 if let Err(e) = record_failed_child_switch(&state).await {
                     warn!(error = %e, "could not record failed PIN attempt");
                 }
@@ -389,4 +418,100 @@ fn verify_pin(hash: &str, pin: &str) -> AppResult<()> {
     Argon2::default()
         .verify_password(pin.as_bytes(), &parsed)
         .map_err(|_| AppError::Forbidden)
+}
+
+// ---------------------------------------------------------------------------
+// Per-IP switch failure throttle
+// ---------------------------------------------------------------------------
+
+/// Optional client-IP extractor. Pulls `ConnectInfo<SocketAddr>` out of
+/// the request extensions if it was attached by the server (it is, via
+/// `into_make_service_with_connect_info` in `main.rs`). In test
+/// harnesses that don't populate it, the extractor still succeeds and
+/// yields `None`, so handlers don't have to choose between requiring
+/// `ConnectInfo` and being testable.
+pub struct ClientIp(pub Option<IpAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        Ok(Self(ip))
+    }
+}
+
+/// Max failed switch attempts a single peer may make inside
+/// [`THROTTLE_WINDOW`] before being blocked for the rest of the window.
+const THROTTLE_MAX_FAILURES: usize = 5;
+/// Sliding window for the failure throttle.
+const THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+
+struct SwitchThrottle {
+    failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+}
+
+impl SwitchThrottle {
+    fn new() -> Self {
+        Self {
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// True when `ip` has tripped the failure threshold within the
+    /// active window. Stale entries are pruned on every check.
+    fn is_blocked(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(times) = map.get_mut(&ip) {
+            times.retain(|t| now.duration_since(*t) < THROTTLE_WINDOW);
+            if times.is_empty() {
+                map.remove(&ip);
+                return false;
+            }
+            return times.len() >= THROTTLE_MAX_FAILURES;
+        }
+        false
+    }
+
+    fn record_failure(&self, ip: IpAddr) {
+        let now = Instant::now();
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        let times = map.entry(ip).or_default();
+        times.retain(|t| now.duration_since(*t) < THROTTLE_WINDOW);
+        times.push(now);
+    }
+}
+
+fn switch_throttle() -> &'static SwitchThrottle {
+    static THROTTLE: OnceLock<SwitchThrottle> = OnceLock::new();
+    THROTTLE.get_or_init(SwitchThrottle::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn throttle_blocks_after_threshold() {
+        let throttle = SwitchThrottle::new();
+        let ip1 = ip("192.0.2.1");
+        let ip2 = ip("192.0.2.2");
+
+        for _ in 0..THROTTLE_MAX_FAILURES - 1 {
+            throttle.record_failure(ip1);
+            assert!(!throttle.is_blocked(ip1));
+        }
+        throttle.record_failure(ip1);
+        assert!(throttle.is_blocked(ip1));
+        // Other IPs are unaffected.
+        assert!(!throttle.is_blocked(ip2));
+    }
 }
