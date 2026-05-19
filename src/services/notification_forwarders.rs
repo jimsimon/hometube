@@ -193,10 +193,8 @@ pub fn merge_secrets(
                 ForwarderConfig::Gotify {
                     app_token: old_t, ..
                 },
-            ) => {
-                if new_t == SECRET_PLACEHOLDER {
-                    *new_t = old_t.clone();
-                }
+            ) if new_t == SECRET_PLACEHOLDER => {
+                *new_t = old_t.clone();
             }
             (
                 ForwarderConfig::Apprise {
@@ -272,12 +270,26 @@ pub fn validate(settings: &ForwardingSettings) -> AppResult<()> {
                 ..
             } => {
                 check_url(base_url)?;
-                let has_key = config_key.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-                let has_urls = urls.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                let has_key = config_key
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_urls = urls
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
                 if !has_key && !has_urls {
                     return Err(AppError::BadRequest(
                         "apprise requires either config_key or urls".into(),
                     ));
+                }
+                if let Some(k) = config_key.as_deref() {
+                    if !k.is_empty() && !is_safe_apprise_key(k) {
+                        return Err(AppError::BadRequest(
+                            "apprise config_key may only contain letters, digits, '-' and '_'"
+                                .into(),
+                        ));
+                    }
                 }
             }
         }
@@ -290,6 +302,16 @@ pub fn validate(settings: &ForwardingSettings) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+/// Restrict Apprise stateful config keys to safe URL path characters,
+/// since the key is interpolated into `/notify/{key}`. Apprise itself
+/// allows letters, digits, `-`, and `_` in keys, so this is the right
+/// alphabet and also forecloses path traversal.
+fn is_safe_apprise_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn check_url(url: &str) -> AppResult<()> {
@@ -362,6 +384,13 @@ pub async fn forward_if_enabled(
 /// Perform the actual HTTP push for a single notification. Public so
 /// the `/api/notifications/config/test` endpoint can call it
 /// synchronously and return a real error string to the UI.
+/// One notification payload as seen by the provider-specific senders.
+struct Message<'a> {
+    title: &'a str,
+    body: &'a str,
+    kind: &'a str,
+}
+
 pub async fn send(
     client: &Client,
     provider: &ForwarderConfig,
@@ -369,39 +398,15 @@ pub async fn send(
     message: &str,
     kind: &str,
 ) -> Result<(), String> {
+    let msg = Message {
+        title,
+        body: message,
+        kind,
+    };
     match provider {
-        ForwarderConfig::Ntfy {
-            base_url,
-            topic,
-            token,
-            priority,
-        } => send_ntfy(client, base_url, topic, token.as_deref(), *priority, title, message, kind)
-            .await,
-        ForwarderConfig::Gotify {
-            base_url,
-            app_token,
-            priority,
-        } => send_gotify(client, base_url, app_token, *priority, title, message, kind).await,
-        ForwarderConfig::Apprise {
-            base_url,
-            config_key,
-            urls,
-            basic_auth_user,
-            basic_auth_password,
-        } => {
-            send_apprise(
-                client,
-                base_url,
-                config_key.as_deref(),
-                urls.as_deref(),
-                basic_auth_user.as_deref(),
-                basic_auth_password.as_deref(),
-                title,
-                message,
-                kind,
-            )
-            .await
-        }
+        ForwarderConfig::Ntfy { .. } => send_ntfy(client, provider, &msg).await,
+        ForwarderConfig::Gotify { .. } => send_gotify(client, provider, &msg).await,
+        ForwarderConfig::Apprise { .. } => send_apprise(client, provider, &msg).await,
     }
 }
 
@@ -431,26 +436,33 @@ fn gotify_priority_for(kind: &str, default: Option<u8>) -> u8 {
 
 async fn send_ntfy(
     client: &Client,
-    base_url: &str,
-    topic: &str,
-    token: Option<&str>,
-    priority: Option<u8>,
-    title: &str,
-    message: &str,
-    kind: &str,
+    provider: &ForwarderConfig,
+    msg: &Message<'_>,
 ) -> Result<(), String> {
+    let ForwarderConfig::Ntfy {
+        base_url,
+        topic,
+        token,
+        priority,
+    } = provider
+    else {
+        unreachable!("send_ntfy called with non-Ntfy provider")
+    };
     let url = format!("{}/{}", base_url.trim_end_matches('/'), topic);
     // HTTP/1.1 header values are restricted to visible ASCII (+ space
     // and horizontal tab). ntfy itself accepts RFC 2047 encoded-words
     // for the `Title` header, so wrap non-ASCII titles in
     // `=?UTF-8?B?<base64>?=`.
-    let encoded_title = encode_header_value(title);
+    let encoded_title = encode_header_value(msg.title);
     let mut req = client
         .post(&url)
         .header("Title", encoded_title)
-        .header("Priority", ntfy_priority_for(kind, priority).to_string())
-        .header("Tags", kind)
-        .body(message.to_string());
+        .header(
+            "Priority",
+            ntfy_priority_for(msg.kind, *priority).to_string(),
+        )
+        .header("Tags", msg.kind)
+        .body(msg.body.to_string());
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -460,22 +472,29 @@ async fn send_ntfy(
 
 async fn send_gotify(
     client: &Client,
-    base_url: &str,
-    app_token: &str,
-    priority: Option<u8>,
-    title: &str,
-    message: &str,
-    kind: &str,
+    provider: &ForwarderConfig,
+    msg: &Message<'_>,
 ) -> Result<(), String> {
+    let ForwarderConfig::Gotify {
+        base_url,
+        app_token,
+        priority,
+    } = provider
+    else {
+        unreachable!("send_gotify called with non-Gotify provider")
+    };
     let url = format!("{}/message", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
-        "title": title,
-        "message": message,
-        "priority": gotify_priority_for(kind, priority),
+        "title": msg.title,
+        "message": msg.body,
+        "priority": gotify_priority_for(msg.kind, *priority),
     });
+    // Send the app token in the `X-Gotify-Key` header rather than as a
+    // query parameter, so it doesn't end up in reverse-proxy access
+    // logs or browser URL history.
     let resp = client
         .post(&url)
-        .query(&[("token", app_token)])
+        .header("X-Gotify-Key", app_token)
         .json(&body)
         .send()
         .await
@@ -485,39 +504,43 @@ async fn send_gotify(
 
 async fn send_apprise(
     client: &Client,
-    base_url: &str,
-    config_key: Option<&str>,
-    urls: Option<&str>,
-    basic_auth_user: Option<&str>,
-    basic_auth_password: Option<&str>,
-    title: &str,
-    message: &str,
-    kind: &str,
+    provider: &ForwarderConfig,
+    msg: &Message<'_>,
 ) -> Result<(), String> {
-    let path = match config_key {
+    let ForwarderConfig::Apprise {
+        base_url,
+        config_key,
+        urls,
+        basic_auth_user,
+        basic_auth_password,
+    } = provider
+    else {
+        unreachable!("send_apprise called with non-Apprise provider")
+    };
+    let path = match config_key.as_deref() {
         Some(k) if !k.is_empty() => format!("/notify/{}", k),
         _ => "/notify".to_string(),
     };
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let apprise_type = match kind {
+    let apprise_type = match msg.kind {
         "ytdlp_failure" | "sync_error" | "token_expired" | "time_limit_reached" => "failure",
         "time_limit_approaching" => "warning",
         "system_update" => "info",
         _ => "info",
     };
     let mut body = serde_json::json!({
-        "title": title,
-        "body": message,
+        "title": msg.title,
+        "body": msg.body,
         "type": apprise_type,
-        "tag": kind,
+        "tag": msg.kind,
     });
-    if let Some(u) = urls {
+    if let Some(u) = urls.as_deref() {
         if !u.trim().is_empty() {
             body["urls"] = serde_json::Value::String(u.to_string());
         }
     }
     let mut req = client.post(&url).json(&body);
-    if let (Some(u), Some(p)) = (basic_auth_user, basic_auth_password) {
+    if let (Some(u), Some(p)) = (basic_auth_user.as_deref(), basic_auth_password.as_deref()) {
         req = req.basic_auth(u, Some(p));
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
@@ -661,6 +684,42 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_apprise_key() {
+        for bad in ["../etc", "a/b", "a b", "a.b", ""] {
+            let s = ForwardingSettings {
+                enabled: true,
+                provider: Some(ForwarderConfig::Apprise {
+                    base_url: "https://apprise.example".into(),
+                    config_key: Some(bad.into()),
+                    urls: None,
+                    basic_auth_user: None,
+                    basic_auth_password: None,
+                }),
+                enabled_types: vec![],
+            };
+            // Empty key is rejected because neither key nor urls is set;
+            // the others are rejected by the safety check.
+            assert!(validate(&s).is_err(), "expected error for key {bad:?}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_safe_apprise_key() {
+        let s = ForwardingSettings {
+            enabled: true,
+            provider: Some(ForwarderConfig::Apprise {
+                base_url: "https://apprise.example".into(),
+                config_key: Some("family_kids-1".into()),
+                urls: None,
+                basic_auth_user: None,
+                basic_auth_password: None,
+            }),
+            enabled_types: vec![],
+        };
+        assert!(validate(&s).is_ok());
     }
 
     #[test]

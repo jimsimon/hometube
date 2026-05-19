@@ -68,6 +68,14 @@ async fn insert_one(
 ///
 /// `metadata` is serialised to JSON; pass `&serde_json::Value::Null` (or
 /// any small struct) when you have nothing structured to attach.
+///
+/// **External delivery**: after the in-app row is persisted this also
+/// triggers a single fire-and-forget push via
+/// [`crate::services::notification_forwarders::forward_if_enabled`] (if
+/// a self-hosted forwarder is configured). Callers that fan out via
+/// [`broadcast`] / [`broadcast_once_within`] must **not** loop over
+/// `dispatch` — use [`insert_one`] directly to avoid N external pushes
+/// for one logical notification.
 pub async fn dispatch<T: Serialize>(
     pool: &SqlitePool,
     parent_id: i64,
@@ -77,7 +85,15 @@ pub async fn dispatch<T: Serialize>(
     metadata: &T,
 ) -> AppResult<()> {
     let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
-    insert_one(pool, parent_id, notification_type, title, message, &metadata_json).await?;
+    insert_one(
+        pool,
+        parent_id,
+        notification_type,
+        title,
+        message,
+        &metadata_json,
+    )
+    .await?;
     crate::services::notification_forwarders::forward_if_enabled(
         pool,
         notification_type,
@@ -102,7 +118,15 @@ pub async fn broadcast<T: Serialize>(
             .fetch_all(pool)
             .await?;
     for (parent_id,) in parents {
-        insert_one(pool, parent_id, notification_type, title, message, &metadata_json).await?;
+        insert_one(
+            pool,
+            parent_id,
+            notification_type,
+            title,
+            message,
+            &metadata_json,
+        )
+        .await?;
     }
     crate::services::notification_forwarders::forward_if_enabled(
         pool,
@@ -160,7 +184,15 @@ pub async fn broadcast_once_within<T: Serialize>(
         if exists > 0 {
             continue;
         }
-        insert_one(pool, parent_id, notification_type, title, message, &metadata_json).await?;
+        insert_one(
+            pool,
+            parent_id,
+            notification_type,
+            title,
+            message,
+            &metadata_json,
+        )
+        .await?;
         inserted_any = true;
     }
     if inserted_any {

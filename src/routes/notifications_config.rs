@@ -16,9 +16,7 @@ use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::services::notification_forwarders::{
-    self, ForwardingSettings, KNOWN_TYPES,
-};
+use crate::services::notification_forwarders::{self, ForwardingSettings, KNOWN_TYPES};
 use crate::state::AppState;
 
 /// `GET /api/notifications/config`.
@@ -80,6 +78,11 @@ pub async fn test(
         .as_deref()
         .unwrap_or("system_update")
         .to_string();
+    if !KNOWN_TYPES.contains(&kind.as_str()) {
+        return Err(AppError::BadRequest(format!(
+            "unknown notification type: {kind}"
+        )));
+    }
     let result = notification_forwarders::send(
         notification_forwarders::shared_client(),
         &provider,
