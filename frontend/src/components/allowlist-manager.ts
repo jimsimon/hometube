@@ -227,16 +227,6 @@ export class AllowlistManager extends LitElement {
     this.scheduleSearch();
   }
 
-  /**
-   * Fire the search immediately, bypassing the debounce. Used by the
-   * Enter key and the Search button so power users don't pay the
-   * debounce delay.
-   */
-  private runSearchNow(): void {
-    this.scheduleSearch.cancel();
-    void this.runSearch();
-  }
-
   private async runSearch(): Promise<void> {
     const q = this.searchQ.trim();
     if (!q) return;
@@ -354,19 +344,9 @@ export class AllowlistManager extends LitElement {
           type="search"
           placeholder=${`Search ${this.activeTab}s on YouTube`}
           .value=${this.searchQ}
+          aria-busy=${this.searching ? "true" : "false"}
           @input=${(e: Event) => this.onSearchInput((e.target as HTMLInputElement).value)}
-          @keydown=${(e: KeyboardEvent) => {
-            if (e.key === "Enter") this.runSearchNow();
-          }}
         />
-        <wa-button
-          variant="brand"
-          @click=${() => this.runSearchNow()}
-          ?disabled=${this.searching}
-          ?loading=${this.searching}
-        >
-          Search
-        </wa-button>
       </div>
 
       ${this.error

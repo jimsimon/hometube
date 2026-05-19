@@ -92,7 +92,7 @@ describe("<hometube-allowlist-manager>", () => {
     expect(selected!.textContent!.trim()).toBe("Channels");
   });
 
-  it("renders a search input and button", async () => {
+  it("renders a search input without a submit button", async () => {
     mockFetch({
       "allowlist/channels": [],
       "allowlist/playlists": [],
@@ -103,8 +103,12 @@ describe("<hometube-allowlist-manager>", () => {
     expect(input).not.toBeNull();
     expect(input.placeholder).toContain("Search channels");
 
-    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
-    expect(searchBtn).not.toBeNull();
+    // The dedicated Search button was removed once typing auto-fires
+    // a debounced search; the input's parent row should contain only
+    // the input element.
+    const row = input.parentElement!;
+    expect(row.querySelector("wa-button")).toBeNull();
+    expect(row.querySelector("button")).toBeNull();
   });
 
   it("fetches allowlist data on mount with child-id", async () => {
@@ -175,7 +179,7 @@ describe("<hometube-allowlist-manager>", () => {
     expect(empty!.textContent).toContain("No channels yet");
   });
 
-  it("performs search and displays results", async () => {
+  it("performs search and displays results after debounce", async () => {
     mockFetch({
       "allowlist/channels": [],
       "allowlist/playlists": [],
@@ -193,46 +197,27 @@ describe("<hometube-allowlist-manager>", () => {
         ],
       },
     });
-    const el = await mount(1);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(1);
 
-    // Type in search
-    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
-    input.value = "test query";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await el.updateComplete;
+      // Type in search — the debounced auto-search is the only entry
+      // point now that the Search button has been removed.
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "test query";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // Click search button (the wa-button with variant="brand")
-    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
-    expect(searchBtn).not.toBeNull();
-    (searchBtn as HTMLElement).click();
-    await flushAsync(el);
+      // Advance past the debounce window so the request fires.
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
 
-    // Should show search results
-    const headings = el.shadowRoot!.querySelectorAll("h3");
-    const addHeading = Array.from(headings).find((h) => h.textContent!.includes("Add a result"));
-    expect(addHeading).not.toBeNull();
-  });
-
-  it("handles search via Enter key", async () => {
-    mockFetch({
-      "allowlist/channels": [],
-      "allowlist/playlists": [],
-      "allowlist/videos": [],
-      "parent/search": { items: [] },
-    });
-    const el = await mount(1);
-
-    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
-    input.value = "query";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await el.updateComplete;
-
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    await flushAsync(el);
-
-    // Verify fetch was called for search
-    const searchCalls = fetchSpy.mock.calls.filter((c: string[]) => c[0].includes("parent/search"));
-    expect(searchCalls.length).toBeGreaterThan(0);
+      // Should show search results
+      const headings = el.shadowRoot!.querySelectorAll("h3");
+      const addHeading = Array.from(headings).find((h) => h.textContent!.includes("Add a result"));
+      expect(addHeading).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("auto-searches after typing once the debounce elapses", async () => {
@@ -347,12 +332,19 @@ describe("<hometube-allowlist-manager>", () => {
 
     const callsBefore = fetchSpy.mock.calls.length;
 
-    // Try to search with empty query
-    const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
-    (searchBtn as HTMLElement).click();
-    await flushAsync(el);
+    // Fire an input event with an empty value. The debounce path
+    // should bail out without scheduling a request.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
+    } finally {
+      vi.useRealTimers();
+    }
 
-    // No additional search call should have been made
     const searchCalls = fetchSpy.mock.calls
       .slice(callsBefore)
       .filter((c: string[]) => c[0].includes("parent/search"));

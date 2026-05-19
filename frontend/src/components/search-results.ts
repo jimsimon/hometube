@@ -53,6 +53,14 @@ export class SearchResults extends LitElement {
   @state() private error = "";
   @state() private nextPageToken: string | null = null;
 
+  /**
+   * Monotonic token used to discard stale `/api/search` responses
+   * when the user clears the query or starts a new search before the
+   * previous one resolves. Without it, a late reply could overwrite
+   * fresh empty state with stale matches.
+   */
+  private searchToken = 0;
+
   static styles = css`
     :host {
       display: block;
@@ -135,19 +143,35 @@ export class SearchResults extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    if (this.q) void this.runSearch(false);
-  }
+  // Initial fetch is driven by `updated()` (which Lit fires after the
+  // first render with all initial property values in `changed`). We
+  // intentionally do **not** kick off a request from
+  // `connectedCallback` — doing both would issue two `/api/search`
+  // requests on mount.
 
   override updated(changed: Map<string, unknown>): void {
-    if ((changed.has("q") || changed.has("type")) && this.q) {
-      void this.runSearch(false);
+    if (changed.has("q") || changed.has("type")) {
+      if (this.q) {
+        void this.runSearch(false);
+      } else {
+        // Query cleared — drop any stale results so the UI doesn't
+        // keep showing matches for the previous query. Bump the
+        // token so any in-flight `runSearch` discards its response,
+        // and reset `loading` immediately for visual consistency.
+        this.searchToken++;
+        this.channels = [];
+        this.playlists = [];
+        this.videos = [];
+        this.nextPageToken = null;
+        this.error = "";
+        this.loading = false;
+      }
     }
   }
 
   private async runSearch(append: boolean): Promise<void> {
     if (!this.q) return;
+    const token = ++this.searchToken;
     this.loading = true;
     this.error = "";
     if (!append) {
@@ -164,6 +188,8 @@ export class SearchResults extends LitElement {
         params.set("page_token", this.nextPageToken);
       }
       const res = await api.get<ChildSearchResponse>(`/api/search?${params.toString()}`);
+      // Discard if a newer search (or a clear) superseded us.
+      if (token !== this.searchToken) return;
       if (append) {
         this.channels = [...this.channels, ...res.results.channels];
         this.playlists = [...this.playlists, ...res.results.playlists];
@@ -175,15 +201,58 @@ export class SearchResults extends LitElement {
       }
       this.nextPageToken = res.next_page_token;
     } catch (err) {
+      if (token !== this.searchToken) return;
       this.error =
         err instanceof ApiError ? `Search failed (HTTP ${err.status}).` : (err as Error).message;
     } finally {
-      this.loading = false;
+      if (token === this.searchToken) {
+        this.loading = false;
+      }
     }
   }
 
   private onLoadMore = (): void => {
     void this.runSearch(true);
+  };
+
+  /**
+   * React to debounced query / filter changes from the embedded
+   * `<hometube-search-bar>`. We update component state (which triggers
+   * `runSearch` via `updated()`) and reflect the new query in the URL
+   * so refresh / share links stay accurate, without a full navigation.
+   */
+  private onSearchChange = (event: Event): void => {
+    const detail = (event as CustomEvent<{ q: string; kind: string }>).detail;
+    if (!detail) return;
+    // Claim the event so `<hometube-search-bar>` skips its full-page
+    // navigation fallback on Enter — we're handling it in place.
+    event.preventDefault();
+    // Validate the kind against the known union — otherwise a stray
+    // string would flow straight into the `/api/search?type=...` URL.
+    const allowedKinds: ReadonlyArray<typeof this.type> = ["all", "channel", "playlist", "video"];
+    const nextType: typeof this.type = allowedKinds.includes(detail.kind as typeof this.type)
+      ? (detail.kind as typeof this.type)
+      : "all";
+    // Cap the query length defensively. The server enforces its own
+    // limit, but truncating here keeps the URL we hand to
+    // `history.replaceState` (and the GET request) from growing
+    // unbounded if a paste smuggles in a giant string.
+    const MAX_Q_LEN = 200;
+    const rawQ = detail.q ?? "";
+    const nextQ = rawQ.length > MAX_Q_LEN ? rawQ.slice(0, MAX_Q_LEN) : rawQ;
+    if (nextQ === this.q && nextType === this.type) return;
+    this.q = nextQ;
+    this.type = nextType;
+    try {
+      const url = new URL(window.location.href);
+      if (this.q) url.searchParams.set("q", this.q);
+      else url.searchParams.delete("q");
+      url.searchParams.set("type", this.type);
+      window.history.replaceState(null, "", url.toString());
+    } catch {
+      // history API failures are non-fatal — the in-page state already
+      // reflects the new query.
+    }
   };
 
   override render() {
@@ -193,7 +262,11 @@ export class SearchResults extends LitElement {
 
     return html`
       <div class="bar">
-        <hometube-search-bar initial-q=${this.q} initial-type=${this.type}></hometube-search-bar>
+        <hometube-search-bar
+          initial-q=${this.q}
+          initial-type=${this.type}
+          @search-change=${this.onSearchChange}
+        ></hometube-search-bar>
       </div>
 
       <div class="live" role="status" aria-live="polite">

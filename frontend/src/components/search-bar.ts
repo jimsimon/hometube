@@ -2,11 +2,15 @@
  * <hometube-search-bar>
  *
  * Compact search input + type filter intended for use inside the child
- * top navigation. Pressing Enter (or clicking the submit button)
- * navigates to `/child/search?q=...&type=...`. While the user is
- * typing, a debounced suggestions request is sent to
- * `/api/search?q=...&type=all&limit=5`; the top results render in a
- * dropdown and clicking one navigates straight to the matched item.
+ * top navigation. While the user is typing, a debounced suggestions
+ * request is sent to `/api/search?q=...&type=all&limit=5`; the top
+ * results render in a dropdown and clicking one navigates straight to
+ * the matched item. The same debounced tick also dispatches a
+ * cancelable `search-change` CustomEvent so embedders (notably
+ * `<hometube-search-results>`) can update in place without a reload.
+ * Pressing Enter dispatches `search-change` first; if no listener
+ * calls `preventDefault()` it falls back to navigating to
+ * `/child/search?q=...&type=...` (the top-nav case).
  *
  * The component is intentionally framework-agnostic — it doesn't
  * depend on a specific dropdown library so it can be embedded anywhere.
@@ -85,8 +89,15 @@ export class SearchBar extends LitElement {
   private lastFetchToken = 0;
   private mql: MediaQueryList | null = null;
 
+  // The same debounced tick drives both the suggestion fetch and the
+  // `search-change` event. They serve different consumers (the
+  // dropdown vs. an embedded results view) and hit different
+  // endpoints, so they're dispatched together on purpose — neither
+  // should block the other. `fetchSuggestions()` is fire-and-forget
+  // and `emitChange()` is synchronous, so ordering is irrelevant.
   private readonly scheduleFetch = debounce(() => {
     void this.fetchSuggestions();
+    this.emitChange();
   }, DEBOUNCE_MS);
 
   static styles = css`
@@ -127,15 +138,6 @@ export class SearchBar extends LitElement {
       background: var(--wa-color-surface-default);
       color: var(--wa-color-text-normal);
       font: inherit;
-    }
-    button {
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      background: var(--wa-color-brand-fill, #2563eb);
-      color: white;
-      font: inherit;
-      cursor: pointer;
     }
     .suggestions {
       position: absolute;
@@ -254,10 +256,32 @@ export class SearchBar extends LitElement {
       this.scheduleFetch.cancel();
       this.suggestions = [];
       this.suggestionsOpen = false;
+      this.emitChange();
       return;
     }
     this.scheduleFetch();
   };
+
+  /**
+   * Dispatch a `search-change` event so embedders (notably the
+   * `<hometube-search-results>` page) can react to the debounced query
+   * without requiring a form submit. The top-nav embedder simply
+   * ignores it.
+   */
+  private emitChange(): boolean {
+    // Scoped event: the only consumer listens directly on this
+    // element, so there's no need to bubble or cross shadow boundaries.
+    // `cancelable: true` lets an embedder (e.g. `<hometube-search-results>`)
+    // claim the event with `preventDefault()` so that `onSubmit` can
+    // skip its full-page navigation fallback. The return value is
+    // `false` when the default was prevented.
+    return this.dispatchEvent(
+      new CustomEvent("search-change", {
+        cancelable: true,
+        detail: { q: this.query.trim(), kind: this.kind },
+      }),
+    );
+  }
 
   private async fetchSuggestions(): Promise<void> {
     const token = ++this.lastFetchToken;
@@ -322,6 +346,12 @@ export class SearchBar extends LitElement {
       window.location.href = this.suggestions[this.highlighted].href;
       return;
     }
+    // Fire the in-page event first; if an embedder handles it (calls
+    // `preventDefault()`) we skip the full-page navigation so Enter
+    // behaves consistently with the debounced auto-search.
+    this.scheduleFetch.cancel();
+    const notHandled = this.emitChange();
+    if (!notHandled) return;
     const url = `/child/search?q=${encodeURIComponent(trimmed)}&type=${encodeURIComponent(
       this.kind,
     )}`;
@@ -427,6 +457,10 @@ export class SearchBar extends LitElement {
           aria-label="Search filter"
           @change=${(e: Event) => {
             this.kind = (e.target as HTMLSelectElement).value as SearchKind;
+            // Re-emit immediately so the embedded results view
+            // re-fetches with the new filter without a debounce wait.
+            this.scheduleFetch.cancel();
+            this.emitChange();
           }}
         >
           <option value="all">All</option>
@@ -434,7 +468,6 @@ export class SearchBar extends LitElement {
           <option value="playlist">Playlists</option>
           <option value="video">Videos</option>
         </select>
-        <button type="submit">Search</button>
       </form>
     `;
 
