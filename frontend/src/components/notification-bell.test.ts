@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./notification-bell.js";
 import type { NotificationBell } from "./notification-bell.js";
+import { flushAsync } from "../test-utils.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -50,8 +51,7 @@ async function mount(): Promise<NotificationBell> {
   document.body.appendChild(el);
   await el.updateComplete;
   // Wait for initial fetch to resolve
-  await new Promise((r) => setTimeout(r, 10));
-  await el.updateComplete;
+  await flushAsync(el);
   return el;
 }
 
@@ -106,8 +106,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     expect(btn.getAttribute("aria-expanded")).toBe("true");
     const panel = el.shadowRoot!.querySelector(".panel");
@@ -127,8 +126,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const empty = el.shadowRoot!.querySelector(".empty");
     expect(empty).not.toBeNull();
@@ -151,8 +149,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
     expect(el.shadowRoot!.querySelector(".panel")).not.toBeNull();
 
     btn.dispatchEvent(new Event("click", { bubbles: true }));
@@ -179,8 +176,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const markReadBtn = el.shadowRoot!.querySelector(".actions button");
     expect(markReadBtn).not.toBeNull();
@@ -206,8 +202,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const dismissBtn = el.shadowRoot!.querySelector('button[aria-label="Dismiss notification"]');
     expect(dismissBtn).not.toBeNull();
@@ -232,8 +227,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const footer = el.shadowRoot!.querySelector(".footer button");
     expect(footer).not.toBeNull();
@@ -260,14 +254,12 @@ describe("<hometube-notification-bell>", () => {
     // Open panel
     const bellBtn = el.shadowRoot!.querySelector("button.bell")!;
     bellBtn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     // Click "Mark read"
     const markBtn = el.shadowRoot!.querySelector(".actions button")!;
     (markBtn as HTMLElement).click();
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     // Should have called the PUT endpoint
     const putCalls = fetchSpy.mock.calls.filter((c: string[]) =>
@@ -295,15 +287,13 @@ describe("<hometube-notification-bell>", () => {
 
     const bellBtn = el.shadowRoot!.querySelector("button.bell")!;
     bellBtn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const dismissBtn = el.shadowRoot!.querySelector(
       'button[aria-label="Dismiss notification"]',
     )! as HTMLElement;
     dismissBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const deleteCalls = fetchSpy.mock.calls.filter(
       (c: unknown[]) =>
@@ -332,13 +322,11 @@ describe("<hometube-notification-bell>", () => {
 
     const bellBtn = el.shadowRoot!.querySelector("button.bell")!;
     bellBtn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const markAllBtn = el.shadowRoot!.querySelector(".footer button")! as HTMLElement;
     markAllBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const putCalls = fetchSpy.mock.calls.filter((c: string[]) =>
       c[0].includes("/notifications/read-all"),
@@ -355,8 +343,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
     expect(el.shadowRoot!.querySelector(".panel")).not.toBeNull();
 
     // Click on body (outside the component)
@@ -384,8 +371,7 @@ describe("<hometube-notification-bell>", () => {
 
     const btn = el.shadowRoot!.querySelector("button.bell")!;
     btn.dispatchEvent(new Event("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const timestamp = el.shadowRoot!.querySelector(".timestamp");
     expect(timestamp).not.toBeNull();

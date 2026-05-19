@@ -7,9 +7,11 @@
  */
 
 import { LitElement, html, css, nothing } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 
 import { api } from "../services/api.js";
+
+import "./change-pin-dialog.js";
 
 @customElement("hometube-user-menu")
 export class UserMenu extends LitElement {
@@ -24,6 +26,17 @@ export class UserMenu extends LitElement {
   /** Hide the "Log out" button. */
   @property({ type: Boolean, attribute: "hide-logout" })
   hideLogout = false;
+
+  /**
+   * Show the "Change PIN" item. Only meaningful for parent accounts;
+   * the API behind it (`PUT /api/auth/pin`) always targets the
+   * currently signed-in account, so a parent can only ever change
+   * their own PIN.
+   */
+  @property({ type: Boolean, attribute: "show-change-pin" })
+  showChangePin = false;
+
+  @state() private changePinOpen = false;
 
   static styles = css`
     :host {
@@ -96,12 +109,30 @@ export class UserMenu extends LitElement {
               Switch profile
             </wa-dropdown-item>`
           : nothing}
+        ${this.showChangePin
+          ? html`<wa-dropdown-item
+              value="change-pin"
+              @click=${() => {
+                this.changePinOpen = true;
+              }}
+            >
+              Change PIN
+            </wa-dropdown-item>`
+          : nothing}
         ${!this.hideLogout
           ? html`<wa-dropdown-item value="logout" @click=${this.onLogout}>
               Log out
             </wa-dropdown-item>`
           : nothing}
       </wa-dropdown>
+      ${this.showChangePin
+        ? html`<hometube-change-pin-dialog
+            ?open=${this.changePinOpen}
+            @change-pin-closed=${() => {
+              this.changePinOpen = false;
+            }}
+          ></hometube-change-pin-dialog>`
+        : nothing}
     `;
   }
 }

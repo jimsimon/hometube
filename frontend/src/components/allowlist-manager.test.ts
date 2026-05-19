@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./allowlist-manager.js";
 import type { AllowlistManager } from "./allowlist-manager.js";
+import { flushAsync } from "../test-utils.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -53,8 +54,7 @@ async function mount(childId?: number): Promise<AllowlistManager> {
   document.body.appendChild(el);
   await el.updateComplete;
   // Wait for initial data fetch
-  await new Promise((r) => setTimeout(r, 20));
-  await el.updateComplete;
+  await flushAsync(el);
   return el;
 }
 
@@ -205,8 +205,7 @@ describe("<hometube-allowlist-manager>", () => {
     const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
     expect(searchBtn).not.toBeNull();
     (searchBtn as HTMLElement).click();
-    await new Promise((r) => setTimeout(r, 20));
-    await el.updateComplete;
+    await flushAsync(el);
 
     // Should show search results
     const headings = el.shadowRoot!.querySelectorAll("h3");
@@ -229,8 +228,7 @@ describe("<hometube-allowlist-manager>", () => {
     await el.updateComplete;
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    await new Promise((r) => setTimeout(r, 20));
-    await el.updateComplete;
+    await flushAsync(el);
 
     // Verify fetch was called for search
     const searchCalls = fetchSpy.mock.calls.filter((c: string[]) => c[0].includes("parent/search"));
@@ -244,29 +242,36 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
-    const el = await mount(1);
-    const callsBefore = fetchSpy.mock.calls.length;
+    // Install fake timers before mount so any deferred work scheduled
+    // during connectedCallback is also controllable.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(1);
+      const callsBefore = fetchSpy.mock.calls.length;
 
-    // Type without pressing Enter / clicking the button.
-    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
-    input.value = "kittens";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+      // Type without pressing Enter / clicking the button.
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "kittens";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // Immediately afterwards the request has not yet been made.
-    let searchCalls = fetchSpy.mock.calls
-      .slice(callsBefore)
-      .filter((c: string[]) => c[0].includes("parent/search"));
-    expect(searchCalls.length).toBe(0);
+      // Immediately afterwards the request has not yet been made.
+      let searchCalls = fetchSpy.mock.calls
+        .slice(callsBefore)
+        .filter((c: string[]) => c[0].includes("parent/search"));
+      expect(searchCalls.length).toBe(0);
 
-    // Wait past the 300 ms debounce window.
-    await new Promise((r) => setTimeout(r, 350));
-    await el.updateComplete;
+      // Advance past the 300 ms debounce window deterministically.
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
 
-    searchCalls = fetchSpy.mock.calls
-      .slice(callsBefore)
-      .filter((c: string[]) => c[0].includes("parent/search"));
-    expect(searchCalls.length).toBe(1);
-    expect(searchCalls[0][0]).toContain("q=kittens");
+      searchCalls = fetchSpy.mock.calls
+        .slice(callsBefore)
+        .filter((c: string[]) => c[0].includes("parent/search"));
+      expect(searchCalls.length).toBe(1);
+      expect(searchCalls[0][0]).toContain("q=kittens");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("collapses rapid keystrokes into a single debounced request", async () => {
@@ -276,24 +281,29 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
-    const el = await mount(1);
-    const callsBefore = fetchSpy.mock.calls.length;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(1);
+      const callsBefore = fetchSpy.mock.calls.length;
 
-    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
-    for (const value of ["k", "ki", "kit", "kitt", "kitte", "kitten", "kittens"]) {
-      input.value = value;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      // Spread keystrokes well inside the 300 ms window.
-      await new Promise((r) => setTimeout(r, 20));
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      for (const value of ["k", "ki", "kit", "kitt", "kitte", "kitten", "kittens"]) {
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        // Advance 20 ms between keystrokes — well inside the 300 ms debounce.
+        vi.advanceTimersByTime(20);
+      }
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
+
+      const searchCalls = fetchSpy.mock.calls
+        .slice(callsBefore)
+        .filter((c: string[]) => c[0].includes("parent/search"));
+      expect(searchCalls.length).toBe(1);
+      expect(searchCalls[0][0]).toContain("q=kittens");
+    } finally {
+      vi.useRealTimers();
     }
-    await new Promise((r) => setTimeout(r, 350));
-    await el.updateComplete;
-
-    const searchCalls = fetchSpy.mock.calls
-      .slice(callsBefore)
-      .filter((c: string[]) => c[0].includes("parent/search"));
-    expect(searchCalls.length).toBe(1);
-    expect(searchCalls[0][0]).toContain("q=kittens");
   });
 
   it("clearing the search box cancels any pending debounced request", async () => {
@@ -303,22 +313,28 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
-    const el = await mount(1);
-    const callsBefore = fetchSpy.mock.calls.length;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(1);
+      const callsBefore = fetchSpy.mock.calls.length;
 
-    const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
-    input.value = "kittens";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    // Clear immediately, before the debounce fires.
-    input.value = "";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "kittens";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      // Clear immediately, before the debounce fires.
+      input.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
 
-    await new Promise((r) => setTimeout(r, 350));
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
 
-    const searchCalls = fetchSpy.mock.calls
-      .slice(callsBefore)
-      .filter((c: string[]) => c[0].includes("parent/search"));
-    expect(searchCalls.length).toBe(0);
+      const searchCalls = fetchSpy.mock.calls
+        .slice(callsBefore)
+        .filter((c: string[]) => c[0].includes("parent/search"));
+      expect(searchCalls.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not search with empty query", async () => {
@@ -334,8 +350,7 @@ describe("<hometube-allowlist-manager>", () => {
     // Try to search with empty query
     const searchBtn = el.shadowRoot!.querySelector("wa-button[variant='brand']");
     (searchBtn as HTMLElement).click();
-    await new Promise((r) => setTimeout(r, 20));
-    await el.updateComplete;
+    await flushAsync(el);
 
     // No additional search call should have been made
     const searchCalls = fetchSpy.mock.calls
@@ -399,8 +414,7 @@ describe("<hometube-allowlist-manager>", () => {
     const card = el.shadowRoot!.querySelector("hometube-content-card");
     const removeBtn = card!.querySelector("wa-button")! as HTMLElement;
     removeBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const deleteCalls = fetchSpy.mock.calls.filter(
       (c: unknown[]) =>

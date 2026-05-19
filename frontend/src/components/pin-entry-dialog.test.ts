@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./pin-entry-dialog.js";
 import type { PinEntryDialog } from "./pin-entry-dialog.js";
+import { flushAsync } from "../test-utils.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -99,8 +100,7 @@ describe("<hometube-pin-entry-dialog>", () => {
 
     input.value = "1234";
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     expect(fetchSpy).toHaveBeenCalled();
     const [url, opts] = fetchSpy.mock.calls[0];
@@ -126,8 +126,7 @@ describe("<hometube-pin-entry-dialog>", () => {
 
     input.value = "9999";
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await flushAsync(el);
 
     const error = el.shadowRoot!.querySelector("hometube-error-banner");
     expect(error).not.toBeNull();

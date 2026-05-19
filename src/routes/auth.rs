@@ -46,6 +46,12 @@ pub struct SwitchBody {
 #[derive(Debug, Deserialize)]
 pub struct PinBody {
     pub pin: String,
+    /// Required when the calling account already has a PIN set, so
+    /// that transient access to an authenticated session can't be used
+    /// to silently lock the legitimate owner out. Ignored on the
+    /// initial set (when the account has no `pin_hash` yet).
+    #[serde(default)]
+    pub current_pin: Option<String>,
 }
 
 /// Body for `POST /api/auth/register`.
@@ -272,6 +278,42 @@ pub async fn set_pin(
             "PIN must be 4-6 numeric digits".into(),
         ));
     }
+
+    // If a PIN is already set on this account, require the caller to
+    // prove they know it before replacing it. This blocks anyone with
+    // transient access to an unlocked parent session from locking the
+    // real parent out by silently rotating the PIN.
+    //
+    // Note: `body.pin` is intentionally **not** trimmed (any leading or
+    // trailing whitespace will fail `is_valid_pin` above), but
+    // `body.current_pin` is trimmed because we want a friendly 400
+    // "current PIN is required" error instead of running Argon2 against
+    // an obvious empty/whitespace input.
+    let existing = account::find_by_id(&state.db, current.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if let Some(stored) = existing.pin_hash.as_deref() {
+        let provided = body
+            .current_pin
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AppError::BadRequest("current PIN is required to change an existing PIN".into())
+            })?;
+        if let Err(err) = verify_pin(stored, provided) {
+            warn!(account_id = current.id, "PIN change attempt failed");
+            // Mirror `switch`: best-effort bookkeeping so brute-force
+            // attempts to rotate the PIN via a hijacked session are
+            // also visible to the parent. Never fail the request just
+            // because logging the failure failed.
+            if let Err(e) = record_failed_pin(&state, current.id).await {
+                warn!(error = %e, "could not record failed PIN attempt");
+            }
+            return Err(err);
+        }
+    }
+
     let hashed = hash_pin(&body.pin)?;
     account::set_pin_hash(&state.db, current.id, &hashed).await?;
     Ok(StatusCode::NO_CONTENT)

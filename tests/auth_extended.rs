@@ -183,6 +183,52 @@ async fn set_pin_with_non_digits_is_rejected() {
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn change_pin_requires_current_pin_when_one_exists() {
+    let (app, _auth) = boot_setup_complete(AccountType::Parent).await;
+
+    // Initial set — no current_pin needed because the account has no PIN yet.
+    let res = app
+        .server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "1234" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
+
+    // Rotating the PIN without supplying current_pin must be rejected.
+    let res = app
+        .server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "5678" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+
+    // Wrong current_pin → 403 Forbidden (from `verify_pin`).
+    let res = app
+        .server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "5678", "current_pin": "9999" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
+
+    // Correct current_pin → success.
+    let res = app
+        .server
+        .put("/api/auth/pin")
+        .json(&json!({ "pin": "5678", "current_pin": "1234" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
+
+    // The new PIN now works for switching.
+    let parent_id = app.parent_id.unwrap();
+    let res = app
+        .server
+        .post("/api/auth/switch")
+        .json(&json!({ "account_id": parent_id, "pin": "5678" }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+}
+
 // ---------------------------------------------------------------------------
 // Logout
 // ---------------------------------------------------------------------------
