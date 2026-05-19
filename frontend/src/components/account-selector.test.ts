@@ -9,6 +9,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./account-selector.js";
+import { flushAsync } from "../test-utils.js";
+
+type WithUpdate = HTMLElement & { updateComplete?: Promise<boolean> };
 
 const ACCOUNTS = [
   { id: 1, display_name: "Alice", account_type: "child" },
@@ -20,9 +23,11 @@ async function mount(markup: string): Promise<HTMLElement> {
   const el = document.body.lastElementChild as HTMLElement;
   // Wait for connectedCallback to run + the network round-trip to
   // resolve before reading the shadow DOM.
-  await (el as HTMLElement & { updateComplete?: Promise<unknown> }).updateComplete;
-  await new Promise((r) => setTimeout(r, 10));
-  await (el as HTMLElement & { updateComplete?: Promise<unknown> }).updateComplete;
+  const withUpdate = el as WithUpdate;
+  if (withUpdate.updateComplete) await withUpdate.updateComplete;
+  // Pass the element so flushAsync's `updateComplete` loop also waits
+  // for the post-fetch render to settle, not just for microtasks.
+  await flushAsync(withUpdate);
   return el;
 }
 
@@ -64,9 +69,9 @@ describe("<hometube-account-selector>", () => {
       { once: true },
     );
     await mount(`<hometube-account-selector account-type="child"></hometube-account-selector>`);
-    // The selector emits during its initial load; wait for the
-    // listener to fire.
-    await new Promise((r) => setTimeout(r, 20));
+    // The selector emits during its initial load; flush microtasks so
+    // the listener has fired by the time we assert.
+    await flushAsync();
     expect(events).toContain(1);
   });
 
