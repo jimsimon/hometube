@@ -25,6 +25,15 @@ export class HiddenUndoToast extends LitElement {
   @state() private hiddenTitle: string | null = null;
   @state() private busy = false;
 
+  /**
+   * `true` when the pending hide was performed on a different page
+   * (watch-page redirect breadcrumb). Undo from that origin needs a
+   * full reload because the in-page listings don't know about it.
+   * In-page hides can be restored purely via the `video-unhidden`
+   * event so we avoid the jarring reload.
+   */
+  private needsReload = false;
+
   private timer: number | null = null;
 
   static styles = css`
@@ -88,11 +97,8 @@ export class HiddenUndoToast extends LitElement {
         sessionStorage.removeItem("hometube:pendingHide");
         const parsed = JSON.parse(raw) as { videoId: string; title?: string; at?: number };
         if (parsed.videoId && (!parsed.at || Date.now() - parsed.at < UNDO_TIMEOUT_MS)) {
-          this.onHidden(
-            new CustomEvent("video-hidden", {
-              detail: { videoId: parsed.videoId, title: parsed.title },
-            }),
-          );
+          this.needsReload = true;
+          this.showFor(parsed.videoId, parsed.title);
         }
       }
     } catch {
@@ -109,12 +115,19 @@ export class HiddenUndoToast extends LitElement {
   private onHidden = (e: CustomEvent<{ videoId: string; title?: string }>) => {
     const videoId = e.detail?.videoId;
     if (!videoId) return;
+    // Event-driven hide: in-page, so we don't need to reload to
+    // restore the card — listings handle `video-unhidden` themselves.
+    this.needsReload = false;
+    this.showFor(videoId, e.detail?.title);
+  };
+
+  private showFor(videoId: string, title?: string) {
     this.videoId = videoId;
-    this.hiddenTitle = e.detail?.title ?? null;
+    this.hiddenTitle = title ?? null;
     this.busy = false;
     this.clearTimer();
     this.timer = window.setTimeout(() => this.dismiss(), UNDO_TIMEOUT_MS);
-  };
+  }
 
   private clearTimer() {
     if (this.timer != null) {
@@ -128,15 +141,24 @@ export class HiddenUndoToast extends LitElement {
     this.videoId = null;
     this.hiddenTitle = null;
     this.busy = false;
+    this.needsReload = false;
   }
 
   private async onUndo() {
     if (!this.videoId || this.busy) return;
     this.busy = true;
     const id = this.videoId;
+    const shouldReload = this.needsReload;
     try {
       await api.delete(`/api/hidden/${encodeURIComponent(id)}`);
-      // Tell listings to re-show or just reload the current view.
+      if (shouldReload) {
+        // Hide came from a different page (e.g. watch-page redirect);
+        // a full reload is the only way to pick up the un-hide on the
+        // current view.
+        window.location.reload();
+        return;
+      }
+      // In-page hide: notify listings to restore the card, no reload.
       document.dispatchEvent(
         new CustomEvent("video-unhidden", {
           detail: { videoId: id },
@@ -144,9 +166,7 @@ export class HiddenUndoToast extends LitElement {
           composed: true,
         }),
       );
-      // If the hide came from the watch page we already navigated
-      // away; a full reload picks up the un-hide on the current view.
-      window.location.reload();
+      this.dismiss();
     } catch (err) {
       if (err instanceof ApiError) {
         console.warn("Undo failed", err.status, err.body);

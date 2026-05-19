@@ -54,6 +54,9 @@ export class VideoCard extends LitElement {
   @state()
   private busy = false;
 
+  @state()
+  private actionError = "";
+
   static styles = css`
     :host {
       display: block;
@@ -193,6 +196,11 @@ export class VideoCard extends LitElement {
       opacity: 0.5;
       cursor: not-allowed;
     }
+    .action-error {
+      color: var(--wa-color-danger-fill, #b91c1c);
+      font-size: 0.8rem;
+      padding: 0 0.25rem;
+    }
   `;
 
   private formatDuration(seconds: number): string {
@@ -246,6 +254,7 @@ export class VideoCard extends LitElement {
     if (!this.videoId || this.busy) return;
     this.busy = true;
     this.menuOpen = false;
+    this.actionError = "";
     try {
       await api.post("/api/hidden", {
         video_id: this.videoId,
@@ -265,8 +274,10 @@ export class VideoCard extends LitElement {
     } catch (err) {
       if (err instanceof ApiError) {
         console.warn("Failed to hide video", err.status, err.body);
+        this.actionError = `Couldn't hide (${err.status})`;
       } else {
         console.warn("Failed to hide video", err);
+        this.actionError = "Couldn't hide this video";
       }
     } finally {
       this.busy = false;
@@ -278,6 +289,7 @@ export class VideoCard extends LitElement {
     e.stopPropagation();
     if (!this.videoId || this.busy) return;
     this.busy = true;
+    this.actionError = "";
     try {
       await api.delete(`/api/hidden/${encodeURIComponent(this.videoId)}`);
       this.dispatchEvent(
@@ -290,8 +302,10 @@ export class VideoCard extends LitElement {
     } catch (err) {
       if (err instanceof ApiError) {
         console.warn("Failed to unhide video", err.status, err.body);
+        this.actionError = `Couldn't unhide (${err.status})`;
       } else {
         console.warn("Failed to unhide video", err);
+        this.actionError = "Couldn't unhide this video";
       }
     } finally {
       this.busy = false;
@@ -330,6 +344,9 @@ export class VideoCard extends LitElement {
           >
             Unhide
           </button>
+          ${this.actionError
+            ? html`<div class="action-error" role="alert">${this.actionError}</div>`
+            : null}
         </div>
       `;
     }
@@ -354,6 +371,9 @@ export class VideoCard extends LitElement {
                 Hide this video
               </button>
             </div>`
+          : null}
+        ${this.actionError
+          ? html`<div class="action-error" role="alert">${this.actionError}</div>`
           : null}
       </div>
     `;
