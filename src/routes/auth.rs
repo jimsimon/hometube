@@ -206,14 +206,13 @@ pub async fn switch(
             let hashes = account::list_parent_pin_hashes(&state.db).await?;
             if hashes.is_empty() {
                 return Err(AppError::BadRequest(
-                    "no parent has set a PIN yet; a parent must visit /setup/pin first"
-                        .into(),
+                    "no parent has set a PIN yet; a parent must visit /setup/pin first".into(),
                 ));
             }
             // Reject malformed PINs *before* doing any Argon2 work.
             // Argon2 is intentionally expensive, and verifying every
             // parent's hash against garbage input would let a single
-                // request burn N × Argon2 of CPU.
+            // request burn N × Argon2 of CPU.
             if !is_valid_pin(provided) {
                 warn!(
                     account_id = target.id,
