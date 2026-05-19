@@ -39,9 +39,7 @@ async function mount(attrs: Record<string, string> = {}): Promise<ChangePinDialo
 }
 
 function setInput(el: ChangePinDialog, name: string, value: string): void {
-  const input = el.shadowRoot!.querySelector(
-    `input[name="${name}"]`,
-  ) as HTMLInputElement;
+  const input = el.shadowRoot!.querySelector(`input[name="${name}"]`) as HTMLInputElement;
   input.value = value;
 }
 
@@ -55,13 +53,9 @@ describe("<hometube-change-pin-dialog>", () => {
 
   it("renders all three PIN inputs", async () => {
     const el = await mount({ open: "" });
-    const current = el.shadowRoot!.querySelector(
-      'input[name="current-pin"]',
-    ) as HTMLInputElement;
+    const current = el.shadowRoot!.querySelector('input[name="current-pin"]') as HTMLInputElement;
     const pin = el.shadowRoot!.querySelector('input[name="pin"]') as HTMLInputElement;
-    const confirm = el.shadowRoot!.querySelector(
-      'input[name="pin-confirm"]',
-    ) as HTMLInputElement;
+    const confirm = el.shadowRoot!.querySelector('input[name="pin-confirm"]') as HTMLInputElement;
     expect(current).not.toBeNull();
     expect(pin).not.toBeNull();
     expect(confirm).not.toBeNull();
@@ -75,9 +69,9 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "1234");
     setInput(el, "pin", "12");
     setInput(el, "pin-confirm", "12");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector("hometube-error-banner")).not.toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -87,9 +81,9 @@ describe("<hometube-change-pin-dialog>", () => {
     const el = await mount({ open: "" });
     setInput(el, "pin", "1234");
     setInput(el, "pin-confirm", "1234");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector("hometube-error-banner")).not.toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -100,9 +94,9 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "1234");
     setInput(el, "pin", "1234");
     setInput(el, "pin-confirm", "1234");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector("hometube-error-banner")).not.toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -113,9 +107,9 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "1234");
     setInput(el, "pin", "1234");
     setInput(el, "pin-confirm", "5678");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector("hometube-error-banner")).not.toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -137,9 +131,9 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "1234");
     setInput(el, "pin", "4321");
     setInput(el, "pin-confirm", "4321");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await flushAsync(el);
 
     expect(fetchSpy).toHaveBeenCalledOnce();
@@ -164,14 +158,14 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "0000");
     setInput(el, "pin", "4321");
     setInput(el, "pin-confirm", "4321");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await flushAsync(el);
 
-    const banner = el.shadowRoot!.querySelector(
-      "hometube-error-banner",
-    ) as (HTMLElement & { message?: string }) | null;
+    const banner = el.shadowRoot!.querySelector("hometube-error-banner") as
+      | (HTMLElement & { message?: string })
+      | null;
     expect(banner).not.toBeNull();
     expect(banner!.message).toContain("Current PIN");
   });
@@ -189,9 +183,9 @@ describe("<hometube-change-pin-dialog>", () => {
     setInput(el, "current-pin", "1234");
     setInput(el, "pin", "5678");
     setInput(el, "pin-confirm", "5678");
-    el.shadowRoot!
-      .querySelector("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    el.shadowRoot!.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await flushAsync(el);
 
     expect(el.shadowRoot!.querySelector("hometube-error-banner")).not.toBeNull();
@@ -201,9 +195,7 @@ describe("<hometube-change-pin-dialog>", () => {
     const el = await mount({ open: "" });
     const handler = vi.fn();
     el.addEventListener("change-pin-closed", handler);
-    const cancel = el.shadowRoot!.querySelector(
-      'button[type="button"]',
-    ) as HTMLButtonElement;
+    const cancel = el.shadowRoot!.querySelector('button[type="button"]') as HTMLButtonElement;
     cancel.click();
     await el.updateComplete;
     expect(handler).toHaveBeenCalledOnce();

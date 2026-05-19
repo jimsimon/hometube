@@ -114,11 +114,9 @@ export class ChangePinDialog extends LitElement {
       this.busy = false;
       // Clear any previously-typed PIN so it doesn't linger in the DOM
       // across reopens.
-      this.renderRoot
-        .querySelectorAll<HTMLInputElement>("input")
-        .forEach((input) => {
-          input.value = "";
-        });
+      this.renderRoot.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        input.value = "";
+      });
       this.dialog?.show?.();
       // Focus is set in the dialog's `wa-after-show` handler so the
       // <wa-dialog>/<wa-dropdown> have finished their own focus
@@ -186,9 +184,7 @@ export class ChangePinDialog extends LitElement {
     try {
       await api.put("/api/auth/pin", { pin, current_pin: currentPin });
       this.saved = true;
-      this.dispatchEvent(
-        new CustomEvent("change-pin-saved", { bubbles: true, composed: true }),
-      );
+      this.dispatchEvent(new CustomEvent("change-pin-saved", { bubbles: true, composed: true }));
       // Auto-close after a brief moment so the user sees the success
       // confirmation but doesn't have to click "Close" themselves.
       window.clearTimeout(this.autoCloseTimer);
@@ -234,8 +230,8 @@ export class ChangePinDialog extends LitElement {
       >
         <form @submit=${this.onSubmit} novalidate>
           <p>
-            Enter your current PIN, then pick a new 4-6 digit PIN. You'll use the new PIN the
-            next time you switch to your profile.
+            Enter your current PIN, then pick a new 4-6 digit PIN. You'll use the new PIN the next
+            time you switch to your profile.
           </p>
 
           <label>
