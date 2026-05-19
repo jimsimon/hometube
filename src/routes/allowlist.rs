@@ -285,9 +285,13 @@ pub async fn add_video(
     };
     let title = title.to_string();
 
+    // Trim sidecar `channel_title` for consistency with how we treat
+    // the sidecar `title` above and the body-supplied `channel_title`
+    // below — a whitespace-only value is functionally identical to an
+    // empty one and should not be persisted.
     let channel_title = info
         .as_ref()
-        .and_then(|i| i.channel_title.clone())
+        .and_then(|i| i.channel_title.as_ref().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty())
         .or_else(|| {
             body.channel_title
