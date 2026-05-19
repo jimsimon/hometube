@@ -146,12 +146,16 @@ export class SearchResults extends LitElement {
         void this.runSearch(false);
       } else {
         // Query cleared — drop any stale results so the UI doesn't
-        // keep showing matches for the previous query.
+        // keep showing matches for the previous query. Reset
+        // `loading` as well in case an in-flight request was still
+        // pending; its `finally` block will be a no-op once it
+        // returns since the token check supersedes it.
         this.channels = [];
         this.playlists = [];
         this.videos = [];
         this.nextPageToken = null;
         this.error = "";
+        this.loading = false;
       }
     }
   }
@@ -205,13 +209,22 @@ export class SearchResults extends LitElement {
   private onSearchChange = (event: Event): void => {
     const detail = (event as CustomEvent<{ q: string; kind: string }>).detail;
     if (!detail) return;
+    // Claim the event so `<hometube-search-bar>` skips its full-page
+    // navigation fallback on Enter — we're handling it in place.
+    event.preventDefault();
     // Validate the kind against the known union — otherwise a stray
     // string would flow straight into the `/api/search?type=...` URL.
     const allowedKinds: ReadonlyArray<typeof this.type> = ["all", "channel", "playlist", "video"];
     const nextType: typeof this.type = allowedKinds.includes(detail.kind as typeof this.type)
       ? (detail.kind as typeof this.type)
       : "all";
-    const nextQ = detail.q ?? "";
+    // Cap the query length defensively. The server enforces its own
+    // limit, but truncating here keeps the URL we hand to
+    // `history.replaceState` (and the GET request) from growing
+    // unbounded if a paste smuggles in a giant string.
+    const MAX_Q_LEN = 200;
+    const rawQ = detail.q ?? "";
+    const nextQ = rawQ.length > MAX_Q_LEN ? rawQ.slice(0, MAX_Q_LEN) : rawQ;
     if (nextQ === this.q && nextType === this.type) return;
     this.q = nextQ;
     this.type = nextType;

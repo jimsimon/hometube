@@ -2,11 +2,15 @@
  * <hometube-search-bar>
  *
  * Compact search input + type filter intended for use inside the child
- * top navigation. Pressing Enter (or clicking the submit button)
- * navigates to `/child/search?q=...&type=...`. While the user is
- * typing, a debounced suggestions request is sent to
- * `/api/search?q=...&type=all&limit=5`; the top results render in a
- * dropdown and clicking one navigates straight to the matched item.
+ * top navigation. While the user is typing, a debounced suggestions
+ * request is sent to `/api/search?q=...&type=all&limit=5`; the top
+ * results render in a dropdown and clicking one navigates straight to
+ * the matched item. The same debounced tick also dispatches a
+ * cancelable `search-change` CustomEvent so embedders (notably
+ * `<hometube-search-results>`) can update in place without a reload.
+ * Pressing Enter dispatches `search-change` first; if no listener
+ * calls `preventDefault()` it falls back to navigating to
+ * `/child/search?q=...&type=...` (the top-nav case).
  *
  * The component is intentionally framework-agnostic — it doesn't
  * depend on a specific dropdown library so it can be embedded anywhere.
@@ -258,11 +262,16 @@ export class SearchBar extends LitElement {
    * without requiring a form submit. The top-nav embedder simply
    * ignores it.
    */
-  private emitChange(): void {
+  private emitChange(): boolean {
     // Scoped event: the only consumer listens directly on this
     // element, so there's no need to bubble or cross shadow boundaries.
-    this.dispatchEvent(
+    // `cancelable: true` lets an embedder (e.g. `<hometube-search-results>`)
+    // claim the event with `preventDefault()` so that `onSubmit` can
+    // skip its full-page navigation fallback. The return value is
+    // `false` when the default was prevented.
+    return this.dispatchEvent(
       new CustomEvent("search-change", {
+        cancelable: true,
         detail: { q: this.query.trim(), kind: this.kind },
       }),
     );
@@ -331,6 +340,12 @@ export class SearchBar extends LitElement {
       window.location.href = this.suggestions[this.highlighted].href;
       return;
     }
+    // Fire the in-page event first; if an embedder handles it (calls
+    // `preventDefault()`) we skip the full-page navigation so Enter
+    // behaves consistently with the debounced auto-search.
+    this.scheduleFetch.cancel();
+    const notHandled = this.emitChange();
+    if (!notHandled) return;
     const url = `/child/search?q=${encodeURIComponent(trimmed)}&type=${encodeURIComponent(
       this.kind,
     )}`;
