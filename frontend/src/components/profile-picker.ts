@@ -6,9 +6,9 @@
  *   - Fetches `/api/auth/profiles`
  *   - Renders one tile per account with avatar (or initials fallback),
  *     display name, and a role badge
- *   - Tapping a child profile immediately switches via
- *     `POST /api/auth/switch { account_id }` and redirects to `/`
- *   - Tapping a parent profile opens `<hometube-pin-entry-dialog>`
+ *   - Tapping any profile (parent or child) opens
+ *     `<hometube-pin-entry-dialog>`. Switching to a child requires any
+ *     parent's PIN; switching to a parent requires that parent's own PIN.
  *   - Parents without a configured PIN show a "Set PIN required" badge
  *     and clicking them links straight to `/setup/pin?for_new_parent=1`
  *     (the tile is not selectable for switching)
@@ -179,18 +179,25 @@ export class ProfilePicker extends LitElement {
       this.pinTarget = profile;
       return;
     }
-    // Children switch immediately, no PIN required.
+    // Children also require a parent's PIN before switching.
+    this.pinTarget = profile;
+  }
+
+  /** User explicitly cancelled the switch — return them to the page
+   *  they came from. The session cookie is untouched, so they land
+   *  back on the previous page under their existing account. If
+   *  there's no in-app history (fresh entry, off-origin referrer),
+   *  stay on the picker. */
+  private onCancelClicked(): void {
     try {
-      await api.post("/api/auth/switch", { account_id: profile.id });
-      window.location.href = "/";
-    } catch (err) {
-      if (err instanceof ApiError && typeof err.body === "string") {
-        this.error = err.body;
-      } else if (err instanceof Error) {
-        this.error = err.message;
-      } else {
-        this.error = "Switch failed";
+      const ref = document.referrer;
+      const sameOrigin =
+        ref && new URL(ref, window.location.href).origin === window.location.origin;
+      if (sameOrigin && window.history.length > 1) {
+        window.history.back();
       }
+    } catch {
+      // No-op: stay on the picker.
     }
   }
 
@@ -209,7 +216,9 @@ export class ProfilePicker extends LitElement {
         ?open=${this.pinTarget != null}
         account-id=${this.pinTarget?.id ?? 0}
         display-name=${this.pinTarget?.display_name ?? ""}
+        ?require-parent-pin=${this.pinTarget?.account_type === "child"}
         @pin-cancelled=${() => (this.pinTarget = null)}
+        @pin-cancel-clicked=${this.onCancelClicked}
       ></hometube-pin-entry-dialog>
     `;
   }
@@ -220,7 +229,7 @@ export class ProfilePicker extends LitElement {
       ? `${p.display_name} (set PIN required)`
       : p.account_type === "parent"
         ? `Switch to ${p.display_name} (parent — PIN required)`
-        : `Switch to ${p.display_name}`;
+        : `Switch to ${p.display_name} (parent PIN required)`;
     return html`
       <button
         type="button"

@@ -228,6 +228,19 @@ pub async fn list_profiles(pool: &SqlitePool) -> AppResult<Vec<ProfileSummary>> 
         .collect())
 }
 
+/// Fetch the Argon2 pin_hash of every parent account that has one set.
+/// Used to verify a "any parent's PIN" challenge when switching into a
+/// child profile.
+pub async fn list_parent_pin_hashes(pool: &SqlitePool) -> AppResult<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT pin_hash FROM accounts \
+         WHERE account_type = 'parent' AND pin_hash IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(h,)| h).collect())
+}
+
 /// Update display name and/or account type. `None` means "leave alone".
 pub async fn update(
     pool: &SqlitePool,
