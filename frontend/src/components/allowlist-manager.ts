@@ -268,12 +268,23 @@ export class AllowlistManager extends LitElement {
   private async addItemForKind(item: SearchItem, kind: Kind): Promise<void> {
     if (this.childId == null) return;
     const base = `/api/children/${this.childId}/allowlist/${kind}s`;
+    // The parent search response already carries title / channel /
+    // thumbnail. We pass them through to the backend so the row can be
+    // persisted with searchable metadata even when the YouTube
+    // discovery sidecar can't resolve the video (rate-limited,
+    // age-gated, offline, …). The backend treats body metadata as a
+    // fallback — it prefers sidecar data when available.
     const payload =
       kind === "channel"
         ? { channel_id: item.id }
         : kind === "playlist"
           ? { playlist_id: item.id }
-          : { video_id: item.id };
+          : {
+              video_id: item.id,
+              title: item.title,
+              channel_title: item.channel_title,
+              thumbnail_url: pickThumbnail(item.thumbnails),
+            };
     try {
       await api.post(base, payload);
       await this.refreshAll();

@@ -247,7 +247,12 @@ async fn delete_video_from_allowlist() {
 }
 
 #[tokio::test]
-async fn add_video_with_fake_key_fails() {
+async fn add_video_with_no_metadata_and_no_sidecar_fails() {
+    // When the discovery sidecar is unreachable (tests run without it)
+    // and the request body carries only `video_id`, there is nothing
+    // we can use as `video_title`. Writing such a row would make the
+    // video invisible to the child-side search, so the handler must
+    // refuse the request.
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
 
@@ -256,8 +261,90 @@ async fn add_video_with_fake_key_fails() {
         .post(&format!("/api/children/{child_id}/allowlist/videos"))
         .json(&json!({ "video_id": "dQw4w9WgXcQ" }))
         .await;
-    let status = res.status_code().as_u16();
-    assert!(status >= 400);
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn add_video_uses_body_metadata_when_sidecar_unavailable() {
+    // The parent UI already has title/channel_title/thumbnail_url from
+    // the YouTube search response and passes them through. Even when
+    // the discovery sidecar is down (as in this test environment), the
+    // allowlist row should be persisted with a non-empty `video_title`
+    // so that `/api/search` can find it later. This is the regression
+    // we're fixing — previously the handler hard-failed without
+    // sidecar data and the row was either rejected or saved with
+    // `video_title = ""`.
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/videos"))
+        .json(&json!({
+            "video_id": "dQw4w9WgXcQ",
+            "title": "Never Gonna Give You Up",
+            "channel_title": "Rick Astley",
+            "thumbnail_url": "https://img.example/rick.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_id"], "dQw4w9WgXcQ");
+    assert_eq!(body["video_title"], "Never Gonna Give You Up");
+    assert_eq!(body["channel_title"], "Rick Astley");
+    assert_eq!(body["video_thumbnail_url"], "https://img.example/rick.jpg");
+
+    // Title is persisted on disk — the search SQL filters on
+    // `video_title LIKE …`, so this is the field that matters.
+    let (db_title, db_channel): (String, Option<String>) = sqlx::query_as(
+        "SELECT video_title, channel_title FROM allowlisted_videos \
+         WHERE child_account_id = ? AND video_id = ?",
+    )
+    .bind(child_id)
+    .bind("dQw4w9WgXcQ")
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(db_title, "Never Gonna Give You Up");
+    assert_eq!(db_channel.as_deref(), Some("Rick Astley"));
+}
+
+#[tokio::test]
+async fn add_video_accepts_youtube_url_and_persists_body_title() {
+    // The handler's `parse_video_id` extracts the bare ID from common
+    // YouTube URL shapes. Combined with body metadata, a parent
+    // pasting a full URL into the UI should still produce a
+    // searchable row even without the sidecar.
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/videos"))
+        .json(&json!({
+            "video_id": "https://www.youtube.com/watch?v=abcDEF12345",
+            "title": "Cool Video",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_id"], "abcDEF12345");
+    assert_eq!(body["video_title"], "Cool Video");
+}
+
+#[tokio::test]
+async fn add_video_rejects_body_with_blank_title() {
+    // A whitespace-only title is just as useless as no title — the
+    // LIKE search can never match it. Treat it as "missing".
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/videos"))
+        .json(&json!({ "video_id": "dQw4w9WgXcQ", "title": "   " }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
 // ===========================================================================
