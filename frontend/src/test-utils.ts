@@ -38,17 +38,25 @@ export async function flushAsync(el?: MaybeLitElement): Promise<void> {
   for (let i = 0; i < 20; i++) {
     await Promise.resolve();
   }
-  // 2. Yield one macrotask cycle. This is what `setTimeout(_, 0)`
-  //    is for: it lets the event loop process any platform-scheduled
-  //    tasks (e.g. real `Response` body stream reads in browser mode)
-  //    that are not microtasks. This is NOT a wall-clock wait — the
-  //    `0` means "as soon as currently-queued work is done", which is
-  //    exactly what we need. The flaky `setTimeout(_, 10)` pattern
-  //    this helper replaces was problematic because it assumed all
-  //    work would complete within 10 ms; `setTimeout(_, 0)` makes no
-  //    such assumption.
+  // 2. Yield one macrotask cycle so the event loop can process
+  //    platform-scheduled tasks (e.g. real `Response` body stream
+  //    reads in browser mode) that are not microtasks.
+  //
+  //    `MessageChannel.postMessage` is used instead of `setTimeout(_, 0)`
+  //    because tests can install `vi.useFakeTimers()` (e.g. the debounce
+  //    tests in allowlist-manager.test.ts); fake timers intercept
+  //    `setTimeout` but not `MessageChannel`, so this yield works under
+  //    both real and fake-timer regimes. It's also not a wall-clock
+  //    wait — the yield fires "as soon as currently-queued work is
+  //    done", unlike the flaky `setTimeout(_, 10)` pattern this helper
+  //    replaces.
   await new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
   });
   // 3. Final microtask drain to catch promise continuations spawned
   //    during the macrotask above.
