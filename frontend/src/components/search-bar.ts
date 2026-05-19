@@ -89,6 +89,12 @@ export class SearchBar extends LitElement {
   private lastFetchToken = 0;
   private mql: MediaQueryList | null = null;
 
+  // The same debounced tick drives both the suggestion fetch and the
+  // `search-change` event. They serve different consumers (the
+  // dropdown vs. an embedded results view) and hit different
+  // endpoints, so they're dispatched together on purpose — neither
+  // should block the other. `fetchSuggestions()` is fire-and-forget
+  // and `emitChange()` is synchronous, so ordering is irrelevant.
   private readonly scheduleFetch = debounce(() => {
     void this.fetchSuggestions();
     this.emitChange();

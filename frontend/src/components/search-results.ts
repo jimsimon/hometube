@@ -135,10 +135,11 @@ export class SearchResults extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    if (this.q) void this.runSearch(false);
-  }
+  // Initial fetch is driven by `updated()` (which Lit fires after the
+  // first render with all initial property values in `changed`). We
+  // intentionally do **not** kick off a request from
+  // `connectedCallback` — doing both would issue two `/api/search`
+  // requests on mount.
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has("q") || changed.has("type")) {
