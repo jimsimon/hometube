@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./account-selector.js";
 import { flushAsync } from "../test-utils.js";
 
-type WithUpdate = HTMLElement & { updateComplete?: Promise<unknown> };
+type WithUpdate = HTMLElement & { updateComplete?: Promise<boolean> };
 
 const ACCOUNTS = [
   { id: 1, display_name: "Alice", account_type: "child" },
@@ -25,8 +25,9 @@ async function mount(markup: string): Promise<HTMLElement> {
   // resolve before reading the shadow DOM.
   const withUpdate = el as WithUpdate;
   if (withUpdate.updateComplete) await withUpdate.updateComplete;
-  await flushAsync();
-  if (withUpdate.updateComplete) await withUpdate.updateComplete;
+  // Pass the element so flushAsync's `updateComplete` loop also waits
+  // for the post-fetch render to settle, not just for microtasks.
+  await flushAsync(withUpdate);
   return el;
 }
 
