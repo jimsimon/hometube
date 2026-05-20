@@ -1,9 +1,15 @@
 /**
- * <hometube-like-button video-id="...">
+ * <hometube-like-button video-id="..." video-title="..." thumbnail-url="...">
  *
- * Toggles a like on a video. POSTs `/api/likes/:videoId` to like and
- * DELETEs to unlike. Stays optimistic — the underlying YouTube push is
- * asynchronous.
+ * Toggles a like on a video. POSTs `/api/likes/:videoId` (packaging
+ * the `video-title` and `thumbnail-url` attributes into the JSON body
+ * so the backend doesn't need to call the discovery sidecar) to like,
+ * and DELETEs to unlike.
+ *
+ * The attribute is named `video-title` rather than `title` because
+ * `title` is the platform's tooltip attribute on every HTMLElement —
+ * using it here would trigger the browser's tooltip instead of
+ * populating the like row.
  */
 
 import { LitElement, html, css } from "lit";
@@ -16,6 +22,22 @@ import type { LikeRow } from "../types/index.js";
 export class LikeButton extends LitElement {
   @property({ type: String, attribute: "video-id" })
   videoId = "";
+
+  /**
+   * Video title to persist on the like row. The player has this in
+   * scope (`this.metadata.title`) at the moment the button is clicked,
+   * so we pass it through instead of having the backend re-fetch it.
+   * Optional — the backend tolerates a missing field.
+   */
+  @property({ type: String, attribute: "video-title" })
+  videoTitle = "";
+
+  /**
+   * Thumbnail URL to persist on the like row. Same rationale as
+   * `videoTitle`. Optional.
+   */
+  @property({ type: String, attribute: "thumbnail-url" })
+  thumbnailUrl = "";
 
   @state() private liked = false;
   @state() private busy = false;
@@ -79,7 +101,15 @@ export class LikeButton extends LitElement {
         await api.delete(`/api/likes/${encodeURIComponent(this.videoId)}`);
         this.liked = false;
       } else {
-        await api.post(`/api/likes/${encodeURIComponent(this.videoId)}`);
+        // Pass metadata the player already has so the backend doesn't
+        // need to call the discovery sidecar. Empty strings are sent as
+        // null so the backend's `COALESCE` upsert preserves any
+        // previously-stored values on re-like.
+        const body = {
+          title: this.videoTitle || null,
+          thumbnail_url: this.thumbnailUrl || null,
+        };
+        await api.post(`/api/likes/${encodeURIComponent(this.videoId)}`, body);
         this.liked = true;
       }
     } catch (err) {

@@ -50,6 +50,11 @@ pub struct DueSource {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub consecutive_errors: i64,
+    /// Unix-seconds timestamp of the most recent sidecar fallback for
+    /// this source (`NULL` if none has ever happened). Used by the
+    /// refresher to enforce the per-source rate cap without a second
+    /// query.
+    pub last_sidecar_fallback_at: Option<i64>,
 }
 
 /// One row of `feed_sources` for the admin diagnostics endpoint.
@@ -64,6 +69,11 @@ pub struct FeedSourceStatus {
     pub consecutive_errors: i64,
     pub next_poll_at: i64,
     pub item_count: i64,
+    /// Unix-seconds timestamp of the most recent sidecar fallback for
+    /// this source, or `NULL` if none has ever happened. Surfaced so
+    /// the diagnostics UI can show "last fallback: 5m ago" and the
+    /// operator can correlate sidecar load with RSS outage windows.
+    pub last_sidecar_fallback_at: Option<i64>,
 }
 
 /// Insert a `(kind, source_id)` row if missing. Sets `next_poll_at = 0`
@@ -216,6 +226,42 @@ pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> Ap
     Ok(())
 }
 
+/// Mark a poll as **deferred-by-policy** — no network call attempted,
+/// row rescheduled, **and** `consecutive_errors` left untouched. Used
+/// when the refresher's rate caps temporarily deny a fallback for an
+/// otherwise-eligible source: the source isn't in error and shouldn't
+/// reset any existing error count from prior real failures, it just
+/// has to wait its turn.
+///
+/// Distinct from [`record_poll_skipped`], which *does* clear errors —
+/// that's the right semantics for the "we have no transport for this
+/// kind" path, where the row genuinely isn't failing, but the wrong
+/// semantics for "we briefly throttled this source."
+pub async fn record_poll_deferred(
+    pool: &SqlitePool,
+    kind: &str,
+    source_id: &str,
+    reason: &str,
+    next_poll_at: i64,
+    now: i64,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE feed_sources SET \
+             last_polled_at = ?, \
+             last_error     = ?, \
+             next_poll_at   = ? \
+         WHERE kind = ? AND source_id = ?",
+    )
+    .bind(now)
+    .bind(reason)
+    .bind(next_poll_at)
+    .bind(kind)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Mark a poll as **skipped** — no network I/O happened, but the row
 /// is rescheduled into the future and tagged so the diagnostics UI
 /// can distinguish skipped-by-policy from a recent successful poll.
@@ -280,6 +326,95 @@ pub async fn record_poll_failure(
     Ok(())
 }
 
+/// Mark the source as confidently dead: the sidecar returned a clean
+/// "channel not found" / 404. Pushes `next_poll_at` far into the
+/// future so the scheduler effectively shelves the row, clears the
+/// error counter (it's not "failing" any more; it's *done*), and sets
+/// `last_error` to a human-readable reason for the diagnostics UI.
+///
+/// We deliberately do not delete the row or its items: a future
+/// reactivation (channel restored, or operator manually reschedules)
+/// can pick it back up. The `feed_for_child` query will simply stop
+/// surfacing items once the upstream stops producing them.
+pub async fn record_source_dead(
+    pool: &SqlitePool,
+    kind: &str,
+    source_id: &str,
+    reason: &str,
+    next_poll_at: i64,
+    now: i64,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE feed_sources SET \
+             last_polled_at     = ?, \
+             last_error         = ?, \
+             consecutive_errors = 0, \
+             next_poll_at       = ? \
+         WHERE kind = ? AND source_id = ?",
+    )
+    .bind(now)
+    .bind(reason)
+    .bind(next_poll_at)
+    .bind(kind)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record that a sidecar fallback was dispatched for this source.
+/// Called *before* the sidecar request goes out so concurrent claims
+/// (in the rare burst case) see the reservation and respect the
+/// per-source cap. The timestamp is also persisted across process
+/// restarts so a `docker restart` or `cargo watch` rebuild can't
+/// re-enable fallback for every source.
+pub async fn record_sidecar_fallback_dispatched(
+    pool: &SqlitePool,
+    kind: &str,
+    source_id: &str,
+    now: i64,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE feed_sources SET last_sidecar_fallback_at = ? \
+         WHERE kind = ? AND source_id = ?",
+    )
+    .bind(now)
+    .bind(kind)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Count sidecar fallbacks dispatched in the last hour, used by the
+/// refresher to enforce the aggregate per-hour cap. Reads the same
+/// `last_sidecar_fallback_at` column the per-source cap consults, so
+/// "fallback fires" and "fallback would have been allowed" cannot
+/// drift apart across restarts.
+///
+/// We store only the most recent timestamp per source (not a history),
+/// so this query counts *sources that fell back in the last hour*
+/// rather than *individual calls*. That's accurate as long as the
+/// per-source rate cap is at least one hour: under that assumption a
+/// single source can contribute at most one fallback to the count.
+/// If the per-source interval is lowered below 3600 s (allowed by
+/// `RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S` down to 60 s) the aggregate
+/// cap will undercount, which is the safe direction — extra calls
+/// would be permitted only by the per-source cap, never blocked by a
+/// stricter-than-intended aggregate cap.
+pub async fn sidecar_fallbacks_in_last_hour(pool: &SqlitePool, now: i64) -> AppResult<i64> {
+    let cutoff = now - 3600;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM feed_sources \
+         WHERE last_sidecar_fallback_at IS NOT NULL \
+           AND last_sidecar_fallback_at >= ?",
+    )
+    .bind(cutoff)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// Atomically claim up to `limit` sources whose `next_poll_at <= now`,
 /// pushing their `next_poll_at` forward by `lease_secs` so a concurrent
 /// caller (or the next iteration of the refresher loop) does not pick
@@ -307,7 +442,8 @@ pub async fn claim_due_sources(
                ORDER BY next_poll_at ASC \
                LIMIT ? \
           ) \
-          RETURNING kind, source_id, etag, last_modified, consecutive_errors",
+          RETURNING kind, source_id, etag, last_modified, \
+                    consecutive_errors, last_sidecar_fallback_at",
     )
     .bind(leased_until)
     .bind(now)
@@ -406,6 +542,60 @@ pub async fn feed_for_child(
     Ok(out)
 }
 
+/// Capacity-utilisation snapshot, used by the diagnostics endpoint
+/// (and the parent settings UI) to surface "are we keeping up?" signal
+/// in a single round-trip. All counts are derived from `feed_sources`
+/// and aren't cached anywhere — the table is small enough (a few
+/// thousand rows at most) that an aggregate count is sub-millisecond.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct FeedRefresherCapacityCounts {
+    /// Total rows in `feed_sources`.
+    pub total_sources: i64,
+    /// Sources whose `next_poll_at <= now` *right now* — anything
+    /// non-zero means the dispatcher hasn't drained the work yet.
+    /// Persistent non-zero is the signal to lower `dispatch_delay_ms`
+    /// or `channel_interval_s`.
+    pub queue_depth: i64,
+    /// Sources whose `last_polled_at` falls inside the last hour.
+    /// Indicator of the dispatcher's actual throughput.
+    pub polls_last_hour: i64,
+    /// Sidecar fallbacks dispatched in the last hour. Mirrors what
+    /// the aggregate-cap eligibility check sees, so the operator can
+    /// correlate the diagnostics UI with the cap value.
+    pub sidecar_fallbacks_last_hour: i64,
+}
+
+/// Compute the per-table capacity counts. All four counts come from
+/// a single query plan against `feed_sources` so we don't pay an
+/// extra round-trip per metric. The query uses conditional aggregates
+/// rather than four separate `SELECT COUNT(*) ... WHERE ...` queries.
+pub async fn capacity_counts(
+    pool: &SqlitePool,
+    now: i64,
+) -> AppResult<FeedRefresherCapacityCounts> {
+    let hour_ago = now - 3600;
+    // COALESCE wraps the conditional sums so an empty `feed_sources`
+    // table returns zeroes instead of NULLs (which would fail
+    // `FromRow` on `i64` columns).
+    let row: FeedRefresherCapacityCounts = sqlx::query_as(
+        "SELECT \
+             COUNT(*) AS total_sources, \
+             COALESCE(SUM(CASE WHEN next_poll_at <= ? THEN 1 ELSE 0 END), 0) \
+                 AS queue_depth, \
+             COALESCE(SUM(CASE WHEN last_polled_at >= ? THEN 1 ELSE 0 END), 0) \
+                 AS polls_last_hour, \
+             COALESCE(SUM(CASE WHEN last_sidecar_fallback_at >= ? THEN 1 ELSE 0 END), 0) \
+                 AS sidecar_fallbacks_last_hour \
+           FROM feed_sources",
+    )
+    .bind(now)
+    .bind(hour_ago)
+    .bind(hour_ago)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Diagnostic snapshot of every cached source. Used by the admin
 /// endpoint to surface poll health.
 ///
@@ -417,7 +607,8 @@ pub async fn list_source_status(pool: &SqlitePool) -> AppResult<Vec<FeedSourceSt
         "SELECT s.kind, s.source_id, s.title, s.last_polled_at, \
                 s.last_success_at, s.last_error, s.consecutive_errors, \
                 s.next_poll_at, \
-                COALESCE(c.item_count, 0) AS item_count \
+                COALESCE(c.item_count, 0) AS item_count, \
+                s.last_sidecar_fallback_at \
            FROM feed_sources s \
            LEFT JOIN ( \
                 SELECT kind, source_id, COUNT(*) AS item_count \
@@ -759,5 +950,192 @@ mod tests {
         assert_eq!(errs, 0);
         assert_eq!(etag.as_deref(), Some("etag-xyz"));
         assert_eq!(title.as_deref(), Some("Channel Title"));
+    }
+
+    #[tokio::test]
+    async fn record_poll_deferred_preserves_consecutive_errors() {
+        // Rate-capped sources land here. The previous design used
+        // `record_poll_skipped`, which clobbered `consecutive_errors`
+        // — wrong for transient throttling because it would mask any
+        // underlying failure history. `record_poll_deferred` must
+        // leave the counter alone.
+        let pool = setup_db().await;
+        upsert_source(&pool, KIND_PLAYLIST, "PLkeep").await.unwrap();
+        // Pre-seed two prior errors so we can prove they survive.
+        sqlx::query(
+            "UPDATE feed_sources SET consecutive_errors = 2 \
+              WHERE kind = 'playlist' AND source_id = 'PLkeep'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        record_poll_deferred(&pool, KIND_PLAYLIST, "PLkeep", "rate-capped", 999, 50)
+            .await
+            .unwrap();
+
+        let (errs, last_polled, last_err, next): (i64, Option<i64>, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT consecutive_errors, last_polled_at, last_error, next_poll_at \
+                   FROM feed_sources WHERE kind='playlist' AND source_id='PLkeep'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            errs, 2,
+            "deferred path must preserve prior consecutive_errors"
+        );
+        assert_eq!(last_polled, Some(50));
+        assert_eq!(last_err.as_deref(), Some("rate-capped"));
+        assert_eq!(next, 999);
+    }
+
+    #[tokio::test]
+    async fn record_source_dead_pushes_next_poll_and_clears_errors() {
+        let pool = setup_db().await;
+        upsert_source(&pool, KIND_CHANNEL, "UCdead").await.unwrap();
+        // Accumulate some failures so we can prove they get cleared.
+        record_poll_failure(&pool, KIND_CHANNEL, "UCdead", "404", 100, 50)
+            .await
+            .unwrap();
+        record_poll_failure(&pool, KIND_CHANNEL, "UCdead", "404", 200, 60)
+            .await
+            .unwrap();
+
+        record_source_dead(
+            &pool,
+            KIND_CHANNEL,
+            "UCdead",
+            "channel not found",
+            9_999_999,
+            70,
+        )
+        .await
+        .unwrap();
+
+        let (errs, next, err): (i64, i64, Option<String>) = sqlx::query_as(
+            "SELECT consecutive_errors, next_poll_at, last_error \
+               FROM feed_sources WHERE kind='channel' AND source_id='UCdead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(errs, 0, "dead-channel path must clear the error counter");
+        assert_eq!(next, 9_999_999);
+        assert_eq!(err.as_deref(), Some("channel not found"));
+    }
+
+    #[tokio::test]
+    async fn record_sidecar_fallback_persists_timestamp() {
+        let pool = setup_db().await;
+        upsert_source(&pool, KIND_CHANNEL, "UCfb").await.unwrap();
+        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCfb", 12345)
+            .await
+            .unwrap();
+        let ts: Option<i64> = sqlx::query_scalar(
+            "SELECT last_sidecar_fallback_at FROM feed_sources \
+              WHERE kind='channel' AND source_id='UCfb'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ts, Some(12345));
+
+        // And it round-trips through `claim_due_sources` so the
+        // refresher can read it without an extra SELECT.
+        let claimed = claim_due_sources(&pool, 1_000_000, 10, 60).await.unwrap();
+        let row = claimed
+            .iter()
+            .find(|s| s.source_id == "UCfb")
+            .expect("UCfb is due");
+        assert_eq!(row.last_sidecar_fallback_at, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn capacity_counts_aggregates_in_one_query() {
+        let pool = setup_db().await;
+        // Three sources: one overdue, one polled recently, one fell
+        // back recently. Lets us prove every CASE branch fires.
+        for id in ["UCq1", "UCq2", "UCq3"] {
+            upsert_source(&pool, KIND_CHANNEL, id).await.unwrap();
+        }
+        let now: i64 = 100_000;
+        // UCq1 is overdue (next_poll_at < now) and was polled an hour ago.
+        sqlx::query(
+            "UPDATE feed_sources SET next_poll_at = ?, last_polled_at = ? \
+              WHERE source_id = 'UCq1'",
+        )
+        .bind(now - 60)
+        .bind(now - 3500)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // UCq2 was polled 10 minutes ago, next poll in the future.
+        sqlx::query(
+            "UPDATE feed_sources SET next_poll_at = ?, last_polled_at = ? \
+              WHERE source_id = 'UCq2'",
+        )
+        .bind(now + 1800)
+        .bind(now - 600)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // UCq3 fell back to the sidecar 10 minutes ago. Push its
+        // next_poll_at forward so it doesn't count as overdue.
+        sqlx::query("UPDATE feed_sources SET next_poll_at = ? WHERE source_id = 'UCq3'")
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .unwrap();
+        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCq3", now - 600)
+            .await
+            .unwrap();
+
+        let counts = capacity_counts(&pool, now).await.unwrap();
+        assert_eq!(counts.total_sources, 3);
+        assert_eq!(counts.queue_depth, 1, "only UCq1 is overdue");
+        // UCq1 and UCq2 were both polled in the last hour. UCq3 has
+        // no last_polled_at set so it doesn't count.
+        assert_eq!(counts.polls_last_hour, 2);
+        assert_eq!(counts.sidecar_fallbacks_last_hour, 1);
+    }
+
+    #[tokio::test]
+    async fn capacity_counts_handles_empty_table() {
+        // Empty feed_sources used to produce NULL from the conditional
+        // SUMs; the COALESCE wrappers in the query keep the FromRow
+        // derive happy.
+        let pool = setup_db().await;
+        let counts = capacity_counts(&pool, 0).await.unwrap();
+        assert_eq!(counts.total_sources, 0);
+        assert_eq!(counts.queue_depth, 0);
+        assert_eq!(counts.polls_last_hour, 0);
+        assert_eq!(counts.sidecar_fallbacks_last_hour, 0);
+    }
+
+    #[tokio::test]
+    async fn sidecar_fallbacks_in_last_hour_counts_only_recent() {
+        let pool = setup_db().await;
+        for id in ["UCa", "UCb", "UCc"] {
+            upsert_source(&pool, KIND_CHANNEL, id).await.unwrap();
+        }
+        // `now = 10_000`. Window starts at 10_000 - 3600 = 6_400.
+        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCa", 9_500)
+            .await
+            .unwrap();
+        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCb", 6_500)
+            .await
+            .unwrap();
+        // UCc fell back well outside the window.
+        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCc", 1_000)
+            .await
+            .unwrap();
+
+        let n = sidecar_fallbacks_in_last_hour(&pool, 10_000).await.unwrap();
+        assert_eq!(
+            n, 2,
+            "UCc fell back outside the 1h window and must not count"
+        );
     }
 }

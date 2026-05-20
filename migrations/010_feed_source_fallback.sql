@@ -1,0 +1,21 @@
+-- Persistent state for the sidecar-fallback rate cap on the feed refresher.
+--
+-- When the RSS poll for a source fails, the refresher can fall back to
+-- the youtubei.js discovery sidecar to (a) keep the new-videos feed
+-- fresh during YouTube's intermittent RSS outages and (b) classify
+-- whether the source is actually dead vs. temporarily unreachable.
+--
+-- We rate-limit those fallback calls per source to avoid pounding the
+-- sidecar (and the InnerTube `browse` endpoint behind it) during long
+-- outages. The cap needs to survive process restarts — an in-memory
+-- map would re-enable fallback for every source on every reboot, which
+-- defeats the cap entirely under a `cargo watch` / `docker restart`
+-- workflow.
+--
+-- `last_sidecar_fallback_at` records the unix-seconds timestamp of the
+-- most recent successful sidecar fallback dispatch for the source.
+-- `NULL` means "no fallback has ever been attempted." The refresher
+-- compares `now - last_sidecar_fallback_at` against the configured
+-- per-source cap (default 1 hour) before issuing another fallback.
+
+ALTER TABLE feed_sources ADD COLUMN last_sidecar_fallback_at INTEGER;

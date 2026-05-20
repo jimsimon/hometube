@@ -1,9 +1,10 @@
 //! Tests for likes, subscriptions, and blocked-video routes.
 //!
-//! The `like` and `subscribe` handlers do best-effort YouTube API lookups
-//! for metadata. When the key is fake (as in our test harness), they
-//! gracefully handle the failure and still complete the operation with
-//! partial data.
+//! The `like` handler accepts optional `{title, thumbnail_url}` in the
+//! POST body. With no body it still succeeds (the row gets NULL
+//! metadata columns). The `subscribe` and `block` handlers still do
+//! best-effort discovery-sidecar lookups for metadata; when the sidecar
+//! is unreachable (as in the unmocked harness) they degrade gracefully.
 
 mod common;
 
@@ -17,15 +18,61 @@ use serde_json::json;
 // ===========================================================================
 
 #[tokio::test]
-async fn like_creates_row_with_best_effort_metadata() {
+async fn like_creates_row_without_body() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
 
+    // No body supplied — the row gets NULL title/thumbnail columns and
+    // the like still succeeds.
     let res = app.server.post("/api/likes/vid-liked").await;
-    // The YouTube lookup will fail (fake key), but like still succeeds.
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["video_id"], "vid-liked");
+    assert!(body["video_title"].is_null());
+    assert!(body["video_thumbnail_url"].is_null());
     assert_eq!(body["visible"], false); // not allowlisted
+}
+
+#[tokio::test]
+async fn like_persists_client_supplied_metadata() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+
+    let res = app
+        .server
+        .post("/api/likes/vid-meta")
+        .json(&json!({
+            "title": "Player-Supplied Title",
+            "thumbnail_url": "https://thumb.test/x.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_title"], "Player-Supplied Title");
+    assert_eq!(body["video_thumbnail_url"], "https://thumb.test/x.jpg");
+}
+
+#[tokio::test]
+async fn relike_without_body_preserves_existing_metadata() {
+    // Re-liking after a soft-unlike must not blank out previously-stored
+    // title/thumbnail. The upsert's `COALESCE(excluded.x, video_likes.x)`
+    // handles this so a second client that lacks the metadata (e.g. a
+    // legacy build during a deploy window) can still re-like cleanly.
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+
+    app.server
+        .post("/api/likes/vid-keep")
+        .json(&json!({
+            "title": "Original Title",
+            "thumbnail_url": "https://thumb.test/orig.jpg",
+        }))
+        .await;
+    app.server.delete("/api/likes/vid-keep").await;
+
+    // Re-like with no body.
+    let res = app.server.post("/api/likes/vid-keep").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_title"], "Original Title");
+    assert_eq!(body["video_thumbnail_url"], "https://thumb.test/orig.jpg");
 }
 
 #[tokio::test]

@@ -595,38 +595,6 @@ async fn preview_playlist_with_mocked_discovery() {
 }
 
 // ===========================================================================
-// Likes with successful discovery metadata lookup
-// ===========================================================================
-
-#[tokio::test]
-async fn like_with_mocked_discovery_gets_title_and_thumb() {
-    let (app, _auth, mock_server) = boot_with_mock_discovery(AccountType::Child).await;
-
-    Mock::given(method("GET"))
-        .and(path("/videos/like-vid"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "like-vid",
-            "title": "Liked Video Title",
-            "description": "",
-            "channel_id": "UCx",
-            "channel_title": "Ch",
-            "thumbnails": {
-                "high": {"url": "http://thumb.test/liked.jpg", "width": 480, "height": 360}
-            },
-            "published_at": "2024-01-01T00:00:00Z",
-            "duration": null,
-            "view_count": null
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let res = app.server.post("/api/likes/like-vid").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    assert_eq!(body["video_id"], "like-vid");
-}
-
-// ===========================================================================
 // Search with playlist type
 // ===========================================================================
 

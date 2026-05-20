@@ -162,9 +162,13 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
 /// something to poll on a fresh database / after the schema migration.
 /// Playlists are intentionally skipped (deferred per the plan).
 async fn backfill_feed_sources(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    // The trailing `WHERE true` disambiguates the UPSERT's `ON CONFLICT`
+    // from a potential JOIN `ON` clause in the SELECT. Without it SQLite
+    // reports `near "DO": syntax error`. See https://www.sqlite.org/lang_upsert.html
+    // ("Parsing Ambiguity").
     sqlx::query(
         "INSERT INTO feed_sources (kind, source_id, next_poll_at) \
-         SELECT 'channel', channel_id, 0 FROM allowlisted_channels \
+         SELECT 'channel', channel_id, 0 FROM allowlisted_channels WHERE true \
          ON CONFLICT(kind, source_id) DO NOTHING",
     )
     .execute(pool)

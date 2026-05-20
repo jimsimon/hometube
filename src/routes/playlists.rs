@@ -354,6 +354,18 @@ pub async fn delete(
 #[derive(Debug, Deserialize)]
 pub struct AddVideoBody {
     pub video_id: String,
+    /// Optional caller-supplied metadata. When present, the handler
+    /// skips the sidecar lookup entirely. The player already has
+    /// these in scope when adding from the watch page, so passing
+    /// them avoids unnecessary InnerTube calls and gracefully
+    /// handles the case where the sidecar is rate-limited or
+    /// briefly unreachable.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub channel_title: Option<String>,
 }
 
 /// `POST /api/playlists/:id/videos` — append a video to the playlist.
@@ -370,20 +382,61 @@ pub async fn add_video(
         ));
     }
 
-    // Resolve a usable title/thumbnail/channel for the row.
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_video(&body.video_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("video not found on YouTube".into()))?;
-    let thumb = info
-        .thumbnails
-        .get("maxres")
-        .or_else(|| info.thumbnails.get("high"))
-        .or_else(|| info.thumbnails.get("standard"))
-        .or_else(|| info.thumbnails.get("medium"))
-        .or_else(|| info.thumbnails.get("default"))
-        .map(|t| t.url.clone());
+    // Resolve title/thumbnail/channel for the row. Prefer
+    // caller-supplied values; fall back to a best-effort sidecar
+    // lookup; degrade to the caller's title if even that's missing.
+    let body_title = body
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_thumb = body
+        .thumbnail_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_channel = body
+        .channel_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let info = if body_title.is_some() && body_thumb.is_some() {
+        // Caller has everything we need; don't hit the sidecar.
+        None
+    } else {
+        let yt = YoutubeClient::from_db(&state.db).await?;
+        yt.get_video(&body.video_id).await.ok().flatten()
+    };
+
+    let title = body_title
+        .map(str::to_string)
+        .or_else(|| info.as_ref().map(|i| i.title.clone()))
+        .ok_or_else(|| {
+            AppError::BadRequest("video not found on YouTube and no title provided".into())
+        })?;
+    let thumb = body_thumb.map(str::to_string).or_else(|| {
+        info.as_ref().and_then(|i| {
+            i.thumbnails
+                .get("maxres")
+                .or_else(|| i.thumbnails.get("high"))
+                .or_else(|| i.thumbnails.get("standard"))
+                .or_else(|| i.thumbnails.get("medium"))
+                .or_else(|| i.thumbnails.get("default"))
+                .map(|t| t.url.clone())
+        })
+    });
+    let channel_title = body_channel
+        .map(str::to_string)
+        .or_else(|| info.as_ref().and_then(|i| i.channel_title.clone()));
+    // Use the sidecar-canonical video ID when available — the sidecar
+    // normalises alternate forms (e.g. URL params, mixed-case IDs)
+    // that the caller may have sent. Falls back to the caller's
+    // string when no sidecar lookup happened (body-only path).
+    let canonical_video_id = info
+        .as_ref()
+        .map(|i| i.id.clone())
+        .unwrap_or_else(|| body.video_id.clone());
 
     // Compute the next free position.
     let next_position: i64 = sqlx::query_scalar(
@@ -405,10 +458,10 @@ pub async fn add_video(
          RETURNING id, video_id, video_title, video_thumbnail_url, channel_title, position, added_at",
     )
     .bind(playlist_id)
-    .bind(&info.id)
-    .bind(&info.title)
+    .bind(&canonical_video_id)
+    .bind(&title)
     .bind(thumb)
-    .bind(info.channel_title.clone())
+    .bind(channel_title)
     .bind(next_position)
     .fetch_one(&state.db)
     .await?;
