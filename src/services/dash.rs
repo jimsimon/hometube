@@ -279,15 +279,7 @@ pub fn synthesize_manifest<'a>(
     let opus_candidates = split_audio(is_opus);
     let mp4a_candidates = split_audio(is_mp4a);
 
-    // Trim each pool to one Representation per (height) or (language)
-    // so the player doesn't drown in Representations during cold-load
-    // discovery. Without `<SegmentBase indexRange>`, the player has
-    // to probe each Representation empirically; with too many it
-    // never converges and playback stalls. The trim runs per codec
-    // family so VP9 and AVC1 don't fight each other for the
-    // first-seen slot.
-    //
-    // After trim, drop any Representation without SegmentBase data:
+    // Drop any candidate without SegmentBase data *before* trim:
     // shaka-player requires indexRange for the isoff-on-demand
     // profile; bare <BaseURL> without SegmentBase triggers error
     // 4003 (DASH_NO_SEGMENT_INFO). Formats without ranges are
@@ -295,27 +287,38 @@ pub fn synthesize_manifest<'a>(
     // load, but playback works. After background probes or a second
     // extraction fills the cache, the full set appears.
     //
-    // Trim-then-filter (rather than filter-then-trim) is intentional:
-    // the trim step takes first-seen per height/language, and the
-    // earlier `dedupe_prefer_with_ranges` pass has already promoted
-    // ranged variants over un-ranged duplicates of the same media,
-    // so the trim's first-seen candidate is the right one to keep.
-    let trim_video = |candidates: &[&'a Format]| -> Vec<&'a Format> {
-        trim_video_representations(candidates)
-            .into_iter()
-            .filter(|f| box_ranges.contains_key(&f.format_id))
-            .collect()
+    // Filter-before-trim (rather than trim-then-filter) is the
+    // intentional behavior: the trim step takes first-seen per
+    // height/language, so removing un-ranged candidates first lets
+    // a ranged variant win the slot when an un-ranged variant
+    // happens to come earlier in the list. `dedupe_prefer_with_ranges`
+    // already handles the "same media, two protocol variants" case,
+    // but the per-height trim also collapses *different* media at
+    // the same height (e.g. 30fps vs 60fps variants), where the
+    // dedupe pass doesn't apply. Filter-first ensures we don't
+    // accidentally pick an un-ranged 30fps over a ranged 60fps at
+    // the same height and then drop the height entirely.
+    //
+    // The trim then takes one Representation per (height) or
+    // (language) so the player doesn't drown in Representations
+    // during cold-load discovery. Without `<SegmentBase indexRange>`,
+    // the player has to probe each Representation empirically; with
+    // too many it never converges and playback stalls. The trim
+    // runs per codec family so VP9 and AVC1 don't fight each other
+    // for the first-seen slot.
+    let has_ranges = |f: &&'a Format| box_ranges.contains_key(&f.format_id);
+    let trim_video = |candidates: Vec<&'a Format>| -> Vec<&'a Format> {
+        let ranged: Vec<&'a Format> = candidates.into_iter().filter(has_ranges).collect();
+        trim_video_representations(&ranged)
     };
-    let trim_audio = |candidates: &[&'a Format]| -> Vec<&'a Format> {
-        trim_audio_representations(candidates)
-            .into_iter()
-            .filter(|f| box_ranges.contains_key(&f.format_id))
-            .collect()
+    let trim_audio = |candidates: Vec<&'a Format>| -> Vec<&'a Format> {
+        let ranged: Vec<&'a Format> = candidates.into_iter().filter(has_ranges).collect();
+        trim_audio_representations(&ranged)
     };
-    let vp9_video = trim_video(&vp9_candidates);
-    let avc1_video = trim_video(&avc1_candidates);
-    let opus_audio = trim_audio(&opus_candidates);
-    let mp4a_audio = trim_audio(&mp4a_candidates);
+    let vp9_video = trim_video(vp9_candidates);
+    let avc1_video = trim_video(avc1_candidates);
+    let opus_audio = trim_audio(opus_candidates);
+    let mp4a_audio = trim_audio(mp4a_candidates);
 
     if vp9_video.is_empty()
         && avc1_video.is_empty()
@@ -1537,6 +1540,51 @@ mod tests {
             mpd.matches("<Representation ").count(),
             3,
             "expected 3 audio Representations:\n{mpd}"
+        );
+    }
+
+    /// Filter-before-trim: when two distinct candidates exist at the
+    /// same height (e.g. 30fps vs 60fps variants — `dedupe_prefer_with_ranges`
+    /// considers them different media because their `tbr` differs),
+    /// the per-height trim takes first-seen. Without filter-before-trim
+    /// the un-ranged first candidate would win the slot and then be
+    /// dropped by the range filter, leaving the height empty. With
+    /// filter-before-trim the un-ranged candidate is dropped before
+    /// the trim runs, so the ranged variant wins the slot and the
+    /// height survives.
+    #[test]
+    fn synthesize_manifest_prefers_ranged_at_same_height() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        // Two distinct 1080p VP9 candidates: a 30fps un-ranged one
+        // listed first, a 60fps ranged one listed second. Different
+        // `tbr` makes the dedupe pass treat them as separate media.
+        let mut unranged_30fps =
+            https_format("248-30", Some(1080), Some("vp9"), Some("none"), None);
+        unranged_30fps.tbr = Some(800.0);
+        unranged_30fps.fps = Some(30.0);
+        let mut ranged_60fps = https_format("248-60", Some(1080), Some("vp9"), Some("none"), None);
+        ranged_60fps.tbr = Some(1200.0);
+        ranged_60fps.fps = Some(60.0);
+        let formats = vec![unranged_30fps, ranged_60fps];
+        // Only the 60fps variant has box ranges.
+        let br = dummy_ranges(&["248-60"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(
+            mpd.contains(r#"id="248-60""#),
+            "ranged 60fps variant should win the 1080p slot:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="248-30""#),
+            "un-ranged 30fps variant must be dropped:\n{mpd}"
+        );
+        // The 1080p height must survive — this is the regression
+        // we're guarding against (un-ranged-wins-slot-then-gets-dropped
+        // would leave the manifest with zero video Representations).
+        assert_eq!(
+            mpd.matches("<Representation ").count(),
+            1,
+            "exactly one 1080p Representation expected:\n{mpd}"
         );
     }
 
