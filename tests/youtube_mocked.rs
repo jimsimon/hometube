@@ -409,11 +409,14 @@ async fn subscribe_and_list_visibility() {
 
 #[tokio::test]
 async fn new_videos_feed_with_mocked_discovery() {
-    let (app, auth, mock_server) = boot_with_mock_discovery(AccountType::Child).await;
+    // The new-videos feed now reads from the `feed_source_items` cache
+    // populated by the background refresher. We bypass the refresher
+    // here and seed the cache directly so we can exercise the handler
+    // path in isolation.
+    let (app, auth, _mock_server) = boot_with_mock_discovery(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Allowlist a channel.
     sqlx::query(
         "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
          VALUES (?, 'UCfeed', 'Feed Channel', ?)",
@@ -424,23 +427,26 @@ async fn new_videos_feed_with_mocked_discovery() {
     .await
     .unwrap();
 
-    // Mock channel-videos (sidecar handles uploads resolution).
-    Mock::given(method("GET"))
-        .and(path_regex("/channel-videos/UCfeed.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{
-                "video_id": "new-vid-1",
-                "title": "New Upload",
-                "channel_id": "UCfeed",
-                "channel_title": "Feed Channel",
-                "thumbnails": {"high": {"url": "http://t/new.jpg"}},
-                "published_at": "2024-06-15T10:00:00Z",
-                "position": 0
-            }],
-            "next_page_token": null
-        })))
-        .mount(&mock_server)
-        .await;
+    hometube::services::feed_cache::upsert_source(&app.pool, "channel", "UCfeed")
+        .await
+        .unwrap();
+    hometube::services::feed_cache::replace_source_items(
+        &app.pool,
+        "channel",
+        "UCfeed",
+        &[hometube::services::feed_cache::ItemRow {
+            video_id: "new-vid-1".into(),
+            title: "New Upload".into(),
+            channel_id: Some("UCfeed".into()),
+            channel_title: Some("Feed Channel".into()),
+            thumbnail_url: Some("http://t/new.jpg".into()),
+            published_at: Some(1_718_445_600),
+            published_raw: Some("2024-06-15T10:00:00Z".into()),
+        }],
+        1_718_445_600,
+    )
+    .await
+    .unwrap();
 
     let res = app.server.get("/api/feed/new-videos").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -485,11 +491,13 @@ async fn block_video_with_mocked_discovery_title() {
 
 #[tokio::test]
 async fn up_next_from_channel_with_mocked_discovery() {
-    let (app, auth, mock_server) = boot_with_mock_discovery(AccountType::Child).await;
+    // Up-next-by-channel now reads from the `feed_source_items` cache
+    // populated by the background refresher (avoiding a sidecar
+    // round-trip on every request). Seed the cache directly.
+    let (app, auth, _mock_server) = boot_with_mock_discovery(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Allowlist the channel.
     sqlx::query(
         "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
          VALUES (?, 'UCnext', 'Next', ?)",
@@ -500,21 +508,26 @@ async fn up_next_from_channel_with_mocked_discovery() {
     .await
     .unwrap();
 
-    Mock::given(method("GET"))
-        .and(path_regex("/channel-videos/UCnext.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{
-                "video_id": "next-vid",
-                "title": "Next Video",
-                "channel_id": "UCnext",
-                "channel_title": "Next",
-                "thumbnails": {},
-                "position": 0
-            }],
-            "next_page_token": null
-        })))
-        .mount(&mock_server)
-        .await;
+    hometube::services::feed_cache::upsert_source(&app.pool, "channel", "UCnext")
+        .await
+        .unwrap();
+    hometube::services::feed_cache::replace_source_items(
+        &app.pool,
+        "channel",
+        "UCnext",
+        &[hometube::services::feed_cache::ItemRow {
+            video_id: "next-vid".into(),
+            title: "Next Video".into(),
+            channel_id: Some("UCnext".into()),
+            channel_title: Some("Next".into()),
+            thumbnail_url: None,
+            published_at: Some(1_700_000_000),
+            published_raw: Some("2023-11-14T22:13:20Z".into()),
+        }],
+        1_700_000_000,
+    )
+    .await
+    .unwrap();
 
     let res = app
         .server

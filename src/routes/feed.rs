@@ -19,18 +19,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 use crate::middleware::auth::CurrentAccount;
-use crate::services::access::{
-    can_child_view, child_allowlisted_channel_ids, child_allowlisted_playlist_ids,
-};
-use crate::services::youtube::YoutubeClient;
+use crate::services::access::can_child_view;
+use crate::services::feed_cache;
 use crate::state::AppState;
 
 /// Default limit for "continue watching".
 const CONTINUE_LIMIT: i64 = 20;
 /// Hard cap on the new-videos feed.
 const NEW_VIDEOS_LIMIT: usize = 30;
-/// Per-channel/playlist sample size when building the new-videos feed.
-const PER_SOURCE_LIMIT: u32 = 5;
 
 #[derive(Debug, Serialize, sqlx::FromRow, Clone)]
 pub struct ContinueWatchingItem {
@@ -88,103 +84,151 @@ pub struct NewVideoItem {
     pub source_id: String,
 }
 
+/// `GET /api/admin/feed-refresher/settings` — parent-only.
+///
+/// Returns the live (post-validation) refresher tunables alongside the
+/// raw `app_config` strings. When `raw` differs from the effective
+/// value, the UI can show a warning so an operator who wrote
+/// out-of-range garbage directly via SQL can spot the discrepancy.
+pub async fn admin_get_refresher_settings(
+    State(state): State<AppState>,
+) -> AppResult<Json<RefresherSettings>> {
+    let (cfg, raw) =
+        crate::services::feed_refresher::RefresherConfig::load_with_raw(&state.db).await;
+    Ok(Json(RefresherSettings {
+        dispatch_delay_ms: cfg.dispatch_delay.as_millis() as u64,
+        max_inflight: cfg.max_inflight as u64,
+        batch_size: cfg.batch_size,
+        idle_tick_s: cfg.idle_tick.as_secs(),
+        channel_interval_s: cfg.channel_interval.as_secs(),
+        raw: RefresherSettingsRaw {
+            dispatch_delay_ms: raw.dispatch_delay_ms,
+            max_inflight: raw.max_inflight,
+            batch_size: raw.batch_size,
+            idle_tick_s: raw.idle_tick_s,
+            channel_interval_s: raw.channel_interval_s,
+        },
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct RefresherSettings {
+    pub dispatch_delay_ms: u64,
+    pub max_inflight: u64,
+    pub batch_size: i64,
+    pub idle_tick_s: u64,
+    pub channel_interval_s: u64,
+    /// Raw string values from `app_config` (or null if the key is
+    /// unset). When a raw value disagrees with the effective field
+    /// above, it was rejected by range validation in
+    /// `RefresherConfig::load_with_raw`.
+    pub raw: RefresherSettingsRaw,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RefresherSettingsRaw {
+    pub dispatch_delay_ms: Option<String>,
+    pub max_inflight: Option<String>,
+    pub batch_size: Option<String>,
+    pub idle_tick_s: Option<String>,
+    pub channel_interval_s: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRefresherSettings {
+    #[serde(default)]
+    pub dispatch_delay_ms: Option<u64>,
+    #[serde(default)]
+    pub max_inflight: Option<u64>,
+    #[serde(default)]
+    pub batch_size: Option<i64>,
+    #[serde(default)]
+    pub idle_tick_s: Option<u64>,
+    #[serde(default)]
+    pub channel_interval_s: Option<u64>,
+}
+
+/// `PUT /api/admin/feed-refresher/settings` — parent-only.
+///
+/// Updates any subset of the live refresher tunables. The refresher
+/// loop re-reads `app_config` on its next iteration, so changes take
+/// effect within `idle_tick_s` seconds without a restart. Range checks
+/// here mirror the ones in `RefresherConfig::load` so that values
+/// rejected at write time can't sneak in via direct SQL.
+pub async fn admin_put_refresher_settings(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateRefresherSettings>,
+) -> AppResult<Json<RefresherSettings>> {
+    use crate::error::AppError;
+    use crate::services::feed_refresher::{
+        KEY_BATCH_SIZE, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_IDLE_TICK_S,
+        KEY_MAX_INFLIGHT,
+    };
+    use crate::services::setup::set_config_value;
+
+    if let Some(v) = body.dispatch_delay_ms {
+        if !(50..=600_000).contains(&v) {
+            return Err(AppError::BadRequest(
+                "dispatch_delay_ms must be 50..=600000".into(),
+            ));
+        }
+        set_config_value(&state.db, KEY_DISPATCH_DELAY_MS, &v.to_string()).await?;
+    }
+    if let Some(v) = body.max_inflight {
+        if !(1..=64).contains(&v) {
+            return Err(AppError::BadRequest("max_inflight must be 1..=64".into()));
+        }
+        set_config_value(&state.db, KEY_MAX_INFLIGHT, &v.to_string()).await?;
+    }
+    if let Some(v) = body.batch_size {
+        if !(1..=500).contains(&v) {
+            return Err(AppError::BadRequest("batch_size must be 1..=500".into()));
+        }
+        set_config_value(&state.db, KEY_BATCH_SIZE, &v.to_string()).await?;
+    }
+    if let Some(v) = body.idle_tick_s {
+        if !(1..=3600).contains(&v) {
+            return Err(AppError::BadRequest("idle_tick_s must be 1..=3600".into()));
+        }
+        set_config_value(&state.db, KEY_IDLE_TICK_S, &v.to_string()).await?;
+    }
+    if let Some(v) = body.channel_interval_s {
+        if !(60..=86_400).contains(&v) {
+            return Err(AppError::BadRequest(
+                "channel_interval_s must be 60..=86400".into(),
+            ));
+        }
+        set_config_value(&state.db, KEY_CHANNEL_INTERVAL_S, &v.to_string()).await?;
+    }
+    admin_get_refresher_settings(State(state)).await
+}
+
+/// `GET /api/admin/feed-sources` — parent-only diagnostics.
+///
+/// Returns one row per cached source with its poll bookkeeping
+/// (last_polled_at, last_success_at, last_error, consecutive_errors,
+/// next_poll_at) plus the number of items currently held. Surfaces
+/// poll health without requiring SQLite access.
+pub async fn admin_list_sources(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<feed_cache::FeedSourceStatus>>> {
+    let rows = feed_cache::list_source_status(&state.db).await?;
+    Ok(Json(rows))
+}
+
 /// `GET /api/feed/new-videos`.
+///
+/// Reads from the `feed_source_items` cache populated by the
+/// [`crate::services::feed_refresher`] background task. The handler
+/// performs no network I/O and no per-item access-control checks; both
+/// are folded into the single SQL query inside
+/// [`feed_cache::feed_for_child`].
 pub async fn new_videos(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<NewVideoItem>>> {
-    let yt = match YoutubeClient::from_db(&state.db).await {
-        Ok(y) => y,
-        Err(_) => {
-            // No API key configured — return empty list.
-            return Ok(Json(Vec::new()));
-        }
-    };
-
-    let channels = child_allowlisted_channel_ids(&state.db, current.id).await?;
-    let playlists = child_allowlisted_playlist_ids(&state.db, current.id).await?;
-
-    let mut items: Vec<NewVideoItem> = Vec::new();
-
-    for channel_id in &channels {
-        match yt
-            .list_channel_videos(channel_id, PER_SOURCE_LIMIT, None)
-            .await
-        {
-            Ok(page) => {
-                for it in page.items {
-                    items.push(NewVideoItem {
-                        video_id: it.video_id,
-                        title: it.title,
-                        channel_id: it.channel_id,
-                        channel_title: it.channel_title,
-                        thumbnail_url: pick_thumbnail(&it.thumbnails),
-                        published_at: it.published_at,
-                        source_kind: "channel".into(),
-                        source_id: channel_id.clone(),
-                    });
-                }
-            }
-            Err(err) => tracing::warn!(%channel_id, %err, "failed to list channel videos"),
-        }
-    }
-    for playlist_id in &playlists {
-        match yt
-            .list_playlist_items(playlist_id, PER_SOURCE_LIMIT, None)
-            .await
-        {
-            Ok(page) => {
-                for it in page.items {
-                    items.push(NewVideoItem {
-                        video_id: it.video_id,
-                        title: it.title,
-                        channel_id: it.channel_id,
-                        channel_title: it.channel_title,
-                        thumbnail_url: pick_thumbnail(&it.thumbnails),
-                        published_at: it.published_at,
-                        source_kind: "playlist".into(),
-                        source_id: playlist_id.clone(),
-                    });
-                }
-            }
-            Err(err) => tracing::warn!(%playlist_id, %err, "failed to list playlist items"),
-        }
-    }
-
-    // Dedupe by video_id, preferring the latest published_at.
-    items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|it| seen.insert(it.video_id.clone()));
-    items.truncate(NEW_VIDEOS_LIMIT);
-
-    // Drop videos the parent has since blocked.
-    let mut filtered = Vec::with_capacity(items.len());
-    for it in items {
-        if can_child_view(
-            &state.db,
-            current.id,
-            &it.video_id,
-            it.channel_id.as_deref(),
-            std::slice::from_ref(&it.source_id),
-        )
-        .await
-        .unwrap_or(false)
-        {
-            filtered.push(it);
-        }
-    }
-    Ok(Json(filtered))
-}
-
-fn pick_thumbnail(
-    thumbs: &std::collections::HashMap<String, crate::services::youtube::ThumbnailInfo>,
-) -> Option<String> {
-    for key in ["maxres", "high", "standard", "medium", "default"] {
-        if let Some(t) = thumbs.get(key) {
-            return Some(t.url.clone());
-        }
-    }
-    None
+    let items = feed_cache::feed_for_child(&state.db, current.id, NEW_VIDEOS_LIMIT).await?;
+    Ok(Json(items))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,67 +360,46 @@ async fn up_next_from_playlist(
 }
 
 async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<Vec<UpNextItem>> {
-    let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
-        Ok(y) => y,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let page = yt
-        .list_channel_videos(channel_id, 25, None)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!(%err, "list_channel_videos failed");
-            crate::services::youtube::Page {
-                items: Vec::new(),
-                next_page_token: None,
-            }
-        });
-    Ok(page
-        .items
+    // Prefer the cached items populated by the feed refresher; this
+    // avoids a sidecar round-trip on every up-next request and reuses
+    // the same data the new-videos feed shows.
+    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
+               FROM feed_source_items \
+              WHERE kind = ? AND source_id = ? \
+              ORDER BY COALESCE(published_at, 0) DESC \
+              LIMIT 25",
+        )
+        .bind(feed_cache::KIND_CHANNEL)
+        .bind(channel_id)
+        .fetch_all(&state.db)
+        .await?;
+    Ok(rows
         .into_iter()
-        .map(|it| UpNextItem {
-            video_id: it.video_id,
-            title: it.title,
-            channel_id: it.channel_id.or_else(|| Some(channel_id.to_string())),
-            channel_title: it.channel_title,
-            thumbnail_url: pick_thumbnail(&it.thumbnails),
+        .map(|(video_id, title, ch_id, ch_title, thumb)| UpNextItem {
+            video_id,
+            title,
+            channel_id: ch_id.or_else(|| Some(channel_id.to_string())),
+            channel_title: ch_title,
+            thumbnail_url: thumb,
         })
         .collect())
 }
 
 async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<Vec<UpNextItem>> {
-    let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
-        Ok(y) => y,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let channels = child_allowlisted_channel_ids(&state.db, child_id).await?;
-    let playlists = child_allowlisted_playlist_ids(&state.db, child_id).await?;
-    let mut out: Vec<UpNextItem> = Vec::new();
-    for channel_id in &channels {
-        if let Ok(page) = yt.list_channel_videos(channel_id, 5, None).await {
-            for it in page.items {
-                out.push(UpNextItem {
-                    video_id: it.video_id,
-                    title: it.title,
-                    channel_id: it.channel_id.or_else(|| Some(channel_id.clone())),
-                    channel_title: it.channel_title,
-                    thumbnail_url: pick_thumbnail(&it.thumbnails),
-                });
-            }
-        }
-    }
-    for playlist_id in &playlists {
-        if let Ok(page) = yt.list_playlist_items(playlist_id, 5, None).await {
-            for it in page.items {
-                out.push(UpNextItem {
-                    video_id: it.video_id,
-                    title: it.title,
-                    channel_id: it.channel_id,
-                    channel_title: it.channel_title,
-                    thumbnail_url: pick_thumbnail(&it.thumbnails),
-                });
-            }
-        }
-    }
-    Ok(out)
+    // Reuse the new-videos feed builder; the up-next list is exactly
+    // "new videos minus the one currently playing", which the caller
+    // applies in `up_next`.
+    let items = feed_cache::feed_for_child(&state.db, child_id, 50).await?;
+    Ok(items
+        .into_iter()
+        .map(|it| UpNextItem {
+            video_id: it.video_id,
+            title: it.title,
+            channel_id: it.channel_id,
+            channel_title: it.channel_title,
+            thumbnail_url: it.thumbnail_url,
+        })
+        .collect())
 }

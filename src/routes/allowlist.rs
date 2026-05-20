@@ -91,6 +91,19 @@ pub async fn add_channel(
     .bind(current.id)
     .fetch_one(&state.db)
     .await?;
+
+    // Seed the feed-source cache so this channel will be polled by
+    // the background refresher. Failures here are logged but do not
+    // fail the allowlist write — the user has already committed.
+    if let Err(err) = crate::services::feed_cache::upsert_source(
+        &state.db,
+        crate::services::feed_cache::KIND_CHANNEL,
+        &info.id,
+    )
+    .await
+    {
+        tracing::warn!(channel_id = %info.id, %err, "failed to seed feed source for newly allowlisted channel");
+    }
     Ok(Json(row))
 }
 

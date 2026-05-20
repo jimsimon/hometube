@@ -159,6 +159,12 @@ pub fn router(state: AppState) -> Router {
                 .delete(system::delete_cookies),
         )
         .route("/api/system/pot-server", get(system::get_pot_server_status))
+        // Feed-cache diagnostics + refresher tunables (parent-only)
+        .route("/api/admin/feed-sources", get(feed::admin_list_sources))
+        .route(
+            "/api/admin/feed-refresher/settings",
+            get(feed::admin_get_refresher_settings).put(feed::admin_put_refresher_settings),
+        )
         // Family management (Phase 13)
         .route(
             "/api/family/members",
@@ -468,7 +474,8 @@ pub fn router(state: AppState) -> Router {
     let test_login_routes = Router::new()
         .route("/api/test/seed", post(test_login::seed))
         .route("/api/test/login-as", post(test_login::login_as))
-        .route("/api/test/reset", post(test_login::reset));
+        .route("/api/test/reset", post(test_login::reset))
+        .route("/api/test/seed-feed-item", post(test_login::seed_feed_item));
 
     #[allow(unused_mut)]
     let mut router = Router::new()

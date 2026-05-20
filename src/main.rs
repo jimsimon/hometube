@@ -17,6 +17,7 @@ use hometube::{config, db, state};
 
 use hometube::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
 use hometube::services::dash;
+use hometube::services::feed_refresher;
 use hometube::services::setup::{
     get_config_value, set_config_value, KEY_COOKIE_SECRET, KEY_YTDLP_COOKIES,
 };
@@ -84,6 +85,19 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Backfill the feed_sources cache with every currently-allowlisted
+    // channel. New rows get `next_poll_at = 0` so the refresher
+    // schedules them on its next tick. Idempotent — re-runs every
+    // startup are no-ops.
+    if let Err(err) = backfill_feed_sources(&pool).await {
+        warn!(%err, "failed to backfill feed_sources from allowlist");
+    }
+
+    // Spawn the new-videos feed refresher. Runs forever; loops on
+    // `feed_sources.next_poll_at` and writes results into the
+    // `feed_source_items` cache that backs `/api/feed/new-videos`.
+    feed_refresher::spawn(pool.clone());
+
     let mut app_state = state::AppState::new(cfg.clone(), pool, cookie_key);
     if let Some(sched) = scheduler {
         app_state = app_state.with_scheduler(sched);
@@ -141,6 +155,21 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
     set_config_value(pool, KEY_COOKIE_SECRET, &encoded).await?;
     info!("generated new cookie signing key");
     Ok(Key::from(&bytes[..]))
+}
+
+/// Insert a `feed_sources` row for every distinct
+/// `allowlisted_channels.channel_id` so the background refresher has
+/// something to poll on a fresh database / after the schema migration.
+/// Playlists are intentionally skipped (deferred per the plan).
+async fn backfill_feed_sources(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO feed_sources (kind, source_id, next_poll_at) \
+         SELECT 'channel', channel_id, 0 FROM allowlisted_channels \
+         ON CONFLICT(kind, source_id) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Seed `metadata_cache_ttl_hours` with the default if the parent

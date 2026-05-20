@@ -15,6 +15,8 @@
 pub mod access;
 pub mod cron;
 pub mod dash;
+pub mod feed_cache;
+pub mod feed_refresher;
 pub mod notification_forwarders;
 pub mod notifications;
 pub mod segment_ranges;
@@ -22,4 +24,5 @@ pub mod segment_store;
 pub mod setup;
 pub mod video_cache;
 pub mod youtube;
+pub mod youtube_rss;
 pub mod ytdlp;
