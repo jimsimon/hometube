@@ -108,38 +108,40 @@ pub async fn add_channel(
 }
 
 /// `DELETE /api/children/:id/allowlist/channels/:channelId`.
+///
+/// Performs the allowlist delete and the optional `feed_sources` GC
+/// inside a single transaction so an observer can never witness "no
+/// child references this channel but feed_sources still holds it" —
+/// the diagnostics page and the refresher both see a consistent view.
 pub async fn delete_channel(
     State(state): State<AppState>,
     Path((child_id, channel_id)): Path<(i64, String)>,
 ) -> AppResult<StatusCode> {
     require_child_id(&state, child_id).await?;
+
+    let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM allowlisted_channels WHERE child_account_id = ? AND channel_id = ?")
         .bind(child_id)
         .bind(&channel_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     // If no other child still has this channel allowlisted, drop the
     // matching `feed_sources` row so the refresher stops polling it
     // immediately rather than waiting up to a day for the `feed_gc`
     // cron. The `feed_source_items` rows cascade via FK.
-    let still_used: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = ?",
-    )
-    .bind(&channel_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    let still_used: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = ?")
+            .bind(&channel_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if still_used == 0 {
-        if let Err(err) =
-            sqlx::query("DELETE FROM feed_sources WHERE kind = 'channel' AND source_id = ?")
-                .bind(&channel_id)
-                .execute(&state.db)
-                .await
-        {
-            tracing::warn!(%channel_id, %err, "failed to GC feed_sources row after channel delete");
-        }
+        sqlx::query("DELETE FROM feed_sources WHERE kind = 'channel' AND source_id = ?")
+            .bind(&channel_id)
+            .execute(&mut *tx)
+            .await?;
     }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
