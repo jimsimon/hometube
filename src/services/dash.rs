@@ -315,12 +315,38 @@ pub fn synthesize_manifest(
     // `Role=main` is computed across both audio codec pools combined
     // so the main-language signal is consistent regardless of which
     // codec the player picks at startup.
+    //
+    // The chain order (opus first, then mp4a) is deliberate: if the
+    // `original` `format_note` marker is only present on one codec
+    // family (rare but possible — YouTube sometimes only marks the
+    // opus track), iterating opus first means the opus original wins
+    // and the chosen language is consistent with the preferred codec
+    // ladder. When no `original` marker is present in either pool,
+    // `pick_main_audio_lang` falls back to highest
+    // `language_preference`, which is reported by yt-dlp identically
+    // for both codec families.
     let all_audio: Vec<&Format> = opus_audio
         .iter()
         .chain(mp4a_audio.iter())
         .copied()
         .collect();
     let main_lang = pick_main_audio_lang(&all_audio);
+
+    // Whether the manifest as a whole carries more than one audio
+    // language. Used to gate `<Role value="main">` emission so the
+    // marker only appears when there's actually ambiguity for the
+    // player to resolve. Computed across both codec pools combined:
+    // if opus has {en, es} and mp4a has {en} only, the manifest has
+    // ambiguity even though the mp4a pool taken alone does not. This
+    // keeps the `main` marker symmetric across codec families so
+    // whichever pool shaka picks gets the same signal.
+    let multi_language_audio = {
+        let mut langs = std::collections::BTreeSet::new();
+        for f in &all_audio {
+            langs.insert(f.language.clone().unwrap_or_default());
+        }
+        langs.len() > 1
+    };
 
     let dur_str = duration
         .map(|d| format!("PT{:.3}S", d))
@@ -345,7 +371,15 @@ pub fn synthesize_manifest(
     // rejected by Chrome/Firefox, so we pin a concrete profile/level
     // that covers the AVC1 ladder YouTube serves (High@4.0 = up to
     // 1080p). VP9 accepts a bare codec string.
-    push_video_adaptation_set(&mut mpd, "video/webm", "vp9", &vp9_video, secret, video_id, box_ranges);
+    push_video_adaptation_set(
+        &mut mpd,
+        "video/webm",
+        "vp9",
+        &vp9_video,
+        secret,
+        video_id,
+        box_ranges,
+    );
     push_video_adaptation_set(
         &mut mpd,
         "video/mp4",
@@ -364,6 +398,7 @@ pub fn synthesize_manifest(
         "opus",
         &opus_audio,
         main_lang.as_deref(),
+        multi_language_audio,
         secret,
         video_id,
         box_ranges,
@@ -374,6 +409,7 @@ pub fn synthesize_manifest(
         "mp4a.40.2",
         &mp4a_audio,
         main_lang.as_deref(),
+        multi_language_audio,
         secret,
         video_id,
         box_ranges,
@@ -444,6 +480,15 @@ fn push_video_adaptation_set(
 
 /// Emit one `<AdaptationSet>` per language for an audio codec family.
 /// No-op if the pool is empty.
+///
+/// `multi_language_audio` indicates whether the manifest as a whole
+/// carries more than one audio language (across *both* codec pools).
+/// The caller computes this once across the combined pool so the
+/// `<Role value="main">` marker stays symmetric — if opus has
+/// {en, es} but mp4a has {en} only, we still want the `main` marker
+/// on whichever pool shaka picks. Without the cross-pool flag, the
+/// single-language mp4a pool would skip the marker even though the
+/// manifest does have language ambiguity to resolve.
 #[allow(clippy::too_many_arguments)]
 fn push_audio_adaptation_sets(
     mpd: &mut String,
@@ -451,6 +496,7 @@ fn push_audio_adaptation_sets(
     default_codecs: &str,
     formats: &[&Format],
     main_lang: Option<&str>,
+    multi_language_audio: bool,
     secret: &[u8],
     video_id: &str,
     box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
@@ -478,10 +524,11 @@ fn push_audio_adaptation_sets(
             mime_type, lang_attr
         ));
         // Mark the original-language audio as `Role=main` so the
-        // player's `prioritizeRoleMain` selects it. Skip when only
-        // one language is present in this codec pool (no ambiguity
-        // to resolve).
-        if main_lang == Some(lang.as_str()) && lang_groups.len() > 1 {
+        // player's `prioritizeRoleMain` selects it. Skip when the
+        // manifest as a whole has only one audio language (no
+        // ambiguity to resolve — `multi_language_audio` is computed
+        // across both codec pools, not just this one).
+        if main_lang == Some(lang.as_str()) && multi_language_audio {
             mpd.push_str("    <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n");
         }
         for f in group {
@@ -1088,14 +1135,22 @@ mod tests {
         );
     }
 
-    /// The synthesizer is vp9-only: avc1 and av01 candidates are
-    /// dropped at the `is_usable` filter. When duplicate vp9 variants
-    /// exist at the same height (e.g. `https` vs `http_dash_segments`
-    /// from `formats=duplicate`), the per-height trim collapses them
-    /// to a single Representation — first-seen wins. This keeps
-    /// the player's discovery overhead bounded on cold load (without
-    /// `<SegmentBase indexRange>`, the player probes each Representation
-    /// empirically; too many never converges).
+    /// Per-codec-family per-height trim. Within a single codec
+    /// family (vp9 here), duplicate variants at the same height
+    /// (e.g. `https` vs `http_dash_segments` from `formats=duplicate`)
+    /// collapse to a single Representation — first-seen wins. This
+    /// keeps the player's discovery overhead bounded on cold load
+    /// (without `<SegmentBase indexRange>`, the player probes each
+    /// Representation empirically; too many never converges).
+    ///
+    /// av01 is filtered out at the `is_usable` codec gate (the
+    /// synthesizer only surfaces vp9 + avc1 video). avc1 candidates
+    /// are also included to confirm they don't compete with vp9 for
+    /// the per-height trim slot — they get dropped here by the
+    /// `has_ranges` filter (not seeded in `dummy_ranges`), exercising
+    /// the box-range gate rather than the codec gate. Codec-gate
+    /// behavior for avc1 is covered separately by
+    /// `synthesize_manifest_emits_avc1_when_no_vp9`.
     #[test]
     fn synthesize_manifest_picks_one_codec_per_height() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1104,8 +1159,8 @@ mod tests {
         let mut dashy_720 = https_format("247-dashy", Some(720), Some("vp9"), Some("none"), None);
         dashy_720.protocol = Some("http_dash_segments".into());
         let formats = vec![
-            // 1080p: vp9 wins, avc1/av01 are filtered out by codec
-            // gate; duplicate vp9 variant is dropped by per-height trim.
+            // 1080p: vp9 wins per-height; av01 dropped at codec gate;
+            // duplicate vp9 variant dropped by per-height trim.
             https_format("248", Some(1080), Some("vp9"), Some("none"), None),
             https_format("137", Some(1080), Some("avc1.640028"), Some("none"), None),
             https_format("399", Some(1080), Some("av01.0.08M.08"), Some("none"), None),
@@ -1116,21 +1171,42 @@ mod tests {
             https_format("398", Some(720), Some("av01.0.05M.08"), Some("none"), None),
             dashy_720,
         ];
+        // Only vp9 itags seeded with ranges: avc1 candidates pass the
+        // codec gate but get dropped by the box-range filter.
         let br = dummy_ranges(&["248", "247", "248-dashy", "247-dashy"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
 
-        // One Representation per height = 2 total.
+        // One Representation per height = 2 total (the vp9 ladder).
+        // avc1 reps were dropped because their itags lack box ranges,
+        // so the manifest has only the VP9 video/webm AdaptationSet.
         let rep_count = mpd.matches("<Representation ").count();
         assert_eq!(rep_count, 2, "expected 2 video Representations:\n{mpd}");
+        assert!(
+            !mpd.contains(r#"mimeType="video/mp4""#),
+            "no AVC1 AdaptationSet expected when avc1 reps lack ranges:\n{mpd}"
+        );
         // First-seen vp9 wins per height.
         assert!(mpd.contains(r#"id="248""#), "1080p vp9 should win:\n{mpd}");
         assert!(mpd.contains(r#"id="247""#), "720p vp9 should win:\n{mpd}");
-        // Non-vp9 codecs filtered out.
-        assert!(!mpd.contains(r#"id="137""#), "1080p avc1 dropped:\n{mpd}");
-        assert!(!mpd.contains(r#"id="399""#), "1080p av01 dropped:\n{mpd}");
-        assert!(!mpd.contains(r#"id="136""#), "720p avc1 dropped:\n{mpd}");
-        assert!(!mpd.contains(r#"id="398""#), "720p av01 dropped:\n{mpd}");
+        // avc1 dropped by box-range gate (no ranges seeded).
+        assert!(
+            !mpd.contains(r#"id="137""#),
+            "1080p avc1 dropped (no ranges):\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="136""#),
+            "720p avc1 dropped (no ranges):\n{mpd}"
+        );
+        // av01 dropped by codec gate.
+        assert!(
+            !mpd.contains(r#"id="399""#),
+            "1080p av01 dropped (codec gate):\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="398""#),
+            "720p av01 dropped (codec gate):\n{mpd}"
+        );
         // Duplicate vp9 variants collapsed.
         assert!(
             !mpd.contains(r#"id="248-dashy""#),
@@ -1327,12 +1403,8 @@ mod tests {
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
 
         // Both video sets present.
-        let vp9_pos = mpd
-            .find(r#"mimeType="video/webm""#)
-            .expect("vp9 video set");
-        let avc1_pos = mpd
-            .find(r#"mimeType="video/mp4""#)
-            .expect("avc1 video set");
+        let vp9_pos = mpd.find(r#"mimeType="video/webm""#).expect("vp9 video set");
+        let avc1_pos = mpd.find(r#"mimeType="video/mp4""#).expect("avc1 video set");
         assert!(
             vp9_pos < avc1_pos,
             "VP9 must precede AVC1 in declaration order:\n{mpd}"
@@ -1342,9 +1414,7 @@ mod tests {
         let opus_pos = mpd
             .find(r#"mimeType="audio/webm""#)
             .expect("opus audio set");
-        let mp4a_pos = mpd
-            .find(r#"mimeType="audio/mp4""#)
-            .expect("mp4a audio set");
+        let mp4a_pos = mpd.find(r#"mimeType="audio/mp4""#).expect("mp4a audio set");
         assert!(
             opus_pos < mp4a_pos,
             "opus must precede mp4a in declaration order:\n{mpd}"
@@ -1371,6 +1441,119 @@ mod tests {
         assert!(
             mpd.contains(r#"codecs="avc1.64002a""#),
             "AVC1 codec string must be passed through verbatim:\n{mpd}"
+        );
+    }
+
+    /// `avc3.*` codec strings (SVC-encoded H.264, used by some
+    /// YouTube live re-encodes) must be accepted by the codec gate
+    /// and routed into the `video/mp4` AdaptationSet, same as `avc1.*`.
+    /// They share the H.264 decoder pipeline in every browser, so
+    /// segregating them would just shrink the ABR ladder for no gain.
+    #[test]
+    fn synthesize_manifest_accepts_avc3_codec() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![https_format(
+            "299",
+            Some(1080),
+            Some("avc3.640028"),
+            Some("none"),
+            None,
+        )];
+        let br = dummy_ranges(&["299"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(
+            mpd.contains(r#"mimeType="video/mp4""#),
+            "avc3 must land in the video/mp4 AdaptationSet:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"codecs="avc3.640028""#),
+            "avc3 codec string must be passed through verbatim:\n{mpd}"
+        );
+    }
+
+    /// Cross-codec-family per-language isolation: when both opus and
+    /// mp4a audio exist in the same language, they land in separate
+    /// AdaptationSets (one `audio/webm`, one `audio/mp4`) rather than
+    /// fighting each other for the per-language trim slot. Shaka picks
+    /// one codec at startup based on `preferredAudioCodecs`; this test
+    /// just confirms both are surfaced so the choice is available.
+    #[test]
+    fn synthesize_manifest_separates_opus_and_mp4a_per_language() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            // English: both opus and mp4a present.
+            https_format("251", None, Some("none"), Some("opus"), Some("en")),
+            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
+            // Spanish: opus only.
+            https_format("251-es", None, Some("none"), Some("opus"), Some("es")),
+        ];
+        let br = dummy_ranges(&["251", "140", "251-es"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        // Both codec families present in separate AdaptationSets.
+        assert!(
+            mpd.contains(r#"mimeType="audio/webm""#),
+            "opus AdaptationSet missing:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"mimeType="audio/mp4""#),
+            "mp4a AdaptationSet missing:\n{mpd}"
+        );
+        // English opus and English mp4a both survive — they don't
+        // fight for the same per-language slot.
+        assert!(mpd.contains(r#"id="251""#), "english opus missing:\n{mpd}");
+        assert!(mpd.contains(r#"id="140""#), "english mp4a missing:\n{mpd}");
+        // Spanish opus survives.
+        assert!(
+            mpd.contains(r#"id="251-es""#),
+            "spanish opus missing:\n{mpd}"
+        );
+        // Total: 2 English (opus+mp4a) + 1 Spanish opus = 3 audio reps.
+        assert_eq!(
+            mpd.matches("<Representation ").count(),
+            3,
+            "expected 3 audio Representations:\n{mpd}"
+        );
+    }
+
+    /// `Role=main` is emitted symmetrically across codec pools: if
+    /// the manifest as a whole has multiple audio languages, both the
+    /// opus and the mp4a pool get the marker on the main-language
+    /// track — even if one pool taken alone is single-language. This
+    /// guards against the asymmetry where shaka picks mp4a, sees no
+    /// `main` marker (because mp4a was English-only in its pool), and
+    /// fails to apply the `prioritizeRoleMain` preference.
+    #[test]
+    fn synthesize_manifest_role_main_symmetric_across_codec_pools() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut en_opus = https_format("251", None, Some("none"), Some("opus"), Some("en"));
+        en_opus.format_note = Some("original (default), medium".into());
+        let mut en_mp4a = https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en"));
+        en_mp4a.format_note = Some("original (default), medium".into());
+        let formats = vec![
+            en_opus,
+            // Spanish opus (dub) — gives the manifest >1 language.
+            https_format("251-es", None, Some("none"), Some("opus"), Some("es")),
+            // mp4a is English-only.
+            en_mp4a,
+        ];
+        let br = dummy_ranges(&["251", "251-es", "140"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        // Both English AdaptationSets carry the Role=main marker
+        // (opus pool has en+es so it's locally ambiguous; mp4a pool
+        // is locally unambiguous but the *manifest* has multiple
+        // languages, so the cross-pool flag still triggers the
+        // marker).
+        let role_main_count = mpd
+            .matches(r#"<Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>"#)
+            .count();
+        assert_eq!(
+            role_main_count, 2,
+            "expected Role=main in both English AdaptationSets (opus + mp4a):\n{mpd}"
         );
     }
 }
