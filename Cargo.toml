@@ -56,6 +56,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
 cron = "0.16"
 
+# XML parsing for YouTube channel Atom/RSS feeds.
+quick-xml = "0.36"
+
 [features]
 # `test-login` exposes a small set of unauthenticated HTTP routes that
 # seed the database with deterministic accounts and mint session

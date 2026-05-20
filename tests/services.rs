@@ -32,15 +32,15 @@ async fn seed_default_jobs_is_idempotent() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    assert_eq!(count1, 2);
+    assert_eq!(count1, 3);
 
-    // Re-seed → still two rows (INSERT OR IGNORE).
+    // Re-seed → still three rows (INSERT OR IGNORE).
     seed_default_jobs(&app.pool).await.unwrap();
     let count2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs")
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    assert_eq!(count2, 2);
+    assert_eq!(count2, 3);
 }
 
 #[tokio::test]
