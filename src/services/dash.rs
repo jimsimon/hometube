@@ -169,22 +169,22 @@ pub fn synthesize_manifest(
     // BaseURL+Range pipeline; the protocol distinction matters only
     // for dedup.
     //
-    // We deliberately surface only `vp9` video and `opus` audio so
-    // every Representation lives in a single webm container. That
-    // gives us:
+    // We surface two codec families, in separate AdaptationSets so
+    // shaka-player can switch within (but not across) a family:
     //
-    // - One video AdaptationSet (mimeType="video/webm") covering the
-    //   full resolution range YouTube provides — vp9 reaches 4K
-    //   whereas avc1 caps at 1080p.
-    // - One audio AdaptationSet per language (mimeType="audio/webm")
-    //   with opus, which matches the video container.
-    // - No AdaptationSet split, no per-container codec mismatch
-    //   (which previously made the player parse opus/webm as if it
-    //   were mp4 and ask for byte 440-million in an 8 MB file).
+    // - **VP9 + opus** in `video/webm` / `audio/webm`. This is the
+    //   preferred ladder when YouTube provides it: VP9 reaches 4K
+    //   and is more bandwidth-efficient than AVC1 at equal quality.
+    // - **AVC1 + AAC (mp4a)** in `video/mp4` / `audio/mp4`. Fallback
+    //   for videos where YouTube hasn't encoded a VP9 ladder (long-
+    //   form / less-popular uploads sometimes ship AVC1-only), and a
+    //   safety net for clients that can't hardware-decode VP9.
     //
-    // Browser support: vp9 and opus are universal in Chrome/Firefox/
-    // Edge and supported in Safari 14+ (2020). For HomeTube on
-    // modern hardware this is fine.
+    // Manifest order: VP9/opus AdaptationSets are emitted first so
+    // shaka's tiebreaker prefers them when both ladders exist. The
+    // frontend also sets `preferredVideoCodecs` / `preferredAudioCodecs`
+    // explicitly so the choice doesn't rely on shaka's internal
+    // default heuristic.
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
@@ -198,11 +198,12 @@ pub fn synthesize_manifest(
         }
         // DRC (Dynamic Range Compression) variants share an itag with
         // the standard variant but are different files with different
-        // Cues byte offsets. The innertube `/player` API only reports
-        // ranges for the non-DRC version, so applying those ranges to
-        // a DRC variant makes shaka read garbage bytes and fail with
-        // WEBM_CUES_ELEMENT_MISSING. Exclude them entirely — DRC is
-        // redundant for our use-case (kids watching on tablets/phones).
+        // Cues / sidx byte offsets. The innertube `/player` API only
+        // reports ranges for the non-DRC version, so applying those
+        // ranges to a DRC variant makes shaka read garbage bytes and
+        // fail with WEBM_CUES_ELEMENT_MISSING (webm) or a moof/sidx
+        // parse error (mp4). Exclude them entirely — DRC is redundant
+        // for our use-case (kids watching on tablets/phones).
         let is_drc = f.format_id.contains("-drc-")
             || f.format_id.ends_with("-drc")
             || f.format_note
@@ -225,11 +226,9 @@ pub fn synthesize_manifest(
         // author dubs, we include everything and let the user switch
         // languages via Shaka's language menu.
         if is_video_only {
-            // vp9 is sometimes also reported as `vp09.*` for full
-            // codec strings. Accept both spellings.
-            vcodec.starts_with("vp9") || vcodec.starts_with("vp09")
+            is_vp9(vcodec) || is_avc1(vcodec)
         } else if is_audio_only {
-            acodec.starts_with("opus")
+            is_opus(acodec) || is_mp4a(acodec)
         } else {
             // Drop muxed (both codecs) and storyboard-like garbage.
             false
@@ -247,40 +246,81 @@ pub fn synthesize_manifest(
     // the first one wins.
     let usable = dedupe_prefer_with_ranges(usable, box_ranges);
 
-    // Initial split into video-only and audio-only Representations.
-    // Muxed formats (both vcodec and acodec set) are excluded entirely
-    // — they're a separate "progressive" format from yt-dlp that
-    // duplicates content already in the adaptive video/audio
-    // AdaptationSets. Including them confuses the player.
-    let video_candidates: Vec<&Format> = usable
-        .iter()
-        .copied()
-        .filter(|f| {
-            f.vcodec.as_deref().unwrap_or("none") != "none"
-                && f.acodec.as_deref().unwrap_or("none") == "none"
-                && f.height.is_some()
-        })
-        .collect();
-    let audio_candidates: Vec<&Format> = usable
-        .iter()
-        .copied()
-        .filter(|f| {
-            f.acodec.as_deref().unwrap_or("none") != "none"
-                && f.vcodec.as_deref().unwrap_or("none") == "none"
-        })
-        .collect();
+    // Initial split into video-only and audio-only candidates by
+    // codec family. Muxed formats (both vcodec and acodec set) are
+    // excluded entirely — they're a separate "progressive" format
+    // from yt-dlp that duplicates content already in the adaptive
+    // video/audio AdaptationSets. Including them confuses the player.
+    let split_video = |codec_pred: fn(&str) -> bool| -> Vec<&Format> {
+        usable
+            .iter()
+            .copied()
+            .filter(|f| {
+                let v = f.vcodec.as_deref().unwrap_or("none");
+                let a = f.acodec.as_deref().unwrap_or("none");
+                v != "none" && a == "none" && f.height.is_some() && codec_pred(v)
+            })
+            .collect()
+    };
+    let split_audio = |codec_pred: fn(&str) -> bool| -> Vec<&Format> {
+        usable
+            .iter()
+            .copied()
+            .filter(|f| {
+                let v = f.vcodec.as_deref().unwrap_or("none");
+                let a = f.acodec.as_deref().unwrap_or("none");
+                a != "none" && v == "none" && codec_pred(a)
+            })
+            .collect()
+    };
 
-    // Trim the candidate pools so the player doesn't drown in
-    // Representations during cold-load discovery (without
-    // `<SegmentBase indexRange>`, the player has to probe each
-    // Representation empirically; with too many it never converges
-    // and playback stalls).
-    let video_formats = trim_video_representations(&video_candidates);
-    let audio_formats = trim_audio_representations(&audio_candidates);
+    let vp9_candidates = split_video(is_vp9);
+    let avc1_candidates = split_video(is_avc1);
+    let opus_candidates = split_audio(is_opus);
+    let mp4a_candidates = split_audio(is_mp4a);
 
-    if video_formats.is_empty() && audio_formats.is_empty() {
+    // Trim each pool to one Representation per (height) or (language)
+    // so the player doesn't drown in Representations during cold-load
+    // discovery. Without `<SegmentBase indexRange>`, the player has
+    // to probe each Representation empirically; with too many it
+    // never converges and playback stalls. The trim runs per codec
+    // family so VP9 and AVC1 don't fight each other for the
+    // first-seen slot.
+    let vp9_video = trim_video_representations(&vp9_candidates);
+    let avc1_video = trim_video_representations(&avc1_candidates);
+    let opus_audio = trim_audio_representations(&opus_candidates);
+    let mp4a_audio = trim_audio_representations(&mp4a_candidates);
+
+    // Only emit Representations that have SegmentBase data.
+    // shaka-player requires indexRange for the isoff-on-demand profile;
+    // bare <BaseURL> without SegmentBase triggers error 4003
+    // (DASH_NO_SEGMENT_INFO). Formats without ranges are simply
+    // omitted — the user gets fewer quality tiers on cold load, but
+    // playback works. After background probes or a second extraction
+    // fills the cache, the full set appears.
+    let has_ranges = |f: &&Format| box_ranges.contains_key(&f.format_id);
+    let vp9_video: Vec<&Format> = vp9_video.into_iter().filter(has_ranges).collect();
+    let avc1_video: Vec<&Format> = avc1_video.into_iter().filter(has_ranges).collect();
+    let opus_audio: Vec<&Format> = opus_audio.into_iter().filter(has_ranges).collect();
+    let mp4a_audio: Vec<&Format> = mp4a_audio.into_iter().filter(has_ranges).collect();
+
+    if vp9_video.is_empty()
+        && avc1_video.is_empty()
+        && opus_audio.is_empty()
+        && mp4a_audio.is_empty()
+    {
         return None;
     }
+
+    // `Role=main` is computed across both audio codec pools combined
+    // so the main-language signal is consistent regardless of which
+    // codec the player picks at startup.
+    let all_audio: Vec<&Format> = opus_audio
+        .iter()
+        .chain(mp4a_audio.iter())
+        .copied()
+        .collect();
+    let main_lang = pick_main_audio_lang(&all_audio);
 
     let dur_str = duration
         .map(|d| format!("PT{:.3}S", d))
@@ -294,102 +334,173 @@ pub fn synthesize_manifest(
     ));
     mpd.push_str("<Period>\n");
 
-    // Only emit Representations that have SegmentBase data.
-    // shaka-player requires indexRange for the isoff-on-demand profile;
-    // bare <BaseURL> without SegmentBase triggers error 4003
-    // (DASH_NO_SEGMENT_INFO). Formats without ranges are simply
-    // omitted — the user gets fewer quality tiers on cold load, but
-    // playback works. After background probes or a second extraction
-    // fills the cache, the full set appears.
-    let video_formats: Vec<&Format> = video_formats
-        .into_iter()
-        .filter(|f| box_ranges.contains_key(&f.format_id))
-        .collect();
-    let audio_formats: Vec<&Format> = audio_formats
-        .into_iter()
-        .filter(|f| box_ranges.contains_key(&f.format_id))
-        .collect();
+    // Video AdaptationSets: VP9 first (preferred), then AVC1
+    // (fallback). Declaration order is shaka's tiebreaker; combined
+    // with `preferredVideoCodecs` on the player it pins the choice.
+    //
+    // The `default_codecs` arg is the fallback when yt-dlp doesn't
+    // populate `vcodec` (rare — adaptive formats always have it on
+    // YouTube). The strings must be full MediaSource codec IDs that
+    // `MediaSource.isTypeSupported` accepts; bare `"avc1"` is
+    // rejected by Chrome/Firefox, so we pin a concrete profile/level
+    // that covers the AVC1 ladder YouTube serves (High@4.0 = up to
+    // 1080p). VP9 accepts a bare codec string.
+    push_video_adaptation_set(&mut mpd, "video/webm", "vp9", &vp9_video, secret, video_id, box_ranges);
+    push_video_adaptation_set(
+        &mut mpd,
+        "video/mp4",
+        "avc1.640028",
+        &avc1_video,
+        secret,
+        video_id,
+        box_ranges,
+    );
 
-    if video_formats.is_empty() && audio_formats.is_empty() {
-        return None;
-    }
-
-    if !video_formats.is_empty() {
-        mpd.push_str("  <AdaptationSet mimeType=\"video/webm\" contentType=\"video\" segmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">\n");
-        for f in &video_formats {
-            let bandwidth = f
-                .tbr
-                .or(f.vbr)
-                .map(|b| (b * 1000.0) as u64)
-                .unwrap_or(500_000);
-            // Pass yt-dlp's vcodec through verbatim. It's typically
-            // the bare string "vp9" but YouTube sometimes returns the
-            // fully-qualified `vp09.00.41.08`-style codec ID.
-            let codecs = f.vcodec.as_deref().unwrap_or("vp9");
-            let attrs = format!(
-                "id=\"{}\" bandwidth=\"{}\" width=\"{}\" height=\"{}\" codecs=\"{}\"",
-                escape_xml(&f.format_id),
-                bandwidth,
-                f.width.unwrap_or(0),
-                f.height.unwrap_or(0),
-                escape_xml(codecs)
-            );
-            push_representation(&mut mpd, f, &attrs, secret, video_id, box_ranges);
-        }
-        mpd.push_str("  </AdaptationSet>\n");
-    }
-
-    if !audio_formats.is_empty() {
-        // Group by language (or "" if absent). BTreeMap gives a stable
-        // ordering across calls so the manifest is deterministic.
-        let mut lang_groups: std::collections::BTreeMap<String, Vec<&Format>> =
-            std::collections::BTreeMap::new();
-        for f in &audio_formats {
-            let lang = f.language.clone().unwrap_or_default();
-            lang_groups.entry(lang).or_default().push(*f);
-        }
-
-        let main_lang = pick_main_audio_lang(&audio_formats);
-
-        for (lang, group) in &lang_groups {
-            let lang_attr = if lang.is_empty() {
-                String::new()
-            } else {
-                format!(" lang=\"{}\"", escape_xml(lang))
-            };
-            mpd.push_str(&format!(
-                "  <AdaptationSet mimeType=\"audio/webm\" contentType=\"audio\"{}>\n",
-                lang_attr
-            ));
-            // Mark the original-language audio as `Role=main` so
-            // the player's `prioritizeRoleMain` selects it. Skip when only
-            // one language is present (no ambiguity to resolve).
-            if main_lang.as_deref() == Some(lang.as_str()) && lang_groups.len() > 1 {
-                mpd.push_str(
-                    "    <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n",
-                );
-            }
-            for f in group {
-                let bandwidth = f
-                    .tbr
-                    .or(f.abr)
-                    .map(|b| (b * 1000.0) as u64)
-                    .unwrap_or(128_000);
-                let codecs = f.acodec.as_deref().unwrap_or("opus");
-                let attrs = format!(
-                    "id=\"{}\" bandwidth=\"{}\" codecs=\"{}\"",
-                    escape_xml(&f.format_id),
-                    bandwidth,
-                    escape_xml(codecs)
-                );
-                push_representation(&mut mpd, f, &attrs, secret, video_id, box_ranges);
-            }
-            mpd.push_str("  </AdaptationSet>\n");
-        }
-    }
+    // Audio AdaptationSets: opus first per language, then mp4a per
+    // language. Same rationale as video.
+    push_audio_adaptation_sets(
+        &mut mpd,
+        "audio/webm",
+        "opus",
+        &opus_audio,
+        main_lang.as_deref(),
+        secret,
+        video_id,
+        box_ranges,
+    );
+    push_audio_adaptation_sets(
+        &mut mpd,
+        "audio/mp4",
+        "mp4a.40.2",
+        &mp4a_audio,
+        main_lang.as_deref(),
+        secret,
+        video_id,
+        box_ranges,
+    );
 
     mpd.push_str("</Period>\n</MPD>\n");
     Some(mpd)
+}
+
+/// Codec-family predicates. These accept both the short codec
+/// spellings (`vp9`, `opus`) and the fully-qualified MIME codec IDs
+/// YouTube sometimes returns (`vp09.00.41.08`, `avc1.640020`,
+/// `mp4a.40.2`, `avc3.*` for SVC-encoded AVC).
+fn is_vp9(c: &str) -> bool {
+    c.starts_with("vp9") || c.starts_with("vp09")
+}
+fn is_avc1(c: &str) -> bool {
+    c.starts_with("avc1") || c.starts_with("avc3")
+}
+fn is_opus(c: &str) -> bool {
+    c.starts_with("opus")
+}
+fn is_mp4a(c: &str) -> bool {
+    c.starts_with("mp4a")
+}
+
+/// Emit one `<AdaptationSet>` for a video codec family. No-op if the
+/// pool is empty.
+fn push_video_adaptation_set(
+    mpd: &mut String,
+    mime_type: &str,
+    default_codecs: &str,
+    formats: &[&Format],
+    secret: &[u8],
+    video_id: &str,
+    box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
+) {
+    if formats.is_empty() {
+        return;
+    }
+    mpd.push_str(&format!(
+        "  <AdaptationSet mimeType=\"{}\" contentType=\"video\" segmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">\n",
+        mime_type
+    ));
+    for f in formats {
+        let bandwidth = f
+            .tbr
+            .or(f.vbr)
+            .map(|b| (b * 1000.0) as u64)
+            .unwrap_or(500_000);
+        // Pass yt-dlp's vcodec through verbatim when present; it's
+        // typically the bare string (`vp9`, `avc1.640020`) but
+        // YouTube sometimes returns fully-qualified codec IDs like
+        // `vp09.00.41.08`. Fall back to the family default.
+        let codecs = f.vcodec.as_deref().unwrap_or(default_codecs);
+        let attrs = format!(
+            "id=\"{}\" bandwidth=\"{}\" width=\"{}\" height=\"{}\" codecs=\"{}\"",
+            escape_xml(&f.format_id),
+            bandwidth,
+            f.width.unwrap_or(0),
+            f.height.unwrap_or(0),
+            escape_xml(codecs)
+        );
+        push_representation(mpd, f, &attrs, secret, video_id, box_ranges);
+    }
+    mpd.push_str("  </AdaptationSet>\n");
+}
+
+/// Emit one `<AdaptationSet>` per language for an audio codec family.
+/// No-op if the pool is empty.
+#[allow(clippy::too_many_arguments)]
+fn push_audio_adaptation_sets(
+    mpd: &mut String,
+    mime_type: &str,
+    default_codecs: &str,
+    formats: &[&Format],
+    main_lang: Option<&str>,
+    secret: &[u8],
+    video_id: &str,
+    box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
+) {
+    if formats.is_empty() {
+        return;
+    }
+    // Group by language (or "" if absent). BTreeMap gives a stable
+    // ordering across calls so the manifest is deterministic.
+    let mut lang_groups: std::collections::BTreeMap<String, Vec<&Format>> =
+        std::collections::BTreeMap::new();
+    for f in formats {
+        let lang = f.language.clone().unwrap_or_default();
+        lang_groups.entry(lang).or_default().push(*f);
+    }
+
+    for (lang, group) in &lang_groups {
+        let lang_attr = if lang.is_empty() {
+            String::new()
+        } else {
+            format!(" lang=\"{}\"", escape_xml(lang))
+        };
+        mpd.push_str(&format!(
+            "  <AdaptationSet mimeType=\"{}\" contentType=\"audio\"{}>\n",
+            mime_type, lang_attr
+        ));
+        // Mark the original-language audio as `Role=main` so the
+        // player's `prioritizeRoleMain` selects it. Skip when only
+        // one language is present in this codec pool (no ambiguity
+        // to resolve).
+        if main_lang == Some(lang.as_str()) && lang_groups.len() > 1 {
+            mpd.push_str("    <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n");
+        }
+        for f in group {
+            let bandwidth = f
+                .tbr
+                .or(f.abr)
+                .map(|b| (b * 1000.0) as u64)
+                .unwrap_or(128_000);
+            let codecs = f.acodec.as_deref().unwrap_or(default_codecs);
+            let attrs = format!(
+                "id=\"{}\" bandwidth=\"{}\" codecs=\"{}\"",
+                escape_xml(&f.format_id),
+                bandwidth,
+                escape_xml(codecs)
+            );
+            push_representation(mpd, f, &attrs, secret, video_id, box_ranges);
+        }
+        mpd.push_str("  </AdaptationSet>\n");
+    }
 }
 
 /// Render one `<Representation>` inside the synthesized manifest.
@@ -502,10 +613,11 @@ fn dedupe_prefer_with_ranges<'a>(
 }
 
 /// Trim the video Representation pool down to one Representation per
-/// height. Caller has already filtered to vp9-only, so all candidates
-/// share a codec; the only ambiguity is duplicate Representations at
-/// the same height (e.g. 30fps vs 60fps, or `https`/`http_dash_segments`
-/// variants of the same itag).
+/// height. Caller has already filtered to a single codec family
+/// (vp9 *or* avc1), so all candidates share a codec; the only
+/// ambiguity is duplicate Representations at the same height (e.g.
+/// 30fps vs 60fps, or `https`/`http_dash_segments` variants of the
+/// same itag).
 ///
 /// First-seen wins per height — yt-dlp orders formats with the
 /// "preferred" variant earlier so that's a reasonable choice.
@@ -528,10 +640,11 @@ fn trim_video_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> 
 }
 
 /// Trim the audio Representation pool to one Representation per
-/// language. Caller has already filtered to opus-only, so all
-/// candidates share a codec; per-language dedupe collapses the
-/// quality-tier (`249`/`250`/`251`) and DRC (`*-drc-*`) variants down
-/// to a single track.
+/// language. Caller has already filtered to a single codec family
+/// (opus *or* mp4a), so all candidates share a codec; per-language
+/// dedupe collapses the quality-tier (`249`/`250`/`251` for opus,
+/// `139`/`140` for mp4a) and DRC (`*-drc-*`) variants down to a
+/// single track.
 ///
 /// One format per language. First-seen wins — this must match the
 /// probe order used by `fixup_webm_cues_offsets` (which also takes
@@ -1090,24 +1203,24 @@ mod tests {
         assert!(mpd.contains(r#"id="251""#), "audio-only kept:\n{mpd}");
     }
 
-    /// Audio is opus-only: mp4a/AAC candidates are filtered out at the
-    /// `is_usable` codec gate (so the audio AdaptationSet stays in
-    /// the same webm container as vp9 video). Per-language trim then
-    /// collapses opus quality tiers (`249`/`250`/`251`) and the `*-drc-*`
+    /// Within a single codec family, per-language trim collapses
+    /// quality tiers (`249`/`250`/`251` for opus) and `*-drc-*`
     /// variants down to a single Representation per language —
-    /// first-seen wins.
+    /// first-seen wins. mp4a candidates live in a *separate*
+    /// AdaptationSet (audio/mp4) and don't compete with opus for
+    /// the per-language trim slot.
     #[test]
     fn synthesize_manifest_picks_one_audio_codec_per_language() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
         let mut drc = https_format("251-drc", None, Some("none"), Some("opus"), Some("en"));
         drc.format_note = Some("DRC, low".into());
         let formats = vec![
-            // Four English candidates: first opus wins, mp4a is
-            // filtered out by the codec gate, lower-tier opus and DRC
-            // are collapsed by per-language trim.
+            // Three English opus candidates: first wins, lower-tier
+            // and DRC collapse via per-language trim. mp4a is
+            // intentionally omitted here (covered by the dedicated
+            // mp4a/avc1 tests).
             https_format("251", None, Some("none"), Some("opus"), Some("en")),
             https_format("250", None, Some("none"), Some("opus"), Some("en")),
-            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
             drc,
             // Spanish has a single opus candidate — survives.
             https_format("251-es", None, Some("none"), Some("opus"), Some("es")),
@@ -1119,11 +1232,6 @@ mod tests {
         assert!(
             mpd.contains(r#"id="251""#),
             "first english opus should win:\n{mpd}"
-        );
-        // mp4a filtered out by the codec gate.
-        assert!(
-            !mpd.contains(r#"id="140""#),
-            "english mp4a dropped (codec gate):\n{mpd}"
         );
         // Lower-tier opus collapsed by per-language trim.
         assert!(
@@ -1143,6 +1251,126 @@ mod tests {
         assert_eq!(
             audio_rep_count, 2,
             "one Representation per language:\n{mpd}"
+        );
+    }
+
+    /// **Regression test for the audio-only-playback bug on
+    /// AVC1-only videos** (e.g. `hCtkxVx6U_Y`). When YouTube hasn't
+    /// encoded a VP9 ladder, the synthesizer must fall back to the
+    /// AVC1 ladder rather than emit an audio-only manifest.
+    #[test]
+    fn synthesize_manifest_emits_avc1_when_no_vp9() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            // AVC1 ladder up to 1080p (matches the actual YouTube
+            // itag set for `hCtkxVx6U_Y`).
+            https_format("160", Some(144), Some("avc1.4d400c"), Some("none"), None),
+            https_format("133", Some(240), Some("avc1.4d4015"), Some("none"), None),
+            https_format("134", Some(360), Some("avc1.4d401e"), Some("none"), None),
+            https_format("135", Some(480), Some("avc1.4d401f"), Some("none"), None),
+            https_format("298", Some(720), Some("avc1.640020"), Some("none"), None),
+            https_format("299", Some(1080), Some("avc1.64002a"), Some("none"), None),
+            // mp4a + opus audio, both present.
+            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
+            https_format("251", None, Some("none"), Some("opus"), Some("en")),
+        ];
+        let br = dummy_ranges(&["160", "133", "134", "135", "298", "299", "140", "251"]);
+        let mpd = synthesize_manifest(secret, "vid", &formats, Some(60.0), &br)
+            .expect("synthesize must succeed with AVC1-only video");
+
+        // A video AdaptationSet IS emitted (the bug was zero video reps).
+        assert!(
+            mpd.contains(r#"mimeType="video/mp4""#),
+            "AVC1 AdaptationSet missing:\n{mpd}"
+        );
+        // No spurious video/webm set when there are no VP9 candidates.
+        assert!(
+            !mpd.contains(r#"mimeType="video/webm""#),
+            "should not emit empty video/webm set:\n{mpd}"
+        );
+        // All AVC1 resolutions present.
+        for itag in ["160", "133", "134", "135", "298", "299"] {
+            assert!(
+                mpd.contains(&format!(r#"id="{itag}""#)),
+                "AVC1 itag {itag} missing:\n{mpd}"
+            );
+        }
+        // Both audio codec families are surfaced in separate sets.
+        assert!(
+            mpd.contains(r#"mimeType="audio/webm""#),
+            "opus AdaptationSet missing:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"mimeType="audio/mp4""#),
+            "mp4a AdaptationSet missing:\n{mpd}"
+        );
+        assert!(mpd.contains(r#"id="251""#), "opus rep missing:\n{mpd}");
+        assert!(mpd.contains(r#"id="140""#), "mp4a rep missing:\n{mpd}");
+    }
+
+    /// When both VP9 and AVC1 are available, both ladders are emitted
+    /// and VP9 appears first in the manifest. Shaka uses declaration
+    /// order as a tiebreaker, so first-emitted = preferred.
+    #[test]
+    fn synthesize_manifest_orders_vp9_before_avc1() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            // AVC1 listed first in the input to confirm we sort by
+            // codec family rather than input order.
+            https_format("299", Some(1080), Some("avc1.64002a"), Some("none"), None),
+            https_format("248", Some(1080), Some("vp9"), Some("none"), None),
+            https_format("140", None, Some("none"), Some("mp4a.40.2"), Some("en")),
+            https_format("251", None, Some("none"), Some("opus"), Some("en")),
+        ];
+        let br = dummy_ranges(&["299", "248", "140", "251"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        // Both video sets present.
+        let vp9_pos = mpd
+            .find(r#"mimeType="video/webm""#)
+            .expect("vp9 video set");
+        let avc1_pos = mpd
+            .find(r#"mimeType="video/mp4""#)
+            .expect("avc1 video set");
+        assert!(
+            vp9_pos < avc1_pos,
+            "VP9 must precede AVC1 in declaration order:\n{mpd}"
+        );
+
+        // Both audio sets present, opus first.
+        let opus_pos = mpd
+            .find(r#"mimeType="audio/webm""#)
+            .expect("opus audio set");
+        let mp4a_pos = mpd
+            .find(r#"mimeType="audio/mp4""#)
+            .expect("mp4a audio set");
+        assert!(
+            opus_pos < mp4a_pos,
+            "opus must precede mp4a in declaration order:\n{mpd}"
+        );
+    }
+
+    /// AVC1 video Representations get the AVC1 codec string verbatim
+    /// (not the VP9 default fallback). YouTube returns fully-qualified
+    /// codec IDs like `avc1.640020`; shaka uses these to verify
+    /// `MediaSource.isTypeSupported` and route to the right decoder.
+    #[test]
+    fn synthesize_manifest_passes_avc1_codec_string_through() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![https_format(
+            "299",
+            Some(1080),
+            Some("avc1.64002a"),
+            Some("none"),
+            None,
+        )];
+        let br = dummy_ranges(&["299"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+        assert!(
+            mpd.contains(r#"codecs="avc1.64002a""#),
+            "AVC1 codec string must be passed through verbatim:\n{mpd}"
         );
     }
 }

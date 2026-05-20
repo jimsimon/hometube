@@ -659,6 +659,23 @@ export class VideoPlayer extends LitElement {
     // specify language, role, channelCount, label, etc).
     player.configure("preferredAudio", [{ language: "en" }]);
 
+    // Codec preference: VP9 + opus first, AVC1 + mp4a as fallback.
+    // The synthesized DASH manifest emits both ladders as separate
+    // AdaptationSets whenever YouTube provides them. We prefer VP9
+    // because:
+    //   - it reaches 4K (AVC1 caps at 1080p on YouTube),
+    //   - it's ~30–50% more bandwidth-efficient at equal quality,
+    //   - modern tablets (the typical HomeTube client) have hardware
+    //     VP9 decode.
+    // AVC1 is kept as a fallback so videos without a VP9 encode
+    // (e.g. long-form uploads where YouTube hasn't backfilled VP9)
+    // still play instead of degrading to audio-only.
+    //
+    // Setting this explicitly insulates us from shaka's internal
+    // default heuristic, which has shifted between versions.
+    player.configure("preferredVideoCodecs", ["vp09", "vp9", "avc1", "avc3"]);
+    player.configure("preferredAudioCodecs", ["opus", "mp4a"]);
+
     // Apply quality cap if set.
     if (this.settings?.max_quality) {
       const maxHeight = QUALITY_CAP[this.settings.max_quality];
