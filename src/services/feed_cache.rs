@@ -164,20 +164,33 @@ pub async fn replace_source_items(
     Ok(())
 }
 
+/// Inputs to [`record_poll_success`]. Bundled into a struct so the
+/// (otherwise 8-positional-arg) call site stays readable.
+#[derive(Debug)]
+pub struct PollSuccess<'a> {
+    pub kind: &'a str,
+    pub source_id: &'a str,
+    pub title: Option<&'a str>,
+    pub etag: Option<&'a str>,
+    pub last_modified: Option<&'a str>,
+    pub next_poll_at: i64,
+    pub now: i64,
+}
+
 /// Mark a poll as successful. Caches the new etag/last-modified pair so
 /// the next poll can issue a conditional GET, resets the error counter,
 /// updates the title (if the source returned one), and schedules the
 /// next poll.
-pub async fn record_poll_success(
-    pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
-    title: Option<&str>,
-    etag: Option<&str>,
-    last_modified: Option<&str>,
-    next_poll_at: i64,
-    now: i64,
-) -> AppResult<()> {
+pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> AppResult<()> {
+    let PollSuccess {
+        kind,
+        source_id,
+        title,
+        etag,
+        last_modified,
+        next_poll_at,
+        now,
+    } = args;
     sqlx::query(
         "UPDATE feed_sources SET \
              title              = COALESCE(?, title), \
@@ -299,6 +312,9 @@ pub async fn feed_for_child(
     // Over-fetch to account for dedupe collapse.
     let fetch_limit = (limit as i64).saturating_mul(3);
 
+    // Excludes both parent-controlled `blocked_videos` and per-child
+    // `hidden_videos` so the row matches the visibility rules the old
+    // `can_child_view`-based handler enforced.
     let rows: Vec<Row> = sqlx::query_as(
         "WITH allowed(kind, source_id) AS ( \
              SELECT 'channel', channel_id \
@@ -315,6 +331,9 @@ pub async fn feed_for_child(
           WHERE NOT EXISTS ( \
                 SELECT 1 FROM blocked_videos b \
                  WHERE b.child_account_id = ?1 AND b.video_id = i.video_id) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM hidden_videos h \
+                 WHERE h.child_account_id = ?1 AND h.video_id = i.video_id) \
           ORDER BY COALESCE(i.published_at, 0) DESC \
           LIMIT ?2",
     )
@@ -452,7 +471,7 @@ mod tests {
         let pool = setup_db().await;
         upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
 
-        let items: Vec<ItemRow> = (0..(PER_SOURCE_CAP + 5) as i64)
+        let items: Vec<ItemRow> = (0..(PER_SOURCE_CAP + 5))
             .map(|i| mk_item(&format!("v{i}"), 1000 + i))
             .collect();
         replace_source_items(&pool, KIND_CHANNEL, "UC1", &items, 9999)
@@ -517,6 +536,37 @@ mod tests {
              VALUES (?, 'vB', ?)",
         )
         .bind(child)
+        .bind(child)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let feed = feed_for_child(&pool, child, 10).await.unwrap();
+        let ids: Vec<&str> = feed.iter().map(|i| i.video_id.as_str()).collect();
+        assert_eq!(ids, vec!["vA"]);
+    }
+
+    #[tokio::test]
+    async fn feed_for_child_excludes_hidden_videos() {
+        let pool = setup_db().await;
+        let child = insert_child(&pool, "kid").await;
+        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
+        replace_source_items(
+            &pool,
+            KIND_CHANNEL,
+            "UC1",
+            &[mk_item("vA", 100), mk_item("vB", 200)],
+            0,
+        )
+        .await
+        .unwrap();
+        allow_channel(&pool, child, "UC1").await;
+
+        // Hide vB; only vA should remain.
+        sqlx::query(
+            "INSERT INTO hidden_videos (child_account_id, video_id) \
+             VALUES (?, 'vB')",
+        )
         .bind(child)
         .execute(&pool)
         .await
@@ -622,13 +672,15 @@ mod tests {
 
         record_poll_success(
             &pool,
-            KIND_CHANNEL,
-            "UC1",
-            Some("Channel Title"),
-            Some("etag-xyz"),
-            Some("Mon, 01 Jan 2024 00:00:00 GMT"),
-            999,
-            70,
+            PollSuccess {
+                kind: KIND_CHANNEL,
+                source_id: "UC1",
+                title: Some("Channel Title"),
+                etag: Some("etag-xyz"),
+                last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT"),
+                next_poll_at: 999,
+                now: 70,
+            },
         )
         .await
         .unwrap();

@@ -162,41 +162,58 @@ pub async fn admin_put_refresher_settings(
     use crate::error::AppError;
     use crate::services::feed_refresher::{
         KEY_BATCH_SIZE, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_IDLE_TICK_S,
-        KEY_MAX_INFLIGHT,
+        KEY_MAX_INFLIGHT, RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S, RANGE_DISPATCH_DELAY_MS,
+        RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT,
     };
     use crate::services::setup::set_config_value;
 
     if let Some(v) = body.dispatch_delay_ms {
-        if !(50..=600_000).contains(&v) {
-            return Err(AppError::BadRequest(
-                "dispatch_delay_ms must be 50..=600000".into(),
-            ));
+        if !RANGE_DISPATCH_DELAY_MS.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "dispatch_delay_ms must be {}..={}",
+                RANGE_DISPATCH_DELAY_MS.start(),
+                RANGE_DISPATCH_DELAY_MS.end()
+            )));
         }
         set_config_value(&state.db, KEY_DISPATCH_DELAY_MS, &v.to_string()).await?;
     }
     if let Some(v) = body.max_inflight {
-        if !(1..=64).contains(&v) {
-            return Err(AppError::BadRequest("max_inflight must be 1..=64".into()));
+        if !RANGE_MAX_INFLIGHT.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "max_inflight must be {}..={}",
+                RANGE_MAX_INFLIGHT.start(),
+                RANGE_MAX_INFLIGHT.end()
+            )));
         }
         set_config_value(&state.db, KEY_MAX_INFLIGHT, &v.to_string()).await?;
     }
     if let Some(v) = body.batch_size {
-        if !(1..=500).contains(&v) {
-            return Err(AppError::BadRequest("batch_size must be 1..=500".into()));
+        if !RANGE_BATCH_SIZE.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "batch_size must be {}..={}",
+                RANGE_BATCH_SIZE.start(),
+                RANGE_BATCH_SIZE.end()
+            )));
         }
         set_config_value(&state.db, KEY_BATCH_SIZE, &v.to_string()).await?;
     }
     if let Some(v) = body.idle_tick_s {
-        if !(1..=3600).contains(&v) {
-            return Err(AppError::BadRequest("idle_tick_s must be 1..=3600".into()));
+        if !RANGE_IDLE_TICK_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "idle_tick_s must be {}..={}",
+                RANGE_IDLE_TICK_S.start(),
+                RANGE_IDLE_TICK_S.end()
+            )));
         }
         set_config_value(&state.db, KEY_IDLE_TICK_S, &v.to_string()).await?;
     }
     if let Some(v) = body.channel_interval_s {
-        if !(60..=86_400).contains(&v) {
-            return Err(AppError::BadRequest(
-                "channel_interval_s must be 60..=86400".into(),
-            ));
+        if !RANGE_CHANNEL_INTERVAL_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "channel_interval_s must be {}..={}",
+                RANGE_CHANNEL_INTERVAL_S.start(),
+                RANGE_CHANNEL_INTERVAL_S.end()
+            )));
         }
         set_config_value(&state.db, KEY_CHANNEL_INTERVAL_S, &v.to_string()).await?;
     }
@@ -359,30 +376,41 @@ async fn up_next_from_playlist(
         .collect())
 }
 
+/// One row pulled from `feed_source_items` for the up-next builder.
+/// Pulled out into a struct to satisfy clippy's `type_complexity` lint
+/// and to make the column ordering explicit.
+#[derive(sqlx::FromRow)]
+struct UpNextRow {
+    video_id: String,
+    title: String,
+    channel_id: Option<String>,
+    channel_title: Option<String>,
+    thumbnail_url: Option<String>,
+}
+
 async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<Vec<UpNextItem>> {
     // Prefer the cached items populated by the feed refresher; this
     // avoids a sidecar round-trip on every up-next request and reuses
     // the same data the new-videos feed shows.
-    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-               FROM feed_source_items \
-              WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, 0) DESC \
-              LIMIT 25",
-        )
-        .bind(feed_cache::KIND_CHANNEL)
-        .bind(channel_id)
-        .fetch_all(&state.db)
-        .await?;
+    let rows: Vec<UpNextRow> = sqlx::query_as(
+        "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
+           FROM feed_source_items \
+          WHERE kind = ? AND source_id = ? \
+          ORDER BY COALESCE(published_at, 0) DESC \
+          LIMIT 25",
+    )
+    .bind(feed_cache::KIND_CHANNEL)
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await?;
     Ok(rows
         .into_iter()
-        .map(|(video_id, title, ch_id, ch_title, thumb)| UpNextItem {
-            video_id,
-            title,
-            channel_id: ch_id.or_else(|| Some(channel_id.to_string())),
-            channel_title: ch_title,
-            thumbnail_url: thumb,
+        .map(|r| UpNextItem {
+            video_id: r.video_id,
+            title: r.title,
+            channel_id: r.channel_id.or_else(|| Some(channel_id.to_string())),
+            channel_title: r.channel_title,
+            thumbnail_url: r.thumbnail_url,
         })
         .collect())
 }
