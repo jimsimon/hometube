@@ -155,10 +155,10 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 ///
 /// Returns `None` if no usable formats are available (degenerate case
 /// — shouldn't happen for normal YouTube videos).
-pub fn synthesize_manifest(
+pub fn synthesize_manifest<'a>(
     secret: &[u8],
     video_id: &str,
-    formats: &[Format],
+    formats: &'a [Format],
     duration: Option<f64>,
     box_ranges: &std::collections::HashMap<String, crate::services::segment_ranges::BoxRanges>,
 ) -> Option<String> {
@@ -286,23 +286,36 @@ pub fn synthesize_manifest(
     // never converges and playback stalls. The trim runs per codec
     // family so VP9 and AVC1 don't fight each other for the
     // first-seen slot.
-    let vp9_video = trim_video_representations(&vp9_candidates);
-    let avc1_video = trim_video_representations(&avc1_candidates);
-    let opus_audio = trim_audio_representations(&opus_candidates);
-    let mp4a_audio = trim_audio_representations(&mp4a_candidates);
-
-    // Only emit Representations that have SegmentBase data.
-    // shaka-player requires indexRange for the isoff-on-demand profile;
-    // bare <BaseURL> without SegmentBase triggers error 4003
-    // (DASH_NO_SEGMENT_INFO). Formats without ranges are simply
-    // omitted — the user gets fewer quality tiers on cold load, but
-    // playback works. After background probes or a second extraction
-    // fills the cache, the full set appears.
-    let has_ranges = |f: &&Format| box_ranges.contains_key(&f.format_id);
-    let vp9_video: Vec<&Format> = vp9_video.into_iter().filter(has_ranges).collect();
-    let avc1_video: Vec<&Format> = avc1_video.into_iter().filter(has_ranges).collect();
-    let opus_audio: Vec<&Format> = opus_audio.into_iter().filter(has_ranges).collect();
-    let mp4a_audio: Vec<&Format> = mp4a_audio.into_iter().filter(has_ranges).collect();
+    //
+    // After trim, drop any Representation without SegmentBase data:
+    // shaka-player requires indexRange for the isoff-on-demand
+    // profile; bare <BaseURL> without SegmentBase triggers error
+    // 4003 (DASH_NO_SEGMENT_INFO). Formats without ranges are
+    // simply omitted — the user gets fewer quality tiers on cold
+    // load, but playback works. After background probes or a second
+    // extraction fills the cache, the full set appears.
+    //
+    // Trim-then-filter (rather than filter-then-trim) is intentional:
+    // the trim step takes first-seen per height/language, and the
+    // earlier `dedupe_prefer_with_ranges` pass has already promoted
+    // ranged variants over un-ranged duplicates of the same media,
+    // so the trim's first-seen candidate is the right one to keep.
+    let trim_video = |candidates: &[&'a Format]| -> Vec<&'a Format> {
+        trim_video_representations(candidates)
+            .into_iter()
+            .filter(|f| box_ranges.contains_key(&f.format_id))
+            .collect()
+    };
+    let trim_audio = |candidates: &[&'a Format]| -> Vec<&'a Format> {
+        trim_audio_representations(candidates)
+            .into_iter()
+            .filter(|f| box_ranges.contains_key(&f.format_id))
+            .collect()
+    };
+    let vp9_video = trim_video(&vp9_candidates);
+    let avc1_video = trim_video(&avc1_candidates);
+    let opus_audio = trim_audio(&opus_candidates);
+    let mp4a_audio = trim_audio(&mp4a_candidates);
 
     if vp9_video.is_empty()
         && avc1_video.is_empty()
