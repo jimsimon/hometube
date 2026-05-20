@@ -205,8 +205,9 @@ async fn refresher_loop_polls_seeded_source_end_to_end() {
     Mock::given(method("GET"))
         .and(path("/feeds/videos.xml"))
         .and(query_param("channel_id", "UCloop"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            br#"<?xml version="1.0" encoding="UTF-8"?>
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
       xmlns="http://www.w3.org/2005/Atom">
   <title>Loop Channel</title>
@@ -218,9 +219,10 @@ async fn refresher_loop_polls_seeded_source_end_to_end() {
     <published>2024-07-01T00:00:00+00:00</published>
   </entry>
 </feed>"#
-                .to_vec(),
-            "application/atom+xml",
-        ))
+                    .to_vec(),
+                "application/atom+xml",
+            ),
+        )
         .mount(&mock_server)
         .await;
 
@@ -228,8 +230,13 @@ async fn refresher_loop_polls_seeded_source_end_to_end() {
     let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
 
     // Poll the DB until the seeded source has the expected item, or
-    // give up after ~5 s.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // give up after ~15 s. The generous deadline absorbs slow CI
+    // runners; the loop exits early as soon as the row appears so a
+    // healthy run still completes in well under a second.
+    // `tokio::time::pause` is not an option here because wiremock and
+    // sqlx both rely on real I/O, so we deliberately use a wall-clock
+    // budget with early exit instead.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut found = false;
     while std::time::Instant::now() < deadline {
         let count: i64 = sqlx::query_scalar(

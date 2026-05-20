@@ -161,27 +161,47 @@ impl RefresherConfig {
         // silently fall back to the default so the refresher cannot
         // be wedged by a bad config write.
         let mut cfg = RefresherConfig::default();
-        if let Some(v) = raw.dispatch_delay_ms.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(v) = raw
+            .dispatch_delay_ms
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             if RANGE_DISPATCH_DELAY_MS.contains(&v) {
                 cfg.dispatch_delay = Duration::from_millis(v);
             }
         }
-        if let Some(v) = raw.max_inflight.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(v) = raw
+            .max_inflight
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             if RANGE_MAX_INFLIGHT.contains(&v) {
                 cfg.max_inflight = v as usize;
             }
         }
-        if let Some(v) = raw.batch_size.as_deref().and_then(|s| s.parse::<i64>().ok()) {
+        if let Some(v) = raw
+            .batch_size
+            .as_deref()
+            .and_then(|s| s.parse::<i64>().ok())
+        {
             if RANGE_BATCH_SIZE.contains(&v) {
                 cfg.batch_size = v;
             }
         }
-        if let Some(v) = raw.idle_tick_s.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(v) = raw
+            .idle_tick_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             if RANGE_IDLE_TICK_S.contains(&v) {
                 cfg.idle_tick = Duration::from_secs(v);
             }
         }
-        if let Some(v) = raw.channel_interval_s.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(v) = raw
+            .channel_interval_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             if RANGE_CHANNEL_INTERVAL_S.contains(&v) {
                 cfg.channel_interval = Duration::from_secs(v);
             }
@@ -209,9 +229,11 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Background refresher loop. Public so integration tests can spawn
-/// it directly and abort the resulting `JoinHandle` rather than
-/// going through [`spawn`] (which discards the handle).
+/// Background refresher loop. Exposed (and hidden from rustdoc) only
+/// so integration tests can spawn it directly and abort the resulting
+/// `JoinHandle` rather than going through [`spawn`] (which discards
+/// the handle). Production callers should use [`spawn`].
+#[doc(hidden)]
 pub async fn run(pool: SqlitePool) {
     // Builder failure is treated as fatal for the refresher: if we
     // can't construct a properly-configured HTTP client we won't run
@@ -253,15 +275,15 @@ pub async fn run(pool: SqlitePool) {
         // next_poll_at into the future so the next claim_due_sources
         // call (in this iteration or another) cannot return the same
         // rows while their polls are still in flight.
-        let due =
-            match feed_cache::claim_due_sources(&pool, now, cfg.batch_size, LEASE_SECS).await {
-                Ok(d) => d,
-                Err(err) => {
-                    warn!(%err, "feed refresher: claim_due_sources query failed");
-                    tokio::time::sleep(cfg.idle_tick).await;
-                    continue;
-                }
-            };
+        let due = match feed_cache::claim_due_sources(&pool, now, cfg.batch_size, LEASE_SECS).await
+        {
+            Ok(d) => d,
+            Err(err) => {
+                warn!(%err, "feed refresher: claim_due_sources query failed");
+                tokio::time::sleep(cfg.idle_tick).await;
+                continue;
+            }
+        };
 
         if due.is_empty() {
             tokio::time::sleep(cfg.idle_tick).await;
@@ -401,22 +423,13 @@ async fn poll_one(
             let next =
                 now + backoff_for_attempt(source.consecutive_errors + 1, cfg.channel_interval);
             let msg = err.to_string();
-            feed_cache::record_poll_failure(
-                pool,
-                &source.kind,
-                &source.source_id,
-                &msg,
-                next,
-                now,
-            )
-            .await?;
+            feed_cache::record_poll_failure(pool, &source.kind, &source.source_id, &msg, next, now)
+                .await?;
             warn!(error = %msg, "source poll failed");
         }
     }
     Ok(())
 }
-
-
 
 async fn persist_items(
     pool: &SqlitePool,

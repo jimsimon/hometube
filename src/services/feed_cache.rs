@@ -231,10 +231,15 @@ pub async fn record_poll_skipped(
     reason: &str,
     next_poll_at: i64,
 ) -> AppResult<()> {
+    // Also reset `consecutive_errors` so rows that previously accumulated
+    // errors under the pre-fix deferred-playlist behaviour stop showing a
+    // misleading non-zero error count on the diagnostics page once they
+    // transition to the intentionally-skipped path.
     sqlx::query(
         "UPDATE feed_sources SET \
-             last_error    = ?, \
-             next_poll_at  = ? \
+             last_error         = ?, \
+             consecutive_errors = 0, \
+             next_poll_at       = ? \
          WHERE kind = ? AND source_id = ?",
     )
     .bind(reason)
@@ -317,9 +322,9 @@ pub async fn claim_due_sources(
 /// videos, dedupes by `video_id` keeping the most recent
 /// `published_at`, and sorts/limits.
 ///
-/// We over-fetch with a small multiplier and dedupe in Rust rather
-/// than depending on SQLite's window-function support, which keeps
-/// this query simple and portable.
+/// Dedupe is performed inside SQL via a `ROW_NUMBER()` window
+/// function so the outer `LIMIT` applies to already-deduped rows and
+/// cannot be eaten by duplicates that survive into Rust.
 pub async fn feed_for_child(
     pool: &SqlitePool,
     child_id: i64,
@@ -549,15 +554,9 @@ mod tests {
         )
         .await
         .unwrap();
-        replace_source_items(
-            &pool,
-            KIND_CHANNEL,
-            "UC2",
-            &[mk_item("vC", 300)],
-            0,
-        )
-        .await
-        .unwrap();
+        replace_source_items(&pool, KIND_CHANNEL, "UC2", &[mk_item("vC", 300)], 0)
+            .await
+            .unwrap();
 
         // Child only allowlists UC1.
         allow_channel(&pool, child, "UC1").await;
@@ -621,24 +620,12 @@ mod tests {
         upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
         upsert_source(&pool, KIND_PLAYLIST, "PL1").await.unwrap();
 
-        replace_source_items(
-            &pool,
-            KIND_CHANNEL,
-            "UC1",
-            &[mk_item("vSame", 100)],
-            0,
-        )
-        .await
-        .unwrap();
-        replace_source_items(
-            &pool,
-            KIND_PLAYLIST,
-            "PL1",
-            &[mk_item("vSame", 200)],
-            0,
-        )
-        .await
-        .unwrap();
+        replace_source_items(&pool, KIND_CHANNEL, "UC1", &[mk_item("vSame", 100)], 0)
+            .await
+            .unwrap();
+        replace_source_items(&pool, KIND_PLAYLIST, "PL1", &[mk_item("vSame", 200)], 0)
+            .await
+            .unwrap();
 
         allow_channel(&pool, child, "UC1").await;
         sqlx::query(
@@ -668,27 +655,40 @@ mod tests {
     async fn record_poll_skipped_does_not_touch_polled_or_success_columns() {
         let pool = setup_db().await;
         upsert_source(&pool, KIND_PLAYLIST, "PL1").await.unwrap();
+        // Simulate legacy state: a non-zero consecutive_errors carried
+        // over from the pre-fix code path that treated unsupported kinds
+        // as failures. The skipped path must clear this so the
+        // diagnostics page doesn't keep showing a misleading error
+        // count.
+        sqlx::query("UPDATE feed_sources SET consecutive_errors = 5 WHERE source_id = 'PL1'")
+            .execute(&pool)
+            .await
+            .unwrap();
         record_poll_skipped(&pool, KIND_PLAYLIST, "PL1", "deferred", 12345)
             .await
             .unwrap();
-        let (lp, ls, le, errs, next): (
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-            i64,
-            i64,
-        ) = sqlx::query_as(
-            "SELECT last_polled_at, last_success_at, last_error, \
+        let (lp, ls, le, errs, next): (Option<i64>, Option<i64>, Option<String>, i64, i64) =
+            sqlx::query_as(
+                "SELECT last_polled_at, last_success_at, last_error, \
                     consecutive_errors, next_poll_at \
                FROM feed_sources WHERE kind='playlist' AND source_id='PL1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(lp.is_none(), "last_polled_at must not be set by skipped path");
-        assert!(ls.is_none(), "last_success_at must not be set by skipped path");
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            lp.is_none(),
+            "last_polled_at must not be set by skipped path"
+        );
+        assert!(
+            ls.is_none(),
+            "last_success_at must not be set by skipped path"
+        );
         assert_eq!(le.as_deref(), Some("deferred"));
-        assert_eq!(errs, 0);
+        assert_eq!(
+            errs, 0,
+            "skipped path must reset legacy consecutive_errors so diagnostics stop showing a stale non-zero count"
+        );
         assert_eq!(next, 12345);
     }
 
