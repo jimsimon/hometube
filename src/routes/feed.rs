@@ -249,7 +249,7 @@ pub async fn up_next(
         (Some("channel"), Some(channel_id)) => {
             up_next_from_channel(&state, current.id, channel_id).await?
         }
-        _ => up_next_from_new_videos(&state, current.id).await?,
+        _ => up_next_from_new_videos(&state, current.id, limit).await?,
     };
 
     // For non-playlist contexts, exclude videos the child has already
@@ -445,7 +445,11 @@ fn channel_seed(channel_id: &str) -> i64 {
     h.finish() as i64
 }
 
-async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<Vec<UpNextItem>> {
+async fn up_next_from_new_videos(
+    state: &AppState,
+    child_id: i64,
+    limit: usize,
+) -> AppResult<Vec<UpNextItem>> {
     let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
         Ok(y) => y,
         Err(err) => {
@@ -508,11 +512,11 @@ async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<V
     }
     buckets.shuffle(&mut rng);
 
-    // Round-robin pop until we have ~2× the default limit. The caller
-    // (`up_next`) trims further after current_video/watched/access-
-    // control filtering, so a small headroom is plenty — collecting
-    // everything wastes work for users with many allowlisted sources.
-    let target = UP_NEXT_DEFAULT_LIMIT * 2;
+    // Round-robin pop until we have ~2× the caller's limit. The
+    // caller (`up_next`) trims further after current_video/watched/
+    // access-control filtering, so 2× gives enough headroom while
+    // skipping wasted work for users with many allowlisted sources.
+    let target = limit.saturating_mul(2).max(UP_NEXT_DEFAULT_LIMIT);
     let mut out: Vec<UpNextItem> = Vec::new();
     let mut exhausted = 0usize;
     while exhausted < buckets.len() && out.len() < target {
