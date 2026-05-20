@@ -11,10 +11,14 @@
 //!   currently on screen, given a `from=playlist:ID|channel:ID|video:ID`
 //!   context. Drops blocked + access-denied items.
 
+use std::collections::HashSet;
+
 use axum::{
     extract::{Query, State},
     Json,
 };
+use rand::seq::SliceRandom;
+use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
@@ -233,18 +237,38 @@ pub async fn up_next(
     // Parse `from`.
     let (kind, id) = parse_from(q.from.as_deref());
 
+    let is_playlist_ctx = matches!(kind, Some("playlist"));
     let raw: Vec<UpNextItem> = match (kind, id) {
         (Some("playlist"), Some(playlist_id)) => {
-            up_next_from_playlist(&state, current.id, playlist_id).await?
+            up_next_from_playlist(&state, current.id, playlist_id, q.current_video.as_deref())
+                .await?
         }
-        (Some("channel"), Some(channel_id)) => up_next_from_channel(&state, channel_id).await?,
+        (Some("channel"), Some(channel_id)) => {
+            up_next_from_channel(&state, current.id, channel_id).await?
+        }
         _ => up_next_from_new_videos(&state, current.id).await?,
     };
 
-    // Drop the current video and access-control failures.
+    // For non-playlist contexts, exclude videos the child has already
+    // watched so the queue actually rotates instead of resurfacing the
+    // same items. Playlist contexts preserve order: the user explicitly
+    // opened that list and may want to re-watch in sequence.
+    let watched: HashSet<String> = if is_playlist_ctx {
+        HashSet::new()
+    } else {
+        child_watched_video_ids(&state.db, current.id)
+            .await
+            .unwrap_or_default()
+    };
+
+    // Drop the current video, watched items (non-playlist), and
+    // access-control failures.
     let mut out = Vec::with_capacity(limit);
     for item in raw {
         if Some(&item.video_id) == q.current_video.as_ref() {
+            continue;
+        }
+        if watched.contains(&item.video_id) {
             continue;
         }
         if can_child_view(
@@ -266,6 +290,41 @@ pub async fn up_next(
     Ok(Json(out))
 }
 
+/// Build a deterministic RNG keyed to `(child_id, today)` so the
+/// up-next list stays stable for a given child within a calendar day
+/// and rotates naturally each day. Without this, every page load
+/// reshuffles the list, which is jarring when the user navigates
+/// back-and-forth between videos.
+fn daily_rng(child_id: i64) -> StdRng {
+    let day = chrono::Utc::now().timestamp() / 86_400;
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&(child_id as u64).to_le_bytes());
+    seed[8..16].copy_from_slice(&(day as u64).to_le_bytes());
+    StdRng::from_seed(seed)
+}
+
+/// Returns the set of video IDs the child has any watch_history row for.
+async fn child_watched_video_ids(
+    db: &sqlx::SqlitePool,
+    child_id: i64,
+) -> AppResult<HashSet<String>> {
+    // DISTINCT + recency cap: we only need to know which recently-watched
+    // IDs to exclude, not the entire history. A child's watch_history
+    // can grow unbounded over time, so bound the query to the most
+    // recently watched 500 distinct videos.
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT video_id FROM watch_history \
+         WHERE child_account_id = ? \
+         GROUP BY video_id \
+         ORDER BY MAX(last_watched_at) DESC \
+         LIMIT 500",
+    )
+    .bind(child_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|(v,)| v).collect())
+}
+
 fn parse_from(from: Option<&str>) -> (Option<&str>, Option<&str>) {
     let Some(s) = from else {
         return (None, None);
@@ -280,6 +339,7 @@ async fn up_next_from_playlist(
     state: &AppState,
     child_id: i64,
     playlist_id: &str,
+    current_video: Option<&str>,
 ) -> AppResult<Vec<UpNextItem>> {
     // Match either by primary-key id or by youtube_playlist_id.
     let row: Option<(i64,)> = sqlx::query_as(
@@ -303,7 +363,8 @@ async fn up_next_from_playlist(
     .bind(local_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(rows
+
+    let items: Vec<UpNextItem> = rows
         .into_iter()
         .map(|(video_id, title, thumb, ch)| UpNextItem {
             video_id,
@@ -312,10 +373,29 @@ async fn up_next_from_playlist(
             channel_title: ch,
             thumbnail_url: thumb,
         })
-        .collect())
+        .collect();
+
+    // Treat `current_video` as a cursor: return items after it, wrapping
+    // around so the queue still has something if the current item is at
+    // the end of the list. When there's no current video, return the
+    // full list in order.
+    let Some(current) = current_video else {
+        return Ok(items);
+    };
+    let Some(idx) = items.iter().position(|it| it.video_id == current) else {
+        return Ok(items);
+    };
+    let mut out = Vec::with_capacity(items.len().saturating_sub(1));
+    out.extend(items.iter().skip(idx + 1).cloned());
+    out.extend(items.iter().take(idx).cloned());
+    Ok(out)
 }
 
-async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<Vec<UpNextItem>> {
+async fn up_next_from_channel(
+    state: &AppState,
+    child_id: i64,
+    channel_id: &str,
+) -> AppResult<Vec<UpNextItem>> {
     let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
         Ok(y) => y,
         Err(_) => return Ok(Vec::new()),
@@ -330,7 +410,7 @@ async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<V
                 next_page_token: None,
             }
         });
-    Ok(page
+    let mut items: Vec<UpNextItem> = page
         .items
         .into_iter()
         .map(|it| UpNextItem {
@@ -340,7 +420,23 @@ async fn up_next_from_channel(state: &AppState, channel_id: &str) -> AppResult<V
             channel_title: it.channel_title,
             thumbnail_url: pick_thumbnail(&it.thumbnails),
         })
-        .collect())
+        .collect();
+    // Shuffle so consecutive visits don't surface the same top-N
+    // uploads. Seed deterministically so the order is stable within a
+    // day for a given child + channel and rotates daily.
+    let mut rng = daily_rng(child_id ^ channel_seed(channel_id));
+    items.shuffle(&mut rng);
+    Ok(items)
+}
+
+/// Hash a channel ID into a stable `i64` so we can mix it into the
+/// daily RNG seed (so two different channels for the same child shuffle
+/// differently).
+fn channel_seed(channel_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    channel_id.hash(&mut h);
+    h.finish() as i64
 }
 
 async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<Vec<UpNextItem>> {
@@ -351,30 +447,67 @@ async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<V
 
     let channels = child_allowlisted_channel_ids(&state.db, child_id).await?;
     let playlists = child_allowlisted_playlist_ids(&state.db, child_id).await?;
-    let mut out: Vec<UpNextItem> = Vec::new();
+
+    // Collect each source's items into its own bucket so we can
+    // interleave (round-robin) instead of front-loading the first
+    // channel's uploads.
+    let mut buckets: Vec<Vec<UpNextItem>> = Vec::new();
     for channel_id in &channels {
         if let Ok(page) = yt.list_channel_videos(channel_id, 5, None).await {
-            for it in page.items {
-                out.push(UpNextItem {
+            let bucket: Vec<UpNextItem> = page
+                .items
+                .into_iter()
+                .map(|it| UpNextItem {
                     video_id: it.video_id,
                     title: it.title,
                     channel_id: it.channel_id.or_else(|| Some(channel_id.clone())),
                     channel_title: it.channel_title,
                     thumbnail_url: pick_thumbnail(&it.thumbnails),
-                });
+                })
+                .collect();
+            if !bucket.is_empty() {
+                buckets.push(bucket);
             }
         }
     }
     for playlist_id in &playlists {
         if let Ok(page) = yt.list_playlist_items(playlist_id, 5, None).await {
-            for it in page.items {
-                out.push(UpNextItem {
+            let bucket: Vec<UpNextItem> = page
+                .items
+                .into_iter()
+                .map(|it| UpNextItem {
                     video_id: it.video_id,
                     title: it.title,
                     channel_id: it.channel_id,
                     channel_title: it.channel_title,
                     thumbnail_url: pick_thumbnail(&it.thumbnails),
-                });
+                })
+                .collect();
+            if !bucket.is_empty() {
+                buckets.push(bucket);
+            }
+        }
+    }
+
+    // Shuffle each bucket so the picked items aren't always the newest
+    // few, then round-robin across buckets so the result mixes sources.
+    // Daily-deterministic so the home queue is stable for a given
+    // child within a day.
+    let mut rng = daily_rng(child_id);
+    for bucket in &mut buckets {
+        bucket.shuffle(&mut rng);
+    }
+    buckets.shuffle(&mut rng);
+
+    let mut out: Vec<UpNextItem> = Vec::new();
+    let mut exhausted = 0usize;
+    while exhausted < buckets.len() {
+        exhausted = 0;
+        for bucket in &mut buckets {
+            if let Some(it) = bucket.pop() {
+                out.push(it);
+            } else {
+                exhausted += 1;
             }
         }
     }

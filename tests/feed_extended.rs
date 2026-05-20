@@ -197,6 +197,120 @@ async fn up_next_with_limit() {
     assert_eq!(body.as_array().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn up_next_from_playlist_cursors_after_current_video() {
+    // With current_video set to a middle item, the response should
+    // continue from the next position and wrap around — never resurface
+    // the same prefix every time.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    let pl_id: i64 = sqlx::query_scalar(
+        "INSERT INTO child_playlists (child_account_id, title, is_own) \
+         VALUES (?, 'Cursor', 1) RETURNING id",
+    )
+    .bind(child_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+
+    for (pos, vid) in [(0, "v0"), (1, "v1"), (2, "v2"), (3, "v3")] {
+        sqlx::query(
+            "INSERT INTO child_playlist_videos (playlist_id, video_id, video_title, position) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(pl_id)
+        .bind(vid)
+        .bind(pos)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(child_id)
+        .bind(vid)
+        .bind(parent_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let url = format!("/api/feed/up-next?from=playlist:{pl_id}&current_video=v2");
+    let res = app.server.get(&url).await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let arr = body.as_array().unwrap();
+    // Cursor at v2 → next is v3, then wrap to v0, v1.
+    let ids: Vec<&str> = arr.iter().map(|v| v["video_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["v3", "v0", "v1"]);
+}
+
+#[tokio::test]
+async fn up_next_playlist_ignores_watch_history() {
+    // Playlist contexts preserve order even when items have been
+    // watched before — users explicitly opened the playlist.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    let pl_id: i64 = sqlx::query_scalar(
+        "INSERT INTO child_playlists (child_account_id, title, is_own) \
+         VALUES (?, 'Watched', 1) RETURNING id",
+    )
+    .bind(child_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+
+    for (pos, vid) in [(0, "w-a"), (1, "w-b")] {
+        sqlx::query(
+            "INSERT INTO child_playlist_videos (playlist_id, video_id, video_title, position) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(pl_id)
+        .bind(vid)
+        .bind(pos)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(child_id)
+        .bind(vid)
+        .bind(parent_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    // Mark w-b as already watched.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'w-b', 'T', NULL, NULL, 100, 100, 1)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let url = format!("/api/feed/up-next?from=playlist:{pl_id}&current_video=w-a");
+    let body: serde_json::Value = app.server.get(&url).await.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    // w-b is still present despite being in watch_history.
+    assert_eq!(ids, vec!["w-b"]);
+}
+
 // ---------------------------------------------------------------------------
 // New videos feed
 // ---------------------------------------------------------------------------

@@ -244,6 +244,51 @@ async fn close_open_log(state: &AppState, child_id: i64, video_id: &str) -> AppR
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ProgressBody {
+    pub video_id: String,
+    pub position_seconds: i64,
+    #[serde(default)]
+    pub duration_seconds: Option<i64>,
+    #[serde(default)]
+    pub video_title: Option<String>,
+    #[serde(default)]
+    pub video_thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub channel_title: Option<String>,
+}
+
+/// `POST /api/usage/progress`.
+///
+/// Position-only update — writes to `watch_history` so the resume
+/// point is accurate to 1s, but does **not** touch `usage_log` or
+/// re-evaluate the daily limit. The player fires this on pause, seek,
+/// and ended; the 30s heartbeat continues to drive screen-time
+/// accounting.
+pub async fn progress(
+    State(state): State<AppState>,
+    current: CurrentAccount,
+    Json(body): Json<ProgressBody>,
+) -> AppResult<axum::http::StatusCode> {
+    // Reuse the same upsert as the heartbeat handler by adapting the
+    // payload to `HeartbeatBody`. Keeps the SQL in exactly one place.
+    // Clamp untrusted client input. A negative position or duration
+    // would render as nonsense in continue-watching.
+    let position = body.position_seconds.max(0);
+    let duration = body.duration_seconds.map(|d| d.max(0));
+    let hb = HeartbeatBody {
+        video_id: body.video_id,
+        position_seconds: position,
+        duration_seconds: duration,
+        video_title: body.video_title,
+        video_thumbnail_url: body.video_thumbnail_url,
+        channel_title: body.channel_title,
+        elapsed_seconds: None,
+    };
+    upsert_watch_history(&state, current.id, &hb).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 async fn upsert_watch_history(
     state: &AppState,
     child_id: i64,

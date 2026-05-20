@@ -315,6 +315,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/feed/new-videos", get(feed::new_videos))
         .route("/api/feed/up-next", get(feed::up_next))
         .route("/api/usage/heartbeat", post(usage::heartbeat))
+        .route("/api/usage/progress", post(usage::progress))
         .route("/api/search", get(search::child_search))
         .route_layer(axum::middleware::from_fn(require_child));
 

@@ -290,6 +290,15 @@ export class VideoPlayer extends LitElement {
 
   private heartbeatTimer: number | null = null;
   private lastHeartbeatAt = 0;
+  /**
+   * True once at least one regular 30s heartbeat has been sent for this
+   * video. Used to gate the unload beacon: we only flush remaining
+   * progress for videos that have already crossed the "really watched"
+   * threshold, so quick previews don't pollute watch_history.
+   */
+  private heartbeatSent = false;
+  /** Debounce timer for `seeked` events so scrubbing doesn't burst-POST. */
+  private seekedTimer: number | null = null;
   /** True after a manual play interaction; resets the autoplay counter. */
   private manualPlayed = false;
   /** Last currentTime we saw — used to compute heartbeat deltas. */
@@ -472,6 +481,13 @@ export class VideoPlayer extends LitElement {
     document.addEventListener("hometube:sleep-timer-expired", this.onSleepExpired as EventListener);
     document.addEventListener("hometube:bookmarks-loaded", this.onBookmarksLoaded as EventListener);
     document.addEventListener("hometube:autoplay-cap-reached", this.onAutoplayCap as EventListener);
+    // Flush progress when the page is hidden/unloaded (tab close,
+    // navigation to next video, app backgrounded on mobile). Without
+    // this, any progress accumulated since the last 30s heartbeat is
+    // lost — which is why watch_history / continue-watching looked
+    // inconsistent for short or quickly-navigated sessions.
+    window.addEventListener("pagehide", this.onPageHide);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -496,6 +512,12 @@ export class VideoPlayer extends LitElement {
       "hometube:autoplay-cap-reached",
       this.onAutoplayCap as EventListener,
     );
+    window.removeEventListener("pagehide", this.onPageHide);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    if (this.seekedTimer != null) {
+      window.clearTimeout(this.seekedTimer);
+      this.seekedTimer = null;
+    }
   }
 
   /** Inject shaka-player's controls.css into this shadow root. */
@@ -510,6 +532,8 @@ export class VideoPlayer extends LitElement {
     if (this.loadInFlight) return;
     this.loadInFlight = true;
     this.error = "";
+    // Reset the "really watched" gate when the video changes.
+    this.heartbeatSent = false;
     try {
       // Restore the audio-only preference (global, not per-video).
       try {
@@ -691,6 +715,7 @@ export class VideoPlayer extends LitElement {
     this.videoEl.addEventListener("play", this.onPlay);
     this.videoEl.addEventListener("pause", this.onPause);
     this.videoEl.addEventListener("ended", this.onEnded);
+    this.videoEl.addEventListener("seeked", this.onSeeked);
     this.videoEl.addEventListener("volumechange", this.onVolumeChange);
 
     // Restore persisted volume level.
@@ -795,6 +820,7 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("play", this.onPlay);
       this.videoEl.removeEventListener("pause", this.onPause);
       this.videoEl.removeEventListener("ended", this.onEnded);
+      this.videoEl.removeEventListener("seeked", this.onSeeked);
       this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
       this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
     }
@@ -907,6 +933,20 @@ export class VideoPlayer extends LitElement {
 
   private onPause = (): void => {
     this.stopHeartbeat();
+    // Flush the exact playhead so resume is accurate to 1s without
+    // waiting for the next 30s heartbeat.
+    void this.sendProgress();
+  };
+
+  private onSeeked = (): void => {
+    // Debounce: `seeked` fires on every scrub-bar release, including
+    // intermediate stops while the user drags. We only need the final
+    // resting position.
+    if (this.seekedTimer != null) window.clearTimeout(this.seekedTimer);
+    this.seekedTimer = window.setTimeout(() => {
+      this.seekedTimer = null;
+      void this.sendProgress();
+    }, 500);
   };
 
   private onEnded = (): void => {
@@ -1009,22 +1049,97 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  private async sendHeartbeat(): Promise<void> {
-    if (!this.videoEl || !this.metadata) return;
+  /**
+   * Build the common payload shape shared by the heartbeat, progress,
+   * and beacon-flush endpoints. `elapsedSeconds` is only included when
+   * we're crediting usage time (heartbeat + beacon); position-only
+   * progress updates omit it so the server skips `usage_log`.
+   */
+  private buildUsagePayload(elapsedSeconds: number | null): Record<string, unknown> | null {
+    if (!this.videoEl || !this.metadata) return null;
+    const payload: Record<string, unknown> = {
+      video_id: this.videoId,
+      position_seconds: Math.floor(this.videoEl.currentTime ?? 0),
+      duration_seconds: Math.floor(this.videoEl.duration ?? 0) || null,
+      video_title: this.metadata.title,
+      video_thumbnail_url: this.metadata.thumbnail_url,
+      channel_title: this.metadata.channel_title,
+    };
+    if (elapsedSeconds != null) payload.elapsed_seconds = elapsedSeconds;
+    return payload;
+  }
+
+  /**
+   * Flush a final heartbeat when the page is hiding. Uses
+   * `navigator.sendBeacon` because regular `fetch` is not guaranteed to
+   * complete during unload. Without this, progress accumulated since
+   * the last 30s tick is silently dropped when the user navigates to
+   * the next video or closes the tab.
+   */
+  private onPageHide = (): void => {
+    this.flushBeacon();
+  };
+
+  private onVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") this.flushBeacon();
+  };
+
+  private flushBeacon(): void {
+    if (this.preview) return;
+    // Only flush if the user has already watched long enough for at
+    // least one regular heartbeat to land. Otherwise quick previews
+    // (open, glance, close in <30s) would still create watch_history
+    // entries via the beacon.
+    if (!this.heartbeatSent) return;
     const now = Date.now();
     const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
+    // Skip if we just sent one — `pagehide` + `visibilitychange` can
+    // both fire on the same transition.
+    if (elapsed < 2) return;
+    const payload = this.buildUsagePayload(elapsed);
+    if (!payload) return;
     this.lastHeartbeatAt = now;
     try {
-      const res = await api.post<HeartbeatResponse>("/api/usage/heartbeat", {
-        video_id: this.videoId,
-        position_seconds: Math.floor(this.videoEl.currentTime ?? 0),
-        duration_seconds: Math.floor(this.videoEl.duration ?? 0) || null,
-        video_title: this.metadata.title,
-        video_thumbnail_url: this.metadata.thumbnail_url,
-        channel_title: this.metadata.channel_title,
-        elapsed_seconds: elapsed,
-      });
+      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      navigator.sendBeacon?.("/api/usage/heartbeat", blob);
+    } catch {
+      // Best-effort — nothing we can do during unload.
+    }
+  }
+
+  /**
+   * Position-only update. Fires on pause/seeked/ended so the resume
+   * point in `watch_history` stays accurate to ~1s without bumping
+   * the 30s usage-time accounting. Gated by `heartbeatSent` so a
+   * quick preview (open + immediate seek/close) doesn't create a
+   * `watch_history` row.
+   */
+  private async sendProgress(): Promise<void> {
+    if (this.preview) return;
+    if (!this.heartbeatSent) return;
+    const payload = this.buildUsagePayload(null);
+    if (!payload) return;
+    try {
+      await api.post("/api/usage/progress", payload);
+    } catch {
+      // Best-effort — progress will get caught by the next heartbeat
+      // or the unload beacon.
+    }
+  }
+
+  private async sendHeartbeat(): Promise<void> {
+    const now = Date.now();
+    const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
+    const payload = this.buildUsagePayload(elapsed);
+    if (!payload) return;
+    this.lastHeartbeatAt = now;
+    try {
+      const res = await api.post<HeartbeatResponse>("/api/usage/heartbeat", payload);
       this.remainingSeconds = res.remaining_seconds;
+      // Mark that a real heartbeat has landed — gates sendProgress
+      // and the unload beacon so quick previews don't write to
+      // watch_history.
+      this.heartbeatSent = true;
       if (res.limit_exceeded) {
         this.handleUsageLimit({
           reason: res.reason ?? "limit_exceeded",
