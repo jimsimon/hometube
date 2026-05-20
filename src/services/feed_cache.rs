@@ -216,6 +216,36 @@ pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> Ap
     Ok(())
 }
 
+/// Mark a poll as **skipped** — no network I/O happened, but the row
+/// is rescheduled into the future and tagged so the diagnostics UI
+/// can distinguish skipped-by-policy from a recent successful poll.
+///
+/// Used for sources whose `kind` the refresher does not yet support
+/// (currently anything except `channel`). Crucially, this does NOT
+/// touch `last_polled_at` / `last_success_at` so the diagnostics page
+/// doesn't pretend a network round-trip occurred.
+pub async fn record_poll_skipped(
+    pool: &SqlitePool,
+    kind: &str,
+    source_id: &str,
+    reason: &str,
+    next_poll_at: i64,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE feed_sources SET \
+             last_error    = ?, \
+             next_poll_at  = ? \
+         WHERE kind = ? AND source_id = ?",
+    )
+    .bind(reason)
+    .bind(next_poll_at)
+    .bind(kind)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Mark a poll as failed. Increments `consecutive_errors` and schedules
 /// the next attempt. Does **not** clear cached items so the feed
 /// continues to serve stale data through transient outages.
@@ -309,12 +339,16 @@ pub async fn feed_for_child(
         source_id: String,
     }
 
-    // Over-fetch to account for dedupe collapse.
-    let fetch_limit = (limit as i64).saturating_mul(3);
+    // Window-function dedupe collapses duplicates inside SQL, so the
+    // LIMIT applies to already-deduped rows.
+    let fetch_limit = limit as i64;
 
     // Excludes both parent-controlled `blocked_videos` and per-child
     // `hidden_videos` so the row matches the visibility rules the old
-    // `can_child_view`-based handler enforced.
+    // `can_child_view`-based handler enforced. Dedupes by `video_id`
+    // inside the query (a video appearing in multiple allowed sources
+    // is collapsed to its newest copy) so the `LIMIT` cannot be eaten
+    // by duplicates and produce a short result.
     let rows: Vec<Row> = sqlx::query_as(
         "WITH allowed(kind, source_id) AS ( \
              SELECT 'channel', channel_id \
@@ -322,19 +356,28 @@ pub async fn feed_for_child(
              UNION ALL \
              SELECT 'playlist', playlist_id \
                FROM allowlisted_playlists WHERE child_account_id = ?1 \
+         ), \
+         candidates AS ( \
+             SELECT i.video_id, i.title, i.channel_id, i.channel_title, \
+                    i.thumbnail_url, i.published_raw, i.published_at, \
+                    i.kind, i.source_id, \
+                    ROW_NUMBER() OVER ( \
+                        PARTITION BY i.video_id \
+                        ORDER BY COALESCE(i.published_at, 0) DESC, i.fetched_at DESC \
+                    ) AS rn \
+               FROM feed_source_items i \
+               JOIN allowed a ON a.kind = i.kind AND a.source_id = i.source_id \
+              WHERE NOT EXISTS ( \
+                    SELECT 1 FROM blocked_videos b \
+                     WHERE b.child_account_id = ?1 AND b.video_id = i.video_id) \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM hidden_videos h \
+                     WHERE h.child_account_id = ?1 AND h.video_id = i.video_id) \
          ) \
-         SELECT i.video_id, i.title, i.channel_id, i.channel_title, \
-                i.thumbnail_url, i.published_raw, i.published_at, \
-                i.kind, i.source_id \
-           FROM feed_source_items i \
-           JOIN allowed a ON a.kind = i.kind AND a.source_id = i.source_id \
-          WHERE NOT EXISTS ( \
-                SELECT 1 FROM blocked_videos b \
-                 WHERE b.child_account_id = ?1 AND b.video_id = i.video_id) \
-            AND NOT EXISTS ( \
-                SELECT 1 FROM hidden_videos h \
-                 WHERE h.child_account_id = ?1 AND h.video_id = i.video_id) \
-          ORDER BY COALESCE(i.published_at, 0) DESC \
+         SELECT video_id, title, channel_id, channel_title, \
+                thumbnail_url, published_raw, published_at, kind, source_id \
+           FROM candidates WHERE rn = 1 \
+          ORDER BY COALESCE(published_at, 0) DESC \
           LIMIT ?2",
     )
     .bind(child_id)
@@ -342,12 +385,8 @@ pub async fn feed_for_child(
     .fetch_all(pool)
     .await?;
 
-    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(limit);
     for r in rows {
-        if !seen.insert(r.video_id.clone()) {
-            continue;
-        }
         out.push(NewVideoItem {
             video_id: r.video_id,
             title: r.title,
@@ -358,9 +397,6 @@ pub async fn feed_for_child(
             source_kind: r.kind,
             source_id: r.source_id,
         });
-        if out.len() >= limit {
-            break;
-        }
     }
     Ok(out)
 }
@@ -626,6 +662,34 @@ mod tests {
             .as_deref()
             .map(|s| s.ends_with("200Z"))
             .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn record_poll_skipped_does_not_touch_polled_or_success_columns() {
+        let pool = setup_db().await;
+        upsert_source(&pool, KIND_PLAYLIST, "PL1").await.unwrap();
+        record_poll_skipped(&pool, KIND_PLAYLIST, "PL1", "deferred", 12345)
+            .await
+            .unwrap();
+        let (lp, ls, le, errs, next): (
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT last_polled_at, last_success_at, last_error, \
+                    consecutive_errors, next_poll_at \
+               FROM feed_sources WHERE kind='playlist' AND source_id='PL1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(lp.is_none(), "last_polled_at must not be set by skipped path");
+        assert!(ls.is_none(), "last_success_at must not be set by skipped path");
+        assert_eq!(le.as_deref(), Some("deferred"));
+        assert_eq!(errs, 0);
+        assert_eq!(next, 12345);
     }
 
     #[tokio::test]

@@ -8,10 +8,13 @@
 
 mod common;
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
 use hometube::services::feed_cache;
+use hometube::services::feed_refresher::{self, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS};
 use hometube::services::setup::set_config_value;
 use hometube::services::youtube_rss::{self, PollOutcome, KEY_RSS_BASE_URL};
 use wiremock::matchers::{method, path, query_param};
@@ -165,4 +168,96 @@ async fn rss_304_preserves_existing_items() {
     .await
     .unwrap();
     assert_eq!(count, 1, "304 must not clear cached items");
+}
+
+/// End-to-end test of the actual `feed_refresher::run` loop. Unlike
+/// the earlier tests which call `poll_channel` directly, this one
+/// spawns the production background task with a tight dispatch
+/// interval, lets it pick up a seeded `feed_sources` row, and asserts
+/// the row's items appear in `feed_source_items` afterwards.
+///
+/// Covers the otherwise-untested code paths:
+///   - `claim_due_sources` lease acquisition
+///   - rate-gate dispatch interval
+///   - bounded-inflight semaphore
+///   - the loop's outer drain step
+#[tokio::test]
+async fn refresher_loop_polls_seeded_source_end_to_end() {
+    let mock_server = MockServer::start().await;
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+
+    // Point the refresher's RSS client + tighten its cadence so the
+    // test takes seconds rather than minutes.
+    set_config_value(&app.pool, KEY_RSS_BASE_URL, &mock_server.uri())
+        .await
+        .unwrap();
+    set_config_value(&app.pool, KEY_DISPATCH_DELAY_MS, "50")
+        .await
+        .unwrap();
+    set_config_value(&app.pool, KEY_CHANNEL_INTERVAL_S, "60")
+        .await
+        .unwrap();
+
+    feed_cache::upsert_source(&app.pool, "channel", "UCloop")
+        .await
+        .unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/feeds/videos.xml"))
+        .and(query_param("channel_id", "UCloop"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns="http://www.w3.org/2005/Atom">
+  <title>Loop Channel</title>
+  <entry>
+    <yt:videoId>loop-vid</yt:videoId>
+    <yt:channelId>UCloop</yt:channelId>
+    <title>Loop Episode</title>
+    <author><name>Loop Channel</name></author>
+    <published>2024-07-01T00:00:00+00:00</published>
+  </entry>
+</feed>"#
+                .to_vec(),
+            "application/atom+xml",
+        ))
+        .mount(&mock_server)
+        .await;
+
+    // Spawn the refresher and let it drive the source.
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    // Poll the DB until the seeded source has the expected item, or
+    // give up after ~5 s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feed_source_items \
+             WHERE kind='channel' AND source_id='UCloop' AND video_id='loop-vid'",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .unwrap_or(0);
+        if count == 1 {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    handle.abort();
+    assert!(found, "refresher did not populate the seeded source");
+
+    // The source bookkeeping should reflect a successful poll: last_success_at
+    // set, no error, consecutive_errors reset.
+    let (ls, err, errs): (Option<i64>, Option<String>, i64) = sqlx::query_as(
+        "SELECT last_success_at, last_error, consecutive_errors \
+           FROM feed_sources WHERE kind='channel' AND source_id='UCloop'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(ls.is_some(), "last_success_at must be set after a poll");
+    assert!(err.is_none(), "no error expected, got {err:?}");
+    assert_eq!(errs, 0);
 }

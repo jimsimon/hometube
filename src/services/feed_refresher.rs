@@ -209,7 +209,10 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn run(pool: SqlitePool) {
+/// Background refresher loop. Public so integration tests can spawn
+/// it directly and abort the resulting `JoinHandle` rather than
+/// going through [`spawn`] (which discards the handle).
+pub async fn run(pool: SqlitePool) {
     // Builder failure is treated as fatal for the refresher: if we
     // can't construct a properly-configured HTTP client we won't run
     // at all, rather than silently fall back to a client with no
@@ -326,23 +329,19 @@ async fn poll_one(
     cfg: RefresherConfig,
 ) -> crate::error::AppResult<()> {
     if source.kind != KIND_CHANNEL {
-        // Playlists are deferred. Reschedule into the distant future
-        // (1 year) via the success path so we DON'T accumulate
-        // consecutive_errors forever and chew through batch slots
-        // when this kind eventually becomes due again.
+        // Playlists are deferred. Reschedule far into the future
+        // (1 year) via the *skipped* path so we:
+        //   (a) don't accumulate consecutive_errors forever, and
+        //   (b) don't pollute last_polled_at / last_success_at on
+        //       the diagnostics page with a "healthy" timestamp for
+        //       a row that never made a network request.
         let one_year_secs: i64 = 365 * 24 * 60 * 60;
-        let now = unix_now();
-        feed_cache::record_poll_success(
+        feed_cache::record_poll_skipped(
             pool,
-            feed_cache::PollSuccess {
-                kind: &source.kind,
-                source_id: &source.source_id,
-                title: None,
-                etag: source.etag.as_deref(),
-                last_modified: source.last_modified.as_deref(),
-                next_poll_at: now + one_year_secs,
-                now,
-            },
+            &source.kind,
+            &source.source_id,
+            "kind not supported (deferred)",
+            unix_now() + one_year_secs,
         )
         .await?;
         return Ok(());
