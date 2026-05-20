@@ -239,22 +239,14 @@ export class FeedRefresherSettings extends LitElement {
   /** Returns a warning string when the DB value disagrees with the
    * effective (clamped) value — meaning the stored value was rejected
    * by range validation in the backend. */
-  private rawWarning(
-    key: keyof typeof RANGES,
-    effective: number | string,
-  ): string | null {
+  private rawWarning(key: keyof typeof RANGES, effective: number | string): string | null {
     const raw = this.settings?.raw?.[key];
     if (raw == null) return null;
     if (raw === String(effective)) return null;
     return `Stored value "${raw}" is out of range; using ${effective} instead.`;
   }
 
-  private renderField(
-    key: keyof typeof RANGES,
-    label: string,
-    effective: number,
-    hint: string,
-  ) {
+  private renderField(key: keyof typeof RANGES, label: string, effective: number, hint: string) {
     const [min, max] = RANGES[key];
     const err = this.fieldError(key);
     const warn = this.rawWarning(key, effective);
@@ -283,8 +275,8 @@ export class FeedRefresherSettings extends LitElement {
     return html`
       <article>
         <p class="hint">
-          The background refresher polls each allowlisted channel's RSS
-          feed and caches the results so <code>/api/feed/new-videos</code>
+          The background refresher polls each allowlisted channel's RSS feed and caches the results
+          so <code>/api/feed/new-videos</code>
           is a single database read. Tunables are read live from
           <code>app_config</code>; changes apply within
           <strong>${this.settings.idle_tick_s} s</strong>.
@@ -326,15 +318,11 @@ export class FeedRefresherSettings extends LitElement {
         <button @click=${() => this.save()} ?disabled=${this.busy || this.hasAnyError()}>
           ${this.busy ? "Saving…" : "Save settings"}
         </button>
-        ${this.status
-          ? html`<p class="status-text" role="status">${this.status}</p>`
-          : nothing}
+        ${this.status ? html`<p class="status-text" role="status">${this.status}</p>` : nothing}
 
         <h3 class="sources-heading">Feed sources (${this.sources.length})</h3>
         ${this.sources.length === 0
-          ? html`<p class="hint">
-              No sources registered yet. Allowlist a channel to add one.
-            </p>`
+          ? html`<p class="hint">No sources registered yet. Allowlist a channel to add one.</p>`
           : html`
               <table>
                 <thead>
@@ -353,9 +341,7 @@ export class FeedRefresherSettings extends LitElement {
                       <tr>
                         <td>
                           <div>${s.title ?? s.source_id}</div>
-                          <div class="hint">
-                            ${s.kind}: <code>${s.source_id}</code>
-                          </div>
+                          <div class="hint">${s.kind}: <code>${s.source_id}</code></div>
                         </td>
                         <td>${s.item_count}</td>
                         <td>${this.fmtTimestamp(s.last_polled_at)}</td>
@@ -364,9 +350,8 @@ export class FeedRefresherSettings extends LitElement {
                         <td>
                           ${s.last_error
                             ? html`<span class="error" title=${s.last_error}>
-                                ${s.consecutive_errors} error${s.consecutive_errors === 1
-                                  ? ""
-                                  : "s"}
+                                ${s.consecutive_errors}
+                                error${s.consecutive_errors === 1 ? "" : "s"}
                               </span>`
                             : html`<span class="ok">OK</span>`}
                         </td>

@@ -168,41 +168,58 @@ pub async fn admin_put_refresher_settings(
     use crate::error::AppError;
     use crate::services::feed_refresher::{
         KEY_BATCH_SIZE, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_IDLE_TICK_S,
-        KEY_MAX_INFLIGHT,
+        KEY_MAX_INFLIGHT, RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S, RANGE_DISPATCH_DELAY_MS,
+        RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT,
     };
     use crate::services::setup::set_config_value;
 
     if let Some(v) = body.dispatch_delay_ms {
-        if !(50..=600_000).contains(&v) {
-            return Err(AppError::BadRequest(
-                "dispatch_delay_ms must be 50..=600000".into(),
-            ));
+        if !RANGE_DISPATCH_DELAY_MS.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "dispatch_delay_ms must be {}..={}",
+                RANGE_DISPATCH_DELAY_MS.start(),
+                RANGE_DISPATCH_DELAY_MS.end()
+            )));
         }
         set_config_value(&state.db, KEY_DISPATCH_DELAY_MS, &v.to_string()).await?;
     }
     if let Some(v) = body.max_inflight {
-        if !(1..=64).contains(&v) {
-            return Err(AppError::BadRequest("max_inflight must be 1..=64".into()));
+        if !RANGE_MAX_INFLIGHT.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "max_inflight must be {}..={}",
+                RANGE_MAX_INFLIGHT.start(),
+                RANGE_MAX_INFLIGHT.end()
+            )));
         }
         set_config_value(&state.db, KEY_MAX_INFLIGHT, &v.to_string()).await?;
     }
     if let Some(v) = body.batch_size {
-        if !(1..=500).contains(&v) {
-            return Err(AppError::BadRequest("batch_size must be 1..=500".into()));
+        if !RANGE_BATCH_SIZE.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "batch_size must be {}..={}",
+                RANGE_BATCH_SIZE.start(),
+                RANGE_BATCH_SIZE.end()
+            )));
         }
         set_config_value(&state.db, KEY_BATCH_SIZE, &v.to_string()).await?;
     }
     if let Some(v) = body.idle_tick_s {
-        if !(1..=3600).contains(&v) {
-            return Err(AppError::BadRequest("idle_tick_s must be 1..=3600".into()));
+        if !RANGE_IDLE_TICK_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "idle_tick_s must be {}..={}",
+                RANGE_IDLE_TICK_S.start(),
+                RANGE_IDLE_TICK_S.end()
+            )));
         }
         set_config_value(&state.db, KEY_IDLE_TICK_S, &v.to_string()).await?;
     }
     if let Some(v) = body.channel_interval_s {
-        if !(60..=86_400).contains(&v) {
-            return Err(AppError::BadRequest(
-                "channel_interval_s must be 60..=86400".into(),
-            ));
+        if !RANGE_CHANNEL_INTERVAL_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "channel_interval_s must be {}..={}",
+                RANGE_CHANNEL_INTERVAL_S.start(),
+                RANGE_CHANNEL_INTERVAL_S.end()
+            )));
         }
         set_config_value(&state.db, KEY_CHANNEL_INTERVAL_S, &v.to_string()).await?;
     }

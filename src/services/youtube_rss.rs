@@ -66,8 +66,13 @@ pub async fn poll_channel(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> AppResult<PollOutcome> {
-    let url = format!("{base}/feeds/videos.xml?channel_id={channel_id}");
-    let mut req = http.get(&url);
+    // Build the request through reqwest's typed query API rather than
+    // string-interpolating `channel_id` into the URL — even though
+    // YouTube channel IDs are constrained to a safe alphabet, the
+    // helper takes care of percent-encoding for any future caller
+    // that passes user-controlled input.
+    let url = format!("{base}/feeds/videos.xml");
+    let mut req = http.get(&url).query(&[("channel_id", channel_id)]);
     if let Some(tag) = etag {
         req = req.header(IF_NONE_MATCH, tag);
     }
@@ -192,9 +197,7 @@ pub fn parse_atom(xml: &str) -> Result<(Option<String>, Vec<ItemRow>), quick_xml
                 }
             }
             Event::End(e) => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
                 let local = e.local_name();
                 match local.as_ref() {
                     b"entry" => {
@@ -236,6 +239,10 @@ pub fn parse_atom(xml: &str) -> Result<(Option<String>, Vec<ItemRow>), quick_xml
             Event::Text(t) => {
                 let text = t.unescape().unwrap_or_default().into_owned();
                 match current_tag {
+                    // Only record the first non-empty title we see;
+                    // YouTube's feed has a single <title> at feed level,
+                    // but defending against repeats is cheap.
+                    #[allow(clippy::collapsible_match)]
                     Some(TextTarget::FeedTitle) => {
                         if feed_title.is_none() && !text.is_empty() {
                             feed_title = Some(text);

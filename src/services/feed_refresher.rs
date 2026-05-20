@@ -156,35 +156,49 @@ impl RefresherConfig {
             }
         }
 
+        // Range checks here are the canonical source of truth and are
+        // mirrored by the PUT-endpoint validator. Out-of-range values
+        // silently fall back to the default so the refresher cannot
+        // be wedged by a bad config write.
         let mut cfg = RefresherConfig::default();
         if let Some(v) = raw.dispatch_delay_ms.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-            if v >= 50 {
+            if RANGE_DISPATCH_DELAY_MS.contains(&v) {
                 cfg.dispatch_delay = Duration::from_millis(v);
             }
         }
         if let Some(v) = raw.max_inflight.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-            if (1..=64).contains(&v) {
+            if RANGE_MAX_INFLIGHT.contains(&v) {
                 cfg.max_inflight = v as usize;
             }
         }
         if let Some(v) = raw.batch_size.as_deref().and_then(|s| s.parse::<i64>().ok()) {
-            if (1..=500).contains(&v) {
+            if RANGE_BATCH_SIZE.contains(&v) {
                 cfg.batch_size = v;
             }
         }
         if let Some(v) = raw.idle_tick_s.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-            if (1..=3600).contains(&v) {
+            if RANGE_IDLE_TICK_S.contains(&v) {
                 cfg.idle_tick = Duration::from_secs(v);
             }
         }
         if let Some(v) = raw.channel_interval_s.as_deref().and_then(|s| s.parse::<u64>().ok()) {
-            if (60..=24 * 60 * 60).contains(&v) {
+            if RANGE_CHANNEL_INTERVAL_S.contains(&v) {
                 cfg.channel_interval = Duration::from_secs(v);
             }
         }
         (cfg, raw)
     }
 }
+
+// Canonical (inclusive) ranges for each tunable. Used both by
+// `RefresherConfig::load_with_raw` (to clamp values from app_config)
+// and re-exported for the PUT-endpoint validator so the two cannot
+// drift apart.
+pub const RANGE_DISPATCH_DELAY_MS: std::ops::RangeInclusive<u64> = 50..=600_000;
+pub const RANGE_MAX_INFLIGHT: std::ops::RangeInclusive<u64> = 1..=64;
+pub const RANGE_BATCH_SIZE: std::ops::RangeInclusive<i64> = 1..=500;
+pub const RANGE_IDLE_TICK_S: std::ops::RangeInclusive<u64> = 1..=3600;
+pub const RANGE_CHANNEL_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
 
 /// Public entry point: spawn the refresher onto the current runtime.
 /// Hands back a `JoinHandle` purely for testability; production code
@@ -313,15 +327,22 @@ async fn poll_one(
 ) -> crate::error::AppResult<()> {
     if source.kind != KIND_CHANNEL {
         // Playlists are deferred. Reschedule into the distant future
-        // so the queue doesn't keep returning them.
-        let next = unix_now() + cfg.channel_interval.as_secs() as i64 * 24;
-        feed_cache::record_poll_failure(
+        // (1 year) via the success path so we DON'T accumulate
+        // consecutive_errors forever and chew through batch slots
+        // when this kind eventually becomes due again.
+        let one_year_secs: i64 = 365 * 24 * 60 * 60;
+        let now = unix_now();
+        feed_cache::record_poll_success(
             pool,
-            &source.kind,
-            &source.source_id,
-            "kind not supported",
-            next,
-            unix_now(),
+            feed_cache::PollSuccess {
+                kind: &source.kind,
+                source_id: &source.source_id,
+                title: None,
+                etag: source.etag.as_deref(),
+                last_modified: source.last_modified.as_deref(),
+                next_poll_at: now + one_year_secs,
+                now,
+            },
         )
         .await?;
         return Ok(());
@@ -342,13 +363,15 @@ async fn poll_one(
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
-                &source.kind,
-                &source.source_id,
-                None,
-                source.etag.as_deref(),
-                source.last_modified.as_deref(),
-                next,
-                now,
+                feed_cache::PollSuccess {
+                    kind: &source.kind,
+                    source_id: &source.source_id,
+                    title: None,
+                    etag: source.etag.as_deref(),
+                    last_modified: source.last_modified.as_deref(),
+                    next_poll_at: next,
+                    now,
+                },
             )
             .await?;
         }
@@ -362,13 +385,15 @@ async fn poll_one(
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
-                &source.kind,
-                &source.source_id,
-                title.as_deref(),
-                etag.as_deref(),
-                last_modified.as_deref(),
-                next,
-                now,
+                feed_cache::PollSuccess {
+                    kind: &source.kind,
+                    source_id: &source.source_id,
+                    title: title.as_deref(),
+                    etag: etag.as_deref(),
+                    last_modified: last_modified.as_deref(),
+                    next_poll_at: next,
+                    now,
+                },
             )
             .await?;
             debug!(count = items.len(), "source updated");
@@ -415,10 +440,13 @@ pub fn jittered_interval(interval: Duration) -> i64 {
 ///
 /// `attempt` is the post-failure error count (i.e. 1 for the first
 /// failure). `interval` is the steady-state inter-poll interval used
-/// as the geometric base.
+/// as the geometric base. The first failed attempt waits 2× the
+/// steady-state interval (not 1×, which would have been
+/// indistinguishable from a healthy poll cadence — the function name
+/// implies escalation, so each attempt actually escalates).
 pub fn backoff_for_attempt(attempt: i64, interval: Duration) -> i64 {
     let base = interval.as_secs() as f64;
-    let exp = (attempt.clamp(1, 16) as u32).saturating_sub(1);
+    let exp = attempt.clamp(1, 16) as u32;
     let target = base * (2u64.pow(exp) as f64);
     let capped = target.min(MAX_BACKOFF.as_secs() as f64);
     let jitter_frac: f64 = rand::rng().random_range(-0.15..0.15);
@@ -453,7 +481,10 @@ mod tests {
         let two = backoff_for_attempt(2, TEST_INTERVAL);
         let three = backoff_for_attempt(3, TEST_INTERVAL);
         let huge = backoff_for_attempt(50, TEST_INTERVAL);
-        // attempt=1 → ~TEST_INTERVAL
+        // attempt=1 must escalate past the steady-state interval — no
+        // off-by-one with healthy-poll cadence.
+        let base = TEST_INTERVAL.as_secs() as f64;
+        assert!((one as f64) >= base * 1.5, "first backoff too short: {one}");
         assert!(one < two);
         assert!(two < three);
         // Eventually we hit the 24h cap.
