@@ -1098,13 +1098,17 @@ export class VideoPlayer extends LitElement {
     if (elapsed < 2) return;
     const payload = this.buildUsagePayload(elapsed);
     if (!payload) return;
-    this.lastHeartbeatAt = now;
+    let queued = false;
     try {
       const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-      navigator.sendBeacon?.("/api/usage/heartbeat", blob);
+      queued = navigator.sendBeacon?.("/api/usage/heartbeat", blob) ?? false;
     } catch {
       // Best-effort — nothing we can do during unload.
     }
+    // Only advance `lastHeartbeatAt` when the beacon was actually
+    // queued. Otherwise, if the page survives (e.g. visibility flipped
+    // back to visible) the next heartbeat would under-count.
+    if (queued) this.lastHeartbeatAt = now;
   }
 
   /**

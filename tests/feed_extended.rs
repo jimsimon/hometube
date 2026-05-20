@@ -244,7 +244,10 @@ async fn up_next_from_playlist_cursors_after_current_video() {
     let body: serde_json::Value = res.json();
     let arr = body.as_array().unwrap();
     // Cursor at v2 → next is v3, then wrap to v0, v1.
-    let ids: Vec<&str> = arr.iter().map(|v| v["video_id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = arr
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids, vec!["v3", "v0", "v1"]);
 }
 

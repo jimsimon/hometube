@@ -294,6 +294,13 @@ async fn upsert_watch_history(
     child_id: i64,
     body: &HeartbeatBody,
 ) -> AppResult<()> {
+    // `watch_history.video_title` is `NOT NULL`, so the INSERT path
+    // must always have a value — fall back to empty string when the
+    // caller didn't provide one (e.g. the progress endpoint). On the
+    // UPDATE path we bind the raw Option so `COALESCE` keeps the
+    // previously-stored title instead of clobbering it with "".
+    let title_insert = body.video_title.clone().unwrap_or_default();
+    let title_update = body.video_title.clone();
     sqlx::query(
         "INSERT INTO watch_history \
             (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, \
@@ -302,18 +309,19 @@ async fn upsert_watch_history(
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             progress_seconds = excluded.progress_seconds, \
             duration_seconds = COALESCE(excluded.duration_seconds, watch_history.duration_seconds), \
-            video_title = COALESCE(excluded.video_title, watch_history.video_title), \
+            video_title = COALESCE(?, watch_history.video_title), \
             video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, watch_history.video_thumbnail_url), \
             channel_title = COALESCE(excluded.channel_title, watch_history.channel_title), \
             last_watched_at = unixepoch()",
     )
     .bind(child_id)
     .bind(&body.video_id)
-    .bind(body.video_title.clone().unwrap_or_default())
+    .bind(title_insert)
     .bind(body.video_thumbnail_url.clone())
     .bind(body.channel_title.clone())
     .bind(body.duration_seconds)
     .bind(body.position_seconds)
+    .bind(title_update)
     .execute(&state.db)
     .await?;
     Ok(())

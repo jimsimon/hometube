@@ -237,7 +237,10 @@ pub async fn up_next(
     // Parse `from`.
     let (kind, id) = parse_from(q.from.as_deref());
 
-    let is_playlist_ctx = matches!(kind, Some("playlist"));
+    // Only treat as a playlist context when *both* the kind and id
+    // parsed cleanly. `from=playlist` (no id) falls through to the
+    // new-videos pool and must still get the watched-filter applied.
+    let is_playlist_ctx = matches!((kind, id), (Some("playlist"), Some(_)));
     let raw: Vec<UpNextItem> = match (kind, id) {
         (Some("playlist"), Some(playlist_id)) => {
             up_next_from_playlist(&state, current.id, playlist_id, q.current_video.as_deref())
@@ -296,7 +299,12 @@ pub async fn up_next(
 /// reshuffles the list, which is jarring when the user navigates
 /// back-and-forth between videos.
 fn daily_rng(child_id: i64) -> StdRng {
-    let day = chrono::Utc::now().timestamp() / 86_400;
+    // Use local-time day boundary so the queue rotates at the user's
+    // midnight (matches `usage.rs` which also keys daily limits off
+    // `chrono::Local`).
+    use chrono::Datelike;
+    let now = chrono::Local::now();
+    let day = now.year() as i64 * 366 + now.ordinal() as i64;
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&(child_id as u64).to_le_bytes());
     seed[8..16].copy_from_slice(&(day as u64).to_le_bytes());
@@ -308,15 +316,14 @@ async fn child_watched_video_ids(
     db: &sqlx::SqlitePool,
     child_id: i64,
 ) -> AppResult<HashSet<String>> {
-    // DISTINCT + recency cap: we only need to know which recently-watched
-    // IDs to exclude, not the entire history. A child's watch_history
-    // can grow unbounded over time, so bound the query to the most
-    // recently watched 500 distinct videos.
+    // Recency cap: a child's watch_history can grow unbounded over
+    // time, so bound the query to the most recently watched 500 rows.
+    // `watch_history` has UNIQUE(child_account_id, video_id), so no
+    // GROUP BY is needed.
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT video_id FROM watch_history \
          WHERE child_account_id = ? \
-         GROUP BY video_id \
-         ORDER BY MAX(last_watched_at) DESC \
+         ORDER BY last_watched_at DESC \
          LIMIT 500",
     )
     .bind(child_id)
