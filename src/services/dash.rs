@@ -343,7 +343,10 @@ pub fn synthesize_manifest(
     let multi_language_audio = {
         let mut langs = std::collections::BTreeSet::new();
         for f in &all_audio {
-            langs.insert(f.language.clone().unwrap_or_default());
+            // Borrow the language string (or the empty-string
+            // sentinel for unlabeled audio) — we only need the set
+            // cardinality, not owned copies.
+            langs.insert(f.language.as_deref().unwrap_or(""));
         }
         langs.len() > 1
     };
@@ -1449,17 +1452,23 @@ mod tests {
     /// and routed into the `video/mp4` AdaptationSet, same as `avc1.*`.
     /// They share the H.264 decoder pipeline in every browser, so
     /// segregating them would just shrink the ABR ladder for no gain.
+    ///
+    /// We use a synthetic `avc3-1080p` format_id rather than a real
+    /// AVC1 itag (299, 137, …) to avoid implying YouTube ships an
+    /// `avc3` ladder under those itags — they don't; this codepath
+    /// exists for the live-re-encode case where YouTube does serve
+    /// `avc3.*`.
     #[test]
     fn synthesize_manifest_accepts_avc3_codec() {
         let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
         let formats = vec![https_format(
-            "299",
+            "avc3-1080p",
             Some(1080),
             Some("avc3.640028"),
             Some("none"),
             None,
         )];
-        let br = dummy_ranges(&["299"]);
+        let br = dummy_ranges(&["avc3-1080p"]);
         let mpd =
             synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
         assert!(
