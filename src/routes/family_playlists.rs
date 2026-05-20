@@ -238,13 +238,23 @@ pub async fn delete(
 #[derive(Debug, Deserialize)]
 pub struct AddVideoBody {
     pub video_id: String,
+    /// Optional caller-supplied metadata. See the equivalent comment
+    /// on `playlists::AddVideoBody` for the design rationale.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub channel_title: Option<String>,
 }
 
 /// `POST /api/family-playlists/:id/videos` (parent-only).
 ///
-/// Pulls metadata for the video from YouTube (via the discovery sidecar) so the row
-/// has a meaningful title/thumbnail without forcing the parent to type
-/// it in.
+/// Persists a video into the playlist. The caller is encouraged to
+/// pass `title` / `thumbnail_url` (the player has them in scope), in
+/// which case the handler does no network I/O. If those are absent it
+/// falls back to a best-effort sidecar lookup, degrading to the
+/// supplied title if even that fails.
 pub async fn add_video(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -259,18 +269,57 @@ pub async fn add_video(
         return Err(AppError::BadRequest("video_id is required".into()));
     }
 
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_video(video_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound)?;
-    let thumb = info
-        .thumbnails
-        .get("maxres")
-        .or_else(|| info.thumbnails.get("high"))
-        .or_else(|| info.thumbnails.get("medium"))
-        .or_else(|| info.thumbnails.get("default"))
-        .map(|t| t.url.clone());
+    let body_title = body
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_thumb = body
+        .thumbnail_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_channel = body
+        .channel_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let info = if body_title.is_some() && body_thumb.is_some() {
+        None
+    } else {
+        let yt = YoutubeClient::from_db(&state.db).await?;
+        yt.get_video(video_id).await.ok().flatten()
+    };
+
+    let title = body_title
+        .map(str::to_string)
+        .or_else(|| info.as_ref().map(|i| i.title.clone()))
+        .ok_or_else(|| {
+            AppError::BadRequest("video not found on YouTube and no title provided".into())
+        })?;
+    let thumb = body_thumb.map(str::to_string).or_else(|| {
+        info.as_ref().and_then(|i| {
+            i.thumbnails
+                .get("maxres")
+                .or_else(|| i.thumbnails.get("high"))
+                .or_else(|| i.thumbnails.get("medium"))
+                .or_else(|| i.thumbnails.get("default"))
+                .map(|t| t.url.clone())
+        })
+    });
+    let channel_title = body_channel
+        .map(str::to_string)
+        .or_else(|| info.as_ref().and_then(|i| i.channel_title.clone()));
+    // Use the sidecar-canonical video ID when available — the sidecar
+    // normalises alternate forms (e.g. URL params, mixed-case IDs)
+    // that the caller may have sent. Falls back to the caller's
+    // trimmed string when no sidecar lookup happened (body-only
+    // path). Mirrors the same pattern in `routes::playlists::add_video`.
+    let canonical_video_id = info
+        .as_ref()
+        .map(|i| i.id.clone())
+        .unwrap_or_else(|| video_id.to_string());
 
     let next_position: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM family_playlist_videos WHERE playlist_id = ?",
@@ -290,10 +339,10 @@ pub async fn add_video(
          RETURNING id, video_id, video_title, video_thumbnail_url, channel_title, position, added_at",
     )
     .bind(id)
-    .bind(video_id)
-    .bind(&info.title)
+    .bind(&canonical_video_id)
+    .bind(&title)
     .bind(&thumb)
-    .bind(info.channel_title.as_deref())
+    .bind(channel_title)
     .bind(next_position)
     .fetch_one(&state.db)
     .await?;

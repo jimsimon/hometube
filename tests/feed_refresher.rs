@@ -14,10 +14,14 @@ use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
 use hometube::services::feed_cache;
-use hometube::services::feed_refresher::{self, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS};
+use hometube::services::feed_refresher::{
+    self, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_SIDECAR_FALLBACK_ENABLED,
+    KEY_SIDECAR_FALLBACK_MAX_PER_HOUR, KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S,
+};
 use hometube::services::setup::set_config_value;
 use hometube::services::youtube_rss::{self, PollOutcome, KEY_RSS_BASE_URL};
-use wiremock::matchers::{method, path, query_param};
+use serde_json::json;
+use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SAMPLE_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -267,4 +271,470 @@ async fn refresher_loop_polls_seeded_source_end_to_end() {
     assert!(ls.is_some(), "last_success_at must be set after a poll");
     assert!(err.is_none(), "no error expected, got {err:?}");
     assert_eq!(errs, 0);
+}
+
+// ===========================================================================
+// Sidecar fallback (RSS fails → sidecar steps in)
+// ===========================================================================
+//
+// These three tests share the same end-to-end shape used above:
+// wiremock the RSS host with a 404, wiremock the sidecar with a per-test
+// response, spawn `feed_refresher::run`, and poll the DB until the
+// expected `feed_sources` state appears.
+//
+// We deliberately exercise the production loop (`feed_refresher::run`)
+// rather than calling `run_sidecar_fallback` directly because the
+// helpers are private. Going through the loop also covers the
+// rate-cap eligibility check (`fallback_caps_permit`) and the
+// reservation write that the helpers don't expose.
+
+/// Common test setup for the three fallback tests below. Returns the
+/// app, the RSS mock server, and the sidecar mock server. Both mocks
+/// are wired into `app_config` and the refresher cadence is tightened
+/// for a fast test.
+async fn setup_fallback_test() -> (common::TestApp, MockServer, MockServer) {
+    let rss_mock = MockServer::start().await;
+    let sidecar_mock = MockServer::start().await;
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+
+    set_config_value(&app.pool, KEY_RSS_BASE_URL, &rss_mock.uri())
+        .await
+        .unwrap();
+    set_config_value(&app.pool, "discovery_sidecar_url", &sidecar_mock.uri())
+        .await
+        .unwrap();
+    // Tighten cadence so the test resolves quickly.
+    set_config_value(&app.pool, KEY_DISPATCH_DELAY_MS, "50")
+        .await
+        .unwrap();
+    set_config_value(&app.pool, KEY_CHANNEL_INTERVAL_S, "60")
+        .await
+        .unwrap();
+    // Permit fallbacks: enabled + per-source cap of 1 minute (so the
+    // initial NULL `last_sidecar_fallback_at` permits a fallback
+    // immediately).
+    set_config_value(&app.pool, KEY_SIDECAR_FALLBACK_ENABLED, "true")
+        .await
+        .unwrap();
+    set_config_value(&app.pool, KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S, "60")
+        .await
+        .unwrap();
+    set_config_value(&app.pool, KEY_SIDECAR_FALLBACK_MAX_PER_HOUR, "120")
+        .await
+        .unwrap();
+
+    (app, rss_mock, sidecar_mock)
+}
+
+/// Poll the DB until `predicate` returns true, or fail after ~10 s.
+/// Mirrors the deadline pattern used by `refresher_loop_polls_seeded_source_end_to_end`.
+async fn wait_until<F>(label: &str, mut predicate: F)
+where
+    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+{
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if predicate().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for: {label}");
+}
+
+#[tokio::test]
+async fn fallback_writes_items_when_rss_fails_and_sidecar_returns_items() {
+    let (app, rss_mock, sidecar_mock) = setup_fallback_test().await;
+
+    feed_cache::upsert_source(&app.pool, "channel", "UCfb1")
+        .await
+        .unwrap();
+
+    // RSS returns 404 (simulates the YouTube outage).
+    Mock::given(method("GET"))
+        .and(path("/feeds/videos.xml"))
+        .and(query_param("channel_id", "UCfb1"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&rss_mock)
+        .await;
+
+    // Sidecar returns one item.
+    Mock::given(method("GET"))
+        .and(path("/channel-videos/UCfb1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                {
+                    "video_id": "vid-from-sidecar",
+                    "title": "Fallback Video",
+                    "channel_id": "UCfb1",
+                    "channel_title": "Fallback Channel",
+                    "thumbnails": {
+                        "high": {"url": "https://t.test/x.jpg", "width": 480, "height": 360}
+                    },
+                    "published_at": "3 days ago",
+                    "position": null
+                }
+            ],
+            "next_page_token": null
+        })))
+        .mount(&sidecar_mock)
+        .await;
+
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    let pool = app.pool.clone();
+    wait_until("fallback item appears in feed_source_items", move || {
+        let pool = pool.clone();
+        Box::pin(async move {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feed_source_items \
+                 WHERE kind='channel' AND source_id='UCfb1' AND video_id='vid-from-sidecar'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            n == 1
+        })
+    })
+    .await;
+    handle.abort();
+
+    // The source should look like a successful poll: errors cleared,
+    // last_success_at set, and the sidecar fallback timestamp written
+    // so a future tick sees the per-source cap.
+    let (last_success, errs, fb): (Option<i64>, i64, Option<i64>) = sqlx::query_as(
+        "SELECT last_success_at, consecutive_errors, last_sidecar_fallback_at \
+           FROM feed_sources WHERE kind='channel' AND source_id='UCfb1'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(last_success.is_some(), "last_success_at must be set");
+    assert_eq!(errs, 0, "errors must be reset on fallback success");
+    assert!(fb.is_some(), "last_sidecar_fallback_at must be persisted");
+}
+
+#[tokio::test]
+async fn fallback_marks_dead_only_after_threshold_not_found() {
+    // Debounced shelve: a single sidecar 404 should NOT push
+    // next_poll_at 1 year out. Pre-seed `consecutive_errors` to
+    // threshold-1 so the very next NotFound crosses the threshold
+    // and shelves the row. (Going through three real cycles would
+    // also work but takes longer; this exercises the same code
+    // path with a shorter test.)
+    let (app, rss_mock, sidecar_mock) = setup_fallback_test().await;
+
+    feed_cache::upsert_source(&app.pool, "channel", "UCdead")
+        .await
+        .unwrap();
+    // Pre-seed: 2 prior consecutive errors (threshold is 3 today).
+    sqlx::query(
+        "UPDATE feed_sources SET consecutive_errors = 2 \
+          WHERE kind = 'channel' AND source_id = 'UCdead'",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/feeds/videos.xml"))
+        .and(query_param("channel_id", "UCdead"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&rss_mock)
+        .await;
+
+    // Sidecar returns 404 with the "channel not found" payload (the
+    // shape `handleGetChannel` emits when youtubei.js returns null).
+    Mock::given(method("GET"))
+        .and(path("/channel-videos/UCdead"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": "channel not found"
+        })))
+        .mount(&sidecar_mock)
+        .await;
+
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    let pool = app.pool.clone();
+    wait_until("source classified as dead after threshold", move || {
+        let pool = pool.clone();
+        Box::pin(async move {
+            let next: i64 = sqlx::query_scalar(
+                "SELECT next_poll_at FROM feed_sources \
+                 WHERE kind='channel' AND source_id='UCdead'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            next > unix_now() + (30 * 24 * 60 * 60)
+        })
+    })
+    .await;
+    handle.abort();
+
+    let (err, errs): (Option<String>, i64) = sqlx::query_as(
+        "SELECT last_error, consecutive_errors FROM feed_sources \
+         WHERE kind='channel' AND source_id='UCdead'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(
+        err.as_deref().is_some_and(|s| s.contains("not found")),
+        "expected 'not found' in last_error, got {err:?}"
+    );
+    assert_eq!(errs, 0, "dead path must clear the error counter");
+}
+
+/// Companion to the previous test: a first-time NotFound (no prior
+/// errors) should *not* shelve the source — instead it should bump
+/// `consecutive_errors` and reschedule with the normal backoff. This
+/// protects playlists that flip private/public and channels that
+/// briefly 404 during YouTube-side glitches.
+#[tokio::test]
+async fn fallback_first_not_found_backs_off_does_not_shelve() {
+    let (app, rss_mock, sidecar_mock) = setup_fallback_test().await;
+
+    feed_cache::upsert_source(&app.pool, "channel", "UCmaybe-dead")
+        .await
+        .unwrap();
+    // No pre-seed: consecutive_errors starts at 0, so this 404 is
+    // the *first* in a row.
+
+    Mock::given(method("GET"))
+        .and(path("/feeds/videos.xml"))
+        .and(query_param("channel_id", "UCmaybe-dead"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&rss_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/channel-videos/UCmaybe-dead"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"error": "channel not found"})),
+        )
+        .mount(&sidecar_mock)
+        .await;
+
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    // Wait for the row to be processed: consecutive_errors should
+    // tick up from 0 to 1 *without* next_poll_at jumping a year.
+    let pool = app.pool.clone();
+    wait_until("first NotFound increments error counter", move || {
+        let pool = pool.clone();
+        Box::pin(async move {
+            let errs: i64 = sqlx::query_scalar(
+                "SELECT consecutive_errors FROM feed_sources \
+                 WHERE kind='channel' AND source_id='UCmaybe-dead'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            errs >= 1
+        })
+    })
+    .await;
+    handle.abort();
+
+    let (next, errs, err): (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT next_poll_at, consecutive_errors, last_error FROM feed_sources \
+         WHERE kind='channel' AND source_id='UCmaybe-dead'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(
+        next < unix_now() + (30 * 24 * 60 * 60),
+        "first NotFound must back off, not shelve; got next_poll_at = {next}"
+    );
+    assert_eq!(
+        errs, 1,
+        "consecutive_errors should be 1 after first NotFound"
+    );
+    let err = err.unwrap();
+    assert!(
+        err.contains("not found") && err.contains("1/"),
+        "diagnostic should reflect the running count; got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_soft_fails_when_sidecar_5xxs() {
+    let (app, rss_mock, sidecar_mock) = setup_fallback_test().await;
+
+    feed_cache::upsert_source(&app.pool, "channel", "UCsoft")
+        .await
+        .unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/feeds/videos.xml"))
+        .and(query_param("channel_id", "UCsoft"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&rss_mock)
+        .await;
+
+    // Sidecar 500. The refresher must *not* classify the source as
+    // dead — it should fall back to the standard
+    // `record_poll_failure` path so a transient sidecar error doesn't
+    // shelve real channels for a year.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/channel-videos/UCsoft.*"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream boom"))
+        .mount(&sidecar_mock)
+        .await;
+
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    let pool = app.pool.clone();
+    wait_until(
+        "consecutive_errors increments and last_error is set",
+        move || {
+            let pool = pool.clone();
+            Box::pin(async move {
+                let (errs, err): (i64, Option<String>) = sqlx::query_as(
+                    "SELECT consecutive_errors, last_error FROM feed_sources \
+                 WHERE kind='channel' AND source_id='UCsoft'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap_or((0, None));
+                errs >= 1 && err.is_some()
+            })
+        },
+    )
+    .await;
+    handle.abort();
+
+    let (next, err): (i64, Option<String>) = sqlx::query_as(
+        "SELECT next_poll_at, last_error FROM feed_sources \
+         WHERE kind='channel' AND source_id='UCsoft'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    // Backoff, not the 1-year deferral.
+    assert!(
+        next < unix_now() + (30 * 24 * 60 * 60),
+        "soft-fail must use exponential backoff, not the dead-source defer"
+    );
+    let err = err.unwrap();
+    assert!(
+        err.contains("rss") && err.contains("sidecar"),
+        "last_error should combine both transports; got: {err}"
+    );
+    // The sidecar's upstream status should surface in the message —
+    // we order status-checks before body parsing so a non-JSON 5xx
+    // body doesn't shadow the status code.
+    assert!(
+        err.contains("500"),
+        "last_error should surface the upstream status; got: {err}"
+    );
+}
+
+/// Regression test for the playlist + rate-capped case.
+///
+/// Earlier versions of `poll_one`'s playlist branch shelved the
+/// source for a year whenever `fallback_caps_permit` returned false.
+/// That conflated transient throttling (per-source min interval not
+/// yet elapsed; aggregate hourly cap saturated) with the genuine
+/// no-transport case (sidecar disabled / client construction failed).
+/// The fix is to reschedule the normal interval when caps deny — the
+/// playlist should be picked up again on the next eligible tick.
+#[tokio::test]
+async fn playlist_rate_capped_reschedules_normally_not_shelved() {
+    let (app, _rss_mock, sidecar_mock) = setup_fallback_test().await;
+
+    // Seed a playlist source. Pre-set `last_sidecar_fallback_at` to
+    // "just now" so the per-source min interval (60s in the test
+    // setup) denies a fallback this tick. Pre-seed
+    // `consecutive_errors = 2` so we can prove the rate-cap path
+    // doesn't clobber an existing failure history (this is the
+    // distinction between `record_poll_deferred` and the older
+    // `record_poll_skipped` path).
+    feed_cache::upsert_source(&app.pool, "playlist", "PLcapped")
+        .await
+        .unwrap();
+    let now = unix_now();
+    sqlx::query(
+        "UPDATE feed_sources \
+            SET last_sidecar_fallback_at = ?, \
+                consecutive_errors = 2, \
+                next_poll_at = 0 \
+          WHERE kind = 'playlist' AND source_id = 'PLcapped'",
+    )
+    .bind(now)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // The sidecar should *not* be called this tick. If it were, the
+    // test would still pass (the mock returns whatever) — but we
+    // assert below that next_poll_at is within the normal interval
+    // window, not a year out.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/playlist-items/PLcapped.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_page_token": null})),
+        )
+        .mount(&sidecar_mock)
+        .await;
+
+    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
+
+    // Wait for `record_poll_deferred` to land. We can't watch
+    // `next_poll_at` here: `claim_due_sources` pushes it forward to
+    // the lease deadline *before* the deferred-write runs, so a
+    // raw "next_poll_at > 0" check races with the lease and the
+    // test ends up reading the row mid-process on slow CI. Waiting
+    // for the specific `last_error` text the deferred path writes
+    // is the right oracle.
+    let pool = app.pool.clone();
+    wait_until("playlist row processed via deferred path", move || {
+        let pool = pool.clone();
+        Box::pin(async move {
+            let err: Option<String> = sqlx::query_scalar(
+                "SELECT last_error FROM feed_sources \
+                 WHERE kind='playlist' AND source_id='PLcapped'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(None);
+            err.as_deref().is_some_and(|s| s.contains("rate-capped"))
+        })
+    })
+    .await;
+    handle.abort();
+
+    // The rescheduled next_poll_at must be within the normal channel
+    // interval window, NOT pushed a year out. With KEY_CHANNEL_INTERVAL_S
+    // = 60 in the test harness and ±15% jitter, the upper bound is
+    // ~70s. We use a generous 30 day ceiling to firmly reject the
+    // 365-day shelve.
+    let (next, err, errs): (i64, Option<String>, i64) = sqlx::query_as(
+        "SELECT next_poll_at, last_error, consecutive_errors FROM feed_sources \
+         WHERE kind='playlist' AND source_id='PLcapped'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(
+        next < unix_now() + (30 * 24 * 60 * 60),
+        "rate-capped playlist must reschedule normally, not shelve; \
+         got next_poll_at={next} (~{} days ahead)",
+        (next - unix_now()) / 86_400
+    );
+    assert!(
+        err.as_deref().is_some_and(|s| s.contains("rate-capped")),
+        "diagnostic message should identify the rate-cap path; got {err:?}"
+    );
+    assert_eq!(
+        errs, 2,
+        "rate-capped path must preserve prior consecutive_errors; \
+         this is the distinction between record_poll_deferred and \
+         record_poll_skipped"
+    );
+}
+
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
 }

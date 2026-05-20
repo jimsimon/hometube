@@ -163,6 +163,28 @@ pub struct Page<T> {
     pub next_page_token: Option<String>,
 }
 
+/// Outcome of a sidecar refresher-fallback fetch. The refresher needs
+/// to distinguish three outcomes that the higher-level discovery
+/// methods on [`YoutubeClient`] collapse together; see
+/// [`YoutubeClient::refresher_list_channel_videos`].
+#[derive(Debug, Clone)]
+pub enum SidecarRefresherOutcome {
+    /// The source exists. `items` may be empty (live but quiet
+    /// channel) or populated; in either case the refresher treats it
+    /// as a successful poll.
+    Items(Vec<PlaylistItem>),
+    /// The sidecar returned a clean 404 with a "channel not found" /
+    /// "playlist not found" payload. The source is confidently dead;
+    /// the refresher shelves it (pushes `next_poll_at` 1 year out).
+    NotFound,
+    /// The sidecar itself failed (5xx, network timeout, parse error,
+    /// shape mismatch). Carries a short diagnostic string for the
+    /// `last_error` column. The refresher must not classify the
+    /// source based on this — it falls back to the standard
+    /// `record_poll_failure` path.
+    Error(String),
+}
+
 /// Cached entry: timestamp of insertion + the JSON body.
 #[derive(Clone)]
 struct CacheEntry {
@@ -345,6 +367,93 @@ impl YoutubeClient {
             next_page_token: None,
         });
         Ok(page)
+    }
+
+    /// Fetch a channel's recent videos for the refresher fallback path.
+    ///
+    /// Unlike [`Self::list_channel_videos`], this method:
+    /// - bypasses the in-memory response cache (we want fresh data
+    ///   every time the refresher needs it; cached "empty items"
+    ///   would mask a real recovery), and
+    /// - returns a [`SidecarRefresherOutcome`] that distinguishes
+    ///   "channel not found" (a confident 404) from "channel exists
+    ///   with zero items" (a healthy quiet channel) from "sidecar
+    ///   failed" (transport / parse error).
+    pub async fn refresher_list_channel_videos(
+        &self,
+        channel_id: &str,
+        max_results: u32,
+    ) -> SidecarRefresherOutcome {
+        let path = format!(
+            "/channel-videos/{}?maxResults={}",
+            percent_encode(channel_id),
+            max_results.min(50)
+        );
+        self.refresher_fetch_uncached(&path).await
+    }
+
+    /// Same shape as [`Self::refresher_list_channel_videos`] but for
+    /// playlists.
+    pub async fn refresher_list_playlist_items(
+        &self,
+        playlist_id: &str,
+        max_results: u32,
+    ) -> SidecarRefresherOutcome {
+        let path = format!(
+            "/playlist-items/{}?maxResults={}",
+            percent_encode(playlist_id),
+            max_results.min(500)
+        );
+        self.refresher_fetch_uncached(&path).await
+    }
+
+    /// Shared implementation of the refresher-fallback fetch. Bypasses
+    /// the response cache entirely so a long-lived sidecar empty-items
+    /// response can't sit in the cache for 10 minutes and shadow real
+    /// upstream recovery.
+    ///
+    /// Status is inspected **before** the body is parsed so non-JSON
+    /// 5xx responses (e.g. a plaintext error from a misbehaving
+    /// reverse proxy) surface as `Error("sidecar 500…")` instead of
+    /// being shadowed by `Error("sidecar parse: …")`. The 404 branch
+    /// also short-circuits — the sidecar may or may not include a
+    /// JSON body on 404, but we never need it.
+    ///
+    /// Contract for the 404 branch: the caller (`feed_refresher::
+    /// run_sidecar_fallback`) does **not** treat a single 404 as
+    /// "this source is dead." The refresher requires
+    /// `SIDECAR_NOTFOUND_SHELVE_THRESHOLD` consecutive 404s before
+    /// shelving, so a misbehaving sidecar / reverse proxy that
+    /// 404s transiently can't permanently silence a real source.
+    async fn refresher_fetch_uncached(&self, path: &str) -> SidecarRefresherOutcome {
+        let url = format!("{}{path}", self.base_url);
+        let res = match self.http.get(&url).send().await {
+            Ok(r) => r,
+            Err(err) => {
+                return SidecarRefresherOutcome::Error(format!("sidecar transport: {err}"));
+            }
+        };
+        let status = res.status();
+        if status.as_u16() == 404 {
+            return SidecarRefresherOutcome::NotFound;
+        }
+        if !status.is_success() {
+            return SidecarRefresherOutcome::Error(format!("sidecar {status}"));
+        }
+        let body: serde_json::Value = match res.json().await {
+            Ok(b) => b,
+            Err(err) => {
+                return SidecarRefresherOutcome::Error(format!("sidecar parse: {err}"));
+            }
+        };
+        // The sidecar wraps items the same way for both endpoints.
+        let page: Page<PlaylistItem> = match serde_json::from_value(body) {
+            Ok(p) => p,
+            Err(err) => {
+                return SidecarRefresherOutcome::Error(format!("sidecar shape: {err}"));
+            }
+        };
+        SidecarRefresherOutcome::Items(page.items)
     }
 
     /// List the items of a playlist.

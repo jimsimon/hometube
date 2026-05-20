@@ -509,11 +509,58 @@ async function handleRequest(req) {
   } catch (err) {
     console.error("Request failed:", path, err);
 
-    // Re-create the client on errors (may be stale session)
-    yt = null;
+    // Only cycle the `Innertube` client when the error suggests the
+    // anonymous session itself is the problem (auth, consent
+    // interstitial, IP-bound rate limit, dropped TLS session). For
+    // ordinary application errors (404s, parse errors, "not found",
+    // missing fields) we keep the session intact — a long-lived
+    // visitorData looks more like a real user than one that churns
+    // on every transient hiccup, which matters for YouTube's
+    // anti-bot signals.
+    const msg = (err.message || "").toString();
+    // Patterns suggesting the anonymous session / network path is the
+    // problem, not the application logic. Covers:
+    //   - bot-check interstitials: "Sign in to confirm…", "consent.youtube.com"
+    //   - InnerTube rate limits: "429", "Status code 429", "Rate limited"
+    //   - auth surfaces: "unauthorized" / "unauthenticated", "forbidden",
+    //     "Status code 401/403"
+    //   - undici / Node 20 transient TLS / DNS: "aborted", "fetch failed",
+    //     "network error", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "TLS",
+    //     "certificate"
+    //
+    // Whole-word tokens carry `\b` anchors so substrings like "controls"
+    // can't trigger recycling on the embedded "TLS"/"aborted"-ish fragments
+    // that aren't actually session-related. `unauthor` is intentionally
+    // a partial because it covers both "unauthorized" and "unauthenticated"
+    // and there's no realistic English word with that as a non-prefix
+    // substring.
+    const sessionLikely = new RegExp(
+      [
+        /\bsign[- ]?in\b/.source,
+        /\bconsent(?:ed|ing|s)?\b/.source,
+        /\bstatus code 429\b/.source,
+        /\btoo many requests\b/.source,
+        /\brate[- ]?limit(?:ed|ing|s)?\b/.source,
+        /\bstatus code 40[13]\b/.source,
+        /\bunauth/.source,
+        /\bforbidden\b/.source,
+        /\baborted\b/.source,
+        /\bfetch failed\b/.source,
+        /\bnetwork error\b/.source,
+        /\bECONNRESET\b/.source,
+        /\bETIMEDOUT\b/.source,
+        /\bEAI_AGAIN\b/.source,
+        /\bcertificate\b/.source,
+        /\bTLS\b/.source,
+      ].join("|"),
+      "i"
+    ).test(msg);
+    if (sessionLikely) {
+      yt = null;
+    }
 
-    const msg = (err.message || "unknown error").substring(0, 200);
-    return jsonError(502, `upstream error: ${msg}`);
+    const truncated = msg.substring(0, 200) || "unknown error";
+    return jsonError(502, `upstream error: ${truncated}`);
   }
 }
 

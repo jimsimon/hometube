@@ -107,12 +107,18 @@ pub async fn admin_get_refresher_settings(
         batch_size: cfg.batch_size,
         idle_tick_s: cfg.idle_tick.as_secs(),
         channel_interval_s: cfg.channel_interval.as_secs(),
+        sidecar_fallback_enabled: cfg.sidecar_fallback_enabled,
+        sidecar_fallback_min_interval_s: cfg.sidecar_fallback_min_interval.as_secs(),
+        sidecar_fallback_max_per_hour: cfg.sidecar_fallback_max_per_hour,
         raw: RefresherSettingsRaw {
             dispatch_delay_ms: raw.dispatch_delay_ms,
             max_inflight: raw.max_inflight,
             batch_size: raw.batch_size,
             idle_tick_s: raw.idle_tick_s,
             channel_interval_s: raw.channel_interval_s,
+            sidecar_fallback_enabled: raw.sidecar_fallback_enabled,
+            sidecar_fallback_min_interval_s: raw.sidecar_fallback_min_interval_s,
+            sidecar_fallback_max_per_hour: raw.sidecar_fallback_max_per_hour,
         },
     }))
 }
@@ -124,6 +130,15 @@ pub struct RefresherSettings {
     pub batch_size: i64,
     pub idle_tick_s: u64,
     pub channel_interval_s: u64,
+    /// Whether the refresher is allowed to fall back to the
+    /// youtubei.js discovery sidecar when an RSS poll fails.
+    pub sidecar_fallback_enabled: bool,
+    /// Per-source minimum interval (seconds) between successive
+    /// sidecar fallbacks for the same source.
+    pub sidecar_fallback_min_interval_s: u64,
+    /// Aggregate per-hour cap on sidecar fallbacks across the whole
+    /// refresher. `0` = unlimited (per-source still applies).
+    pub sidecar_fallback_max_per_hour: u64,
     /// Raw string values from `app_config` (or null if the key is
     /// unset). When a raw value disagrees with the effective field
     /// above, it was rejected by range validation in
@@ -138,6 +153,9 @@ pub struct RefresherSettingsRaw {
     pub batch_size: Option<String>,
     pub idle_tick_s: Option<String>,
     pub channel_interval_s: Option<String>,
+    pub sidecar_fallback_enabled: Option<String>,
+    pub sidecar_fallback_min_interval_s: Option<String>,
+    pub sidecar_fallback_max_per_hour: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +170,12 @@ pub struct UpdateRefresherSettings {
     pub idle_tick_s: Option<u64>,
     #[serde(default)]
     pub channel_interval_s: Option<u64>,
+    #[serde(default)]
+    pub sidecar_fallback_enabled: Option<bool>,
+    #[serde(default)]
+    pub sidecar_fallback_min_interval_s: Option<u64>,
+    #[serde(default)]
+    pub sidecar_fallback_max_per_hour: Option<u64>,
 }
 
 /// `PUT /api/admin/feed-refresher/settings` — parent-only.
@@ -168,8 +192,10 @@ pub async fn admin_put_refresher_settings(
     use crate::error::AppError;
     use crate::services::feed_refresher::{
         KEY_BATCH_SIZE, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_IDLE_TICK_S,
-        KEY_MAX_INFLIGHT, RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S, RANGE_DISPATCH_DELAY_MS,
-        RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT,
+        KEY_MAX_INFLIGHT, KEY_SIDECAR_FALLBACK_ENABLED, KEY_SIDECAR_FALLBACK_MAX_PER_HOUR,
+        KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S, RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S,
+        RANGE_DISPATCH_DELAY_MS, RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT,
+        RANGE_SIDECAR_FALLBACK_MAX_PER_HOUR, RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S,
     };
     use crate::services::setup::set_config_value;
 
@@ -223,6 +249,40 @@ pub async fn admin_put_refresher_settings(
         }
         set_config_value(&state.db, KEY_CHANNEL_INTERVAL_S, &v.to_string()).await?;
     }
+    if let Some(v) = body.sidecar_fallback_enabled {
+        // Boolean — no range check.
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_FALLBACK_ENABLED,
+            if v { "true" } else { "false" },
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_fallback_min_interval_s {
+        if !RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_fallback_min_interval_s must be {}..={}",
+                RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.start(),
+                RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.end()
+            )));
+        }
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S,
+            &v.to_string(),
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_fallback_max_per_hour {
+        if !RANGE_SIDECAR_FALLBACK_MAX_PER_HOUR.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_fallback_max_per_hour must be {}..={}",
+                RANGE_SIDECAR_FALLBACK_MAX_PER_HOUR.start(),
+                RANGE_SIDECAR_FALLBACK_MAX_PER_HOUR.end()
+            )));
+        }
+        set_config_value(&state.db, KEY_SIDECAR_FALLBACK_MAX_PER_HOUR, &v.to_string()).await?;
+    }
     admin_get_refresher_settings(State(state)).await
 }
 
@@ -237,6 +297,85 @@ pub async fn admin_list_sources(
 ) -> AppResult<Json<Vec<feed_cache::FeedSourceStatus>>> {
     let rows = feed_cache::list_source_status(&state.db).await?;
     Ok(Json(rows))
+}
+
+/// Capacity / utilisation summary for the parent diagnostics UI.
+///
+/// Combines the raw counts from `feed_cache::capacity_counts` with
+/// the effective refresher config to surface "are we keeping up?" as
+/// a single number, plus the inputs that produced it. The UI uses
+/// this to colour-code the panel and prompt the operator to lower
+/// `dispatch_delay_ms` or raise `channel_interval_s` once utilisation
+/// climbs past ~70%.
+#[derive(Debug, Serialize)]
+pub struct RefresherCapacity {
+    /// Number of allowlisted-channel + allowlisted-playlist rows we
+    /// currently track.
+    pub total_sources: i64,
+    /// Sources whose `next_poll_at` is in the past *right now*. A
+    /// healthy refresher keeps this near zero; a persistent non-zero
+    /// value means the dispatcher can't keep up at current tunables.
+    pub queue_depth: i64,
+    /// Actual RSS polls dispatched in the last hour (any source with
+    /// `last_polled_at >= now - 3600`). Imperfect — a source might
+    /// have been polled multiple times in the window but we only
+    /// store the most recent timestamp — but it's a good "is the
+    /// loop actually doing work?" sanity check.
+    pub polls_last_hour: i64,
+    /// Sidecar fallbacks dispatched in the last hour. Mirrors the
+    /// number the aggregate-cap eligibility check sees so the
+    /// operator can validate the cap is working.
+    pub sidecar_fallbacks_last_hour: i64,
+    /// Theoretical maximum polls per hour the dispatcher could
+    /// achieve at the current `dispatch_delay_ms`. Computed as
+    /// `3600 / (dispatch_delay_ms / 1000)`.
+    pub theoretical_polls_per_hour: u64,
+    /// Polls we'd need per hour to honour `channel_interval_s` for
+    /// every source: `total_sources / (channel_interval_s / 3600)`.
+    pub required_polls_per_hour: f64,
+    /// `required / theoretical * 100`, capped at 999. A reading
+    /// above ~70 means the dispatcher is approaching saturation; a
+    /// reading above 100 means the queue can't drain.
+    pub utilization_pct: f64,
+}
+
+/// `GET /api/admin/feed-refresher/capacity` — parent-only.
+pub async fn admin_get_refresher_capacity(
+    State(state): State<AppState>,
+) -> AppResult<Json<RefresherCapacity>> {
+    let now = chrono::Utc::now().timestamp();
+    let counts = feed_cache::capacity_counts(&state.db, now).await?;
+    let cfg = crate::services::feed_refresher::RefresherConfig::load(&state.db).await;
+
+    // Dispatch delay floor of 1ms keeps the division well-defined
+    // even under pathological config.
+    let dispatch_secs = (cfg.dispatch_delay.as_millis() as f64 / 1000.0).max(0.001);
+    let theoretical = (3600.0 / dispatch_secs).floor() as u64;
+
+    let interval_secs = cfg.channel_interval.as_secs().max(1) as f64;
+    let required = counts.total_sources as f64 * 3600.0 / interval_secs;
+
+    let util = if theoretical == 0 {
+        0.0
+    } else {
+        // Round to one decimal place server-side so two saves that
+        // produce mathematically-equivalent settings serialise to the
+        // same string, and the UI's `<70` threshold isn't sensitive
+        // to float fuzz like 69.99999999999.
+        let raw = (required / theoretical as f64 * 100.0).min(999.0);
+        (raw * 10.0).round() / 10.0
+    };
+    let required = (required * 10.0).round() / 10.0;
+
+    Ok(Json(RefresherCapacity {
+        total_sources: counts.total_sources,
+        queue_depth: counts.queue_depth,
+        polls_last_hour: counts.polls_last_hour,
+        sidecar_fallbacks_last_hour: counts.sidecar_fallbacks_last_hour,
+        theoretical_polls_per_hour: theoretical,
+        required_polls_per_hour: required,
+        utilization_pct: util,
+    }))
 }
 
 /// `GET /api/feed/new-videos`.

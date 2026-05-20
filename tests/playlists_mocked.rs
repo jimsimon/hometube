@@ -214,6 +214,41 @@ async fn family_playlist_add_video_with_mocked_youtube() {
     assert_eq!(body["video_id"], "fam-vid");
 }
 
+/// Same body-metadata-shortcut test as for child playlists: when the
+/// parent UI sends title/thumbnail, the sidecar isn't consulted.
+#[tokio::test]
+async fn family_playlist_add_video_uses_body_metadata_skipping_sidecar() {
+    let (app, _auth, mock_server) = boot_with_mock(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post("/api/family-playlists")
+        .json(&json!({ "title": "Family Body-Only", "child_ids": [child_id] }))
+        .await;
+    let pl_id = res.json::<serde_json::Value>()["id"].as_i64().unwrap();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/videos/.*"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("nope"))
+        .mount(&mock_server)
+        .await;
+
+    let res = app
+        .server
+        .post(&format!("/api/family-playlists/{pl_id}/videos"))
+        .json(&json!({
+            "video_id": "fam-body",
+            "title": "Family Body Title",
+            "thumbnail_url": "https://t.test/fam-body.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_title"], "Family Body Title");
+    assert_eq!(body["video_thumbnail_url"], "https://t.test/fam-body.jpg");
+}
+
 // ===========================================================================
 // Child playlists — detail triggers lazy-refresh for YouTube playlists
 // ===========================================================================
@@ -332,4 +367,44 @@ async fn download_stream_resolves_format_for_child() {
     let status = res.status_code().as_u16();
     assert_ne!(status, 403, "access check should pass");
     assert_ne!(status, 401, "auth check should pass");
+}
+
+/// When the caller passes title + thumbnail in the request body, the
+/// handler skips the sidecar lookup entirely. This is the design
+/// payoff: a transient sidecar failure no longer breaks adding a
+/// video to a playlist from the player UI.
+#[tokio::test]
+async fn child_playlist_add_video_uses_body_metadata_skipping_sidecar() {
+    let (app, _auth, mock_server) = boot_with_mock(AccountType::Child).await;
+
+    let res = app
+        .server
+        .post("/api/playlists")
+        .json(&json!({ "title": "Body-Only", "description": "" }))
+        .await;
+    let pl_id = res.json::<serde_json::Value>()["id"].as_i64().unwrap();
+
+    // Configure the sidecar mock to 500 on *any* /videos/ lookup. If
+    // the handler hit it, the request would fail.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/videos/.*"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("nope"))
+        .mount(&mock_server)
+        .await;
+
+    let res = app
+        .server
+        .post(&format!("/api/playlists/{pl_id}/videos"))
+        .json(&json!({
+            "video_id": "vid-body",
+            "title": "Player Title",
+            "thumbnail_url": "https://t.test/body.jpg",
+            "channel_title": "Body Channel",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["video_title"], "Player Title");
+    assert_eq!(body["video_thumbnail_url"], "https://t.test/body.jpg");
+    assert_eq!(body["channel_title"], "Body Channel");
 }

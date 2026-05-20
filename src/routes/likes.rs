@@ -8,12 +8,31 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::services::youtube::YoutubeClient;
 use crate::state::AppState;
+
+/// Optional metadata supplied by the client on `POST /api/likes/:videoId`.
+///
+/// The player already has the video's title and thumbnail in scope when
+/// the like button is clicked (it must — the player rendered the video
+/// before the button could be pressed), so we let the client send what
+/// it has rather than re-fetching from YouTube. Both fields are
+/// optional so:
+/// - A re-like after a soft-unlike (`is_deleted = 1`) doesn't need to
+///   resend metadata; the existing row's values are preserved via
+///   `COALESCE` in the upsert below.
+/// - A child who somehow likes a video without the player context
+///   (a future deep-link, an offline replay) still succeeds with a
+///   metadata-less row rather than failing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct LikeBody {
+    pub title: Option<String>,
+    pub thumbnail_url: Option<String>,
+}
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct LikeRow {
@@ -70,29 +89,26 @@ pub async fn list(
 }
 
 /// `POST /api/likes/:videoId`.
+///
+/// Accepts an optional JSON body with `title` and `thumbnail_url` from
+/// the player (which already has them in scope) so we don't fan out to
+/// the discovery sidecar on every like. Missing fields don't fail the
+/// request — the row gets `NULL` columns and the upsert's `COALESCE`
+/// preserves any previously-stored metadata on re-like.
 pub async fn like(
     State(state): State<AppState>,
     current: CurrentAccount,
     Path(video_id): Path<String>,
+    body: Option<Json<LikeBody>>,
 ) -> AppResult<Json<LikeRow>> {
-    // Best-effort metadata. Don't fail the request if YouTube lookup
-    // breaks — the sync task will fill in details.
-    let (title, thumb) = match YoutubeClient::from_db(&state.db).await {
-        Ok(yt) => match yt.get_video(&video_id).await.ok().flatten() {
-            Some(info) => {
-                let thumb = info
-                    .thumbnails
-                    .get("maxres")
-                    .or_else(|| info.thumbnails.get("high"))
-                    .or_else(|| info.thumbnails.get("medium"))
-                    .or_else(|| info.thumbnails.get("default"))
-                    .map(|t| t.url.clone());
-                (Some(info.title), thumb)
-            }
-            None => (None, None),
-        },
-        Err(_) => (None, None),
-    };
+    let LikeBody {
+        title,
+        thumbnail_url: thumb,
+    } = body.map(|Json(b)| b).unwrap_or_default();
+    // Treat empty strings as absent so the upsert's `COALESCE` keeps any
+    // previously-stored value rather than overwriting it with "".
+    let title = title.filter(|s| !s.trim().is_empty());
+    let thumb = thumb.filter(|s| !s.trim().is_empty());
 
     sqlx::query(
         "INSERT INTO video_likes \

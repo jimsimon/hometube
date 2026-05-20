@@ -165,6 +165,10 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/feed-refresher/settings",
             get(feed::admin_get_refresher_settings).put(feed::admin_put_refresher_settings),
         )
+        .route(
+            "/api/admin/feed-refresher/capacity",
+            get(feed::admin_get_refresher_capacity),
+        )
         // Family management (Phase 13)
         .route(
             "/api/family/members",
