@@ -499,6 +499,17 @@ export class VideoPlayer extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopHeartbeat();
+    // Remove the `seeked` listener synchronously here (in addition to
+    // `destroyPlayer`, which runs async) so a stray `seeked` between
+    // disconnect and DOM teardown can't fire `sendProgress` on a
+    // detached element.
+    if (this.videoEl) {
+      this.videoEl.removeEventListener("seeked", this.onSeeked);
+    }
+    // Reset the "really watched" gate and any pending seek-debounce so
+    // a re-attached instance starts clean instead of inheriting stale
+    // state from the previous video.
+    this.heartbeatSent = false;
     void this.destroyPlayer();
     document.removeEventListener(
       "hometube:sleep-timer-expired",

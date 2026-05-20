@@ -303,8 +303,7 @@ fn daily_rng(child_id: i64) -> StdRng {
     // midnight (matches `usage.rs` which also keys daily limits off
     // `chrono::Local`).
     use chrono::Datelike;
-    let now = chrono::Local::now();
-    let day = now.year() as i64 * 366 + now.ordinal() as i64;
+    let day = chrono::Local::now().date_naive().num_days_from_ce() as i64;
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&(child_id as u64).to_le_bytes());
     seed[8..16].copy_from_slice(&(day as u64).to_le_bytes());
@@ -449,7 +448,10 @@ fn channel_seed(channel_id: &str) -> i64 {
 async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<Vec<UpNextItem>> {
     let yt = match crate::services::youtube::YoutubeClient::from_db(&state.db).await {
         Ok(y) => y,
-        Err(_) => return Ok(Vec::new()),
+        Err(err) => {
+            tracing::warn!(%err, "up-next: YoutubeClient unavailable; returning empty queue");
+            return Ok(Vec::new());
+        }
     };
 
     let channels = child_allowlisted_channel_ids(&state.db, child_id).await?;
@@ -506,11 +508,19 @@ async fn up_next_from_new_videos(state: &AppState, child_id: i64) -> AppResult<V
     }
     buckets.shuffle(&mut rng);
 
+    // Round-robin pop until we have ~2× the default limit. The caller
+    // (`up_next`) trims further after current_video/watched/access-
+    // control filtering, so a small headroom is plenty — collecting
+    // everything wastes work for users with many allowlisted sources.
+    let target = UP_NEXT_DEFAULT_LIMIT * 2;
     let mut out: Vec<UpNextItem> = Vec::new();
     let mut exhausted = 0usize;
-    while exhausted < buckets.len() {
+    while exhausted < buckets.len() && out.len() < target {
         exhausted = 0;
         for bucket in &mut buckets {
+            if out.len() >= target {
+                break;
+            }
             if let Some(it) = bucket.pop() {
                 out.push(it);
             } else {
