@@ -244,11 +244,63 @@ async fn close_open_log(state: &AppState, child_id: i64, video_id: &str) -> AppR
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ProgressBody {
+    pub video_id: String,
+    pub position_seconds: i64,
+    #[serde(default)]
+    pub duration_seconds: Option<i64>,
+    #[serde(default)]
+    pub video_title: Option<String>,
+    #[serde(default)]
+    pub video_thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub channel_title: Option<String>,
+}
+
+/// `POST /api/usage/progress`.
+///
+/// Position-only update — writes to `watch_history` so the resume
+/// point is accurate to 1s, but does **not** touch `usage_log` or
+/// re-evaluate the daily limit. The player fires this on pause, seek,
+/// and ended; the 30s heartbeat continues to drive screen-time
+/// accounting.
+pub async fn progress(
+    State(state): State<AppState>,
+    current: CurrentAccount,
+    Json(body): Json<ProgressBody>,
+) -> AppResult<axum::http::StatusCode> {
+    // Reuse the same upsert as the heartbeat handler by adapting the
+    // payload to `HeartbeatBody`. Keeps the SQL in exactly one place.
+    // Clamp untrusted client input. A negative position or duration
+    // would render as nonsense in continue-watching.
+    let position = body.position_seconds.max(0);
+    let duration = body.duration_seconds.map(|d| d.max(0));
+    let hb = HeartbeatBody {
+        video_id: body.video_id,
+        position_seconds: position,
+        duration_seconds: duration,
+        video_title: body.video_title,
+        video_thumbnail_url: body.video_thumbnail_url,
+        channel_title: body.channel_title,
+        elapsed_seconds: None,
+    };
+    upsert_watch_history(&state, current.id, &hb).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 async fn upsert_watch_history(
     state: &AppState,
     child_id: i64,
     body: &HeartbeatBody,
 ) -> AppResult<()> {
+    // `watch_history.video_title` is `NOT NULL`, so the INSERT path
+    // must always have a value — fall back to empty string when the
+    // caller didn't provide one (e.g. the progress endpoint). On the
+    // UPDATE path we bind the raw Option so `COALESCE` keeps the
+    // previously-stored title instead of clobbering it with "".
+    let title_insert = body.video_title.clone().unwrap_or_default();
+    let title_update = body.video_title.clone();
     sqlx::query(
         "INSERT INTO watch_history \
             (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, \
@@ -257,18 +309,19 @@ async fn upsert_watch_history(
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             progress_seconds = excluded.progress_seconds, \
             duration_seconds = COALESCE(excluded.duration_seconds, watch_history.duration_seconds), \
-            video_title = COALESCE(excluded.video_title, watch_history.video_title), \
+            video_title = COALESCE(?, watch_history.video_title), \
             video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, watch_history.video_thumbnail_url), \
             channel_title = COALESCE(excluded.channel_title, watch_history.channel_title), \
             last_watched_at = unixepoch()",
     )
     .bind(child_id)
     .bind(&body.video_id)
-    .bind(body.video_title.clone().unwrap_or_default())
+    .bind(title_insert)
     .bind(body.video_thumbnail_url.clone())
     .bind(body.channel_title.clone())
     .bind(body.duration_seconds)
     .bind(body.position_seconds)
+    .bind(title_update)
     .execute(&state.db)
     .await?;
     Ok(())

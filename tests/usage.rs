@@ -36,6 +36,48 @@ async fn anonymous_heartbeat_is_unauthorized() {
 }
 
 #[tokio::test]
+async fn progress_updates_watch_history_without_touching_usage_log() {
+    // The /api/usage/progress route exists so the player can flush an
+    // accurate resume position on pause/seek/ended without bumping the
+    // 30s usage-time accumulator.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+
+    let res = app
+        .server
+        .post("/api/usage/progress")
+        .json(&json!({
+            "video_id": "vid-pos",
+            "position_seconds": 137,
+            "duration_seconds": 600,
+            "video_title": "T",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
+
+    // watch_history populated with the exact position.
+    let row: (i64, i64) = sqlx::query_as(
+        "SELECT progress_seconds, duration_seconds \
+         FROM watch_history WHERE child_account_id = ? AND video_id = 'vid-pos'",
+    )
+    .bind(child_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, 137);
+    assert_eq!(row.1, 600);
+
+    // usage_log untouched.
+    let usage_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM usage_log WHERE child_account_id = ?")
+            .bind(child_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(usage_count, 0);
+}
+
+#[tokio::test]
 async fn child_heartbeat_writes_usage_log_and_watch_history() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
