@@ -46,6 +46,7 @@ const OUTPUT_TRUNCATE_BYTES: usize = 8 * 1024;
 /// a UNIQUE constraint, so reseeding is safe via `INSERT OR IGNORE`.
 pub const NAME_YTDLP_UPDATE: &str = "ytdlp_update";
 pub const NAME_CACHE_CLEANUP: &str = "cache_cleanup";
+pub const NAME_FEED_GC: &str = "feed_gc";
 
 /// Allowed preset → cron expression map. The dropdown in the parent UI
 /// pulls labels from each job's `allowed_presets` JSON column; the
@@ -345,6 +346,10 @@ async fn dispatch(pool: &SqlitePool, cfg: &Config, job_type: &str) -> RunOutcome
             Ok((msg, output)) => RunOutcome::success(msg).with_output(output),
             Err(err) => RunOutcome::failure(format!("cache cleanup failed: {err}")),
         },
+        "feed_gc" => match run_feed_gc(pool).await {
+            Ok(msg) => RunOutcome::success(msg),
+            Err(err) => RunOutcome::failure(format!("feed gc failed: {err}")),
+        },
         other => RunOutcome::failure(format!("unknown job_type: {other}")),
     }
 }
@@ -426,6 +431,13 @@ async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
     crate::services::video_cache::cleanup_segment_cache(pool).await
 }
 
+/// Drop `feed_sources` rows whose source is no longer allowlisted by
+/// any child. Items cascade via foreign key.
+async fn run_feed_gc(pool: &SqlitePool) -> AppResult<String> {
+    let removed = crate::services::feed_cache::gc_orphan_sources(pool).await?;
+    Ok(format!("removed {removed} orphan feed source(s)"))
+}
+
 async fn notify_parents_ytdlp_failure(pool: &SqlitePool, err: &str) -> AppResult<()> {
     let metadata = serde_json::json!({ "error": err });
     crate::services::notifications::broadcast(
@@ -454,6 +466,7 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
                 "Weekly (Sunday 3 AM)",
             ],
             "cache_cleanup" => vec!["Daily (3:00 AM)", "Daily (4:00 AM)"],
+            "feed_gc" => vec!["Daily (3:00 AM)", "Daily (4:00 AM)", "Every 12 hours"],
             _ => vec![],
         }
     };
@@ -478,6 +491,13 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
             "cache_cleanup",
             "0 4 * * *",
             "Daily (4:00 AM)",
+        ),
+        (
+            NAME_FEED_GC,
+            "Drop feed_sources rows for channels no longer on any allowlist.",
+            "feed_gc",
+            "0 3 * * *",
+            "Daily (3:00 AM)",
         ),
     ];
 

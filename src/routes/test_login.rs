@@ -149,6 +149,83 @@ pub async fn reset(State(state): State<AppState>) -> AppResult<StatusCode> {
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SeedFeedItemBody {
+    pub child_account_id: i64,
+    pub channel_id: String,
+    pub channel_title: Option<String>,
+    pub video_id: String,
+    pub title: String,
+}
+
+/// `POST /api/test/seed-feed-item` — allowlist `channel_id` for the
+/// child, register the feed source, and insert a single item into
+/// `feed_source_items`. Used by E2E tests that want a populated
+/// new-videos row without depending on the background RSS poller.
+pub async fn seed_feed_item(
+    State(state): State<AppState>,
+    Json(body): Json<SeedFeedItemBody>,
+) -> AppResult<StatusCode> {
+    // `allowlisted_channels.added_by` is semantically "the parent who
+    // approved this entry". Look up any parent account to attribute
+    // to so the row matches production invariants. Falls back to the
+    // child's own ID only if no parent exists (which means the E2E
+    // seed harness ran in an unexpected order).
+    let attributed_by: i64 = sqlx::query_scalar(
+        "SELECT id FROM accounts WHERE account_type = 'parent' \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(body.child_account_id);
+
+    sqlx::query(
+        "INSERT INTO allowlisted_channels \
+            (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(child_account_id, channel_id) DO NOTHING",
+    )
+    .bind(body.child_account_id)
+    .bind(&body.channel_id)
+    .bind(body.channel_title.as_deref().unwrap_or("Test Channel"))
+    .bind(attributed_by)
+    .execute(&state.db)
+    .await?;
+
+    crate::services::feed_cache::upsert_source(
+        &state.db,
+        crate::services::feed_cache::KIND_CHANNEL,
+        &body.channel_id,
+    )
+    .await?;
+
+    let now = chrono::Utc::now().timestamp();
+    crate::services::feed_cache::replace_source_items(
+        &state.db,
+        crate::services::feed_cache::KIND_CHANNEL,
+        &body.channel_id,
+        &[crate::services::feed_cache::ItemRow {
+            video_id: body.video_id,
+            title: body.title,
+            channel_id: Some(body.channel_id.clone()),
+            channel_title: body.channel_title.clone(),
+            thumbnail_url: None,
+            published_at: Some(now),
+            published_raw: Some(
+                chrono::DateTime::<chrono::Utc>::from_timestamp(now, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    // `now` is the current unix epoch, which is always
+                    // representable — this fallback would only fire on
+                    // truly absurd inputs.
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
+            ),
+        }],
+        now,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn mint_session(state: &AppState, account_id: i64) -> AppResult<String> {
     use rand::distr::Alphanumeric;
     use rand::RngExt;
