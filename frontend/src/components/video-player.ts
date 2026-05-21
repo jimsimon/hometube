@@ -1412,6 +1412,8 @@ export class VideoPlayer extends LitElement {
                       video-id=${this.videoId}
                       video-title=${this.metadata.title ?? ""}
                       thumbnail-url=${this.metadata.thumbnail_url ?? ""}
+                      channel-id=${this.metadata.channel_id ?? ""}
+                      channel-title=${this.metadata.channel_title ?? ""}
                     ></hometube-like-button>
                     ${this.metadata.channel_id
                       ? html`<hometube-subscribe-button

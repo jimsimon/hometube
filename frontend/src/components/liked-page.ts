@@ -117,6 +117,8 @@ export class LikedPage extends LitElement {
               video-id=${v.video_id}
               title=${v.video_title ?? ""}
               .thumbnailUrl=${v.video_thumbnail_url}
+              .channelId=${v.channel_id}
+              .channelTitle=${v.channel_title}
             ></hometube-video-card>
           `,
         )}

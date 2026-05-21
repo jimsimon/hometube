@@ -32,6 +32,11 @@ use crate::state::AppState;
 pub struct LikeBody {
     pub title: Option<String>,
     pub thumbnail_url: Option<String>,
+    /// Channel the video belongs to. Captured at like-time so the
+    /// `visible` flag in [`LikeRow`] can also match against
+    /// `allowlisted_channels` without re-fetching yt-dlp metadata.
+    pub channel_id: Option<String>,
+    pub channel_title: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -40,14 +45,63 @@ pub struct LikeRow {
     pub video_id: String,
     pub video_title: Option<String>,
     pub video_thumbnail_url: Option<String>,
+    pub channel_id: Option<String>,
+    pub channel_title: Option<String>,
     pub liked_at: i64,
     /// `true` when the liked video is reachable through the child's
-    /// allowlist (direct video allowlist; the simpler join because
-    /// `video_likes` has no channel metadata column).
+    /// allowlist. Matches `can_child_view` for the video-allowlist and
+    /// channel-allowlist paths (the latter via the `channel_id`
+    /// captured at like-time). Playlist-allowlist matches are not
+    /// considered — `video_likes` doesn't track playlist membership.
     pub visible: bool,
 }
 
-type LikeRowTuple = (i64, String, Option<String>, Option<String>, i64, i64);
+type LikeRowTuple = (
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
+
+/// Shared SELECT projection used by `list` and `like`. Computes
+/// `visible` from a direct-video allowlist match OR an allowlisted
+/// channel match against the per-like `channel_id`.
+const LIKE_ROW_SELECT: &str = "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
+            l.channel_id, l.channel_title, l.liked_at, \
+            CASE WHEN a.id IS NOT NULL OR c.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
+     FROM video_likes l \
+     LEFT JOIN allowlisted_videos a \
+       ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
+     LEFT JOIN allowlisted_channels c \
+       ON c.child_account_id = l.child_account_id \
+      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id";
+
+fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
+    let (
+        id,
+        video_id,
+        video_title,
+        video_thumbnail_url,
+        channel_id,
+        channel_title,
+        liked_at,
+        visible,
+    ) = tuple;
+    LikeRow {
+        id,
+        video_id,
+        video_title,
+        video_thumbnail_url,
+        channel_id,
+        channel_title,
+        liked_at,
+        visible: visible != 0,
+    }
+}
 
 /// `GET /api/likes`.
 ///
@@ -59,32 +113,16 @@ pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<LikeRow>>> {
-    let rows: Vec<LikeRowTuple> = sqlx::query_as(
-        "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-                l.liked_at, \
-                CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
-         FROM video_likes l \
-         LEFT JOIN allowlisted_videos a \
-           ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
+    let sql = format!(
+        "{LIKE_ROW_SELECT} \
          WHERE l.child_account_id = ? AND l.is_deleted = 0 \
-         ORDER BY visible DESC, l.liked_at DESC",
-    )
-    .bind(current.id)
-    .fetch_all(&state.db)
-    .await?;
-    let out = rows
-        .into_iter()
-        .map(
-            |(id, video_id, video_title, video_thumbnail_url, liked_at, visible)| LikeRow {
-                id,
-                video_id,
-                video_title,
-                video_thumbnail_url,
-                liked_at,
-                visible: visible != 0,
-            },
-        )
-        .collect();
+         ORDER BY visible DESC, l.liked_at DESC"
+    );
+    let rows: Vec<LikeRowTuple> = sqlx::query_as(&sql)
+        .bind(current.id)
+        .fetch_all(&state.db)
+        .await?;
+    let out = rows.into_iter().map(row_from_tuple).collect();
     Ok(Json(out))
 }
 
@@ -104,19 +142,26 @@ pub async fn like(
     let LikeBody {
         title,
         thumbnail_url: thumb,
+        channel_id,
+        channel_title,
     } = body.map(|Json(b)| b).unwrap_or_default();
     // Treat empty strings as absent so the upsert's `COALESCE` keeps any
     // previously-stored value rather than overwriting it with "".
     let title = title.filter(|s| !s.trim().is_empty());
     let thumb = thumb.filter(|s| !s.trim().is_empty());
+    let channel_id = channel_id.filter(|s| !s.trim().is_empty());
+    let channel_title = channel_title.filter(|s| !s.trim().is_empty());
 
     sqlx::query(
         "INSERT INTO video_likes \
-            (child_account_id, video_id, video_title, video_thumbnail_url, is_deleted) \
-         VALUES (?, ?, ?, ?, 0) \
+            (child_account_id, video_id, video_title, video_thumbnail_url, \
+             channel_id, channel_title, is_deleted) \
+         VALUES (?, ?, ?, ?, ?, ?, 0) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             video_title = COALESCE(excluded.video_title, video_likes.video_title), \
             video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, video_likes.video_thumbnail_url), \
+            channel_id = COALESCE(excluded.channel_id, video_likes.channel_id), \
+            channel_title = COALESCE(excluded.channel_title, video_likes.channel_title), \
             is_deleted = 0, \
             updated_at = unixepoch()",
     )
@@ -124,31 +169,18 @@ pub async fn like(
     .bind(&video_id)
     .bind(&title)
     .bind(&thumb)
+    .bind(&channel_id)
+    .bind(&channel_title)
     .execute(&state.db)
     .await?;
 
-    let row: LikeRowTuple = sqlx::query_as(
-        "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-                l.liked_at, \
-                CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
-         FROM video_likes l \
-         LEFT JOIN allowlisted_videos a \
-           ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
-         WHERE l.child_account_id = ? AND l.video_id = ?",
-    )
-    .bind(current.id)
-    .bind(&video_id)
-    .fetch_one(&state.db)
-    .await?;
-    let (id, video_id, video_title, video_thumbnail_url, liked_at, visible) = row;
-    Ok(Json(LikeRow {
-        id,
-        video_id,
-        video_title,
-        video_thumbnail_url,
-        liked_at,
-        visible: visible != 0,
-    }))
+    let sql = format!("{LIKE_ROW_SELECT} WHERE l.child_account_id = ? AND l.video_id = ?");
+    let row: LikeRowTuple = sqlx::query_as(&sql)
+        .bind(current.id)
+        .bind(&video_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(row_from_tuple(row)))
 }
 
 /// `DELETE /api/likes/:videoId`.

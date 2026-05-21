@@ -39,6 +39,19 @@ export class LikeButton extends LitElement {
   @property({ type: String, attribute: "thumbnail-url" })
   thumbnailUrl = "";
 
+  /**
+   * Channel id for the video. Persisted on the like row so the
+   * server's `visible` flag can match against `allowlisted_channels`
+   * (not just direct video-allowlist entries). Optional.
+   */
+  @property({ type: String, attribute: "channel-id" })
+  channelId = "";
+
+  /** Channel title for the video. Used to render the channel name on
+   *  the liked-videos grid without a follow-up fetch. Optional. */
+  @property({ type: String, attribute: "channel-title" })
+  channelTitle = "";
+
   @state() private liked = false;
   @state() private busy = false;
   @state() private error = "";
@@ -108,6 +121,8 @@ export class LikeButton extends LitElement {
         const body = {
           title: this.videoTitle || null,
           thumbnail_url: this.thumbnailUrl || null,
+          channel_id: this.channelId || null,
+          channel_title: this.channelTitle || null,
         };
         await api.post(`/api/likes/${encodeURIComponent(this.videoId)}`, body);
         this.liked = true;

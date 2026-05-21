@@ -237,6 +237,15 @@ export interface LikeRow {
   video_id: string;
   video_title: string | null;
   video_thumbnail_url: string | null;
+  /**
+   * Channel the video belongs to. Captured at like-time from the
+   * player's metadata so cards on `/child/liked` can render the channel
+   * name and so the `visible` flag can match against allowlisted
+   * channels. May be `null` for likes recorded before this field
+   * existed (migration `014`).
+   */
+  channel_id: string | null;
+  channel_title: string | null;
   liked_at: number;
   /**
    * `true` when the liked video is reachable through the child's
