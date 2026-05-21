@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>HomeTube — House with Window Frame (Sunset)</title>
+  <defs>
+    <linearGradient id="g1e" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFB74D"/>
+      <stop offset="100%" stop-color="#EF6C00"/>
+    </linearGradient>
+    <linearGradient id="sky1e" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFE0B2"/>
+      <stop offset="100%" stop-color="#FFF8F0"/>
+    </linearGradient>
+  </defs>
+  <!-- Roof -->
+  <path d="M100 22 L182 92 L162 92 L162 96 L38 96 L38 92 L18 92 Z" fill="#5D4037"/>
+  <!-- House body -->
+  <rect x="38" y="92" width="124" height="92" rx="14" fill="url(#g1e)"/>
+  <!-- Window with cross-frame (clearly a window, not a video player) -->
+  <rect x="50" y="104" width="100" height="68" rx="6" fill="url(#sky1e)"/>
+  <line x1="100" y1="104" x2="100" y2="172" stroke="#5D4037" stroke-width="4"/>
+  <line x1="50" y1="138" x2="150" y2="138" stroke="#5D4037" stroke-width="4"/>
+  <!-- Play badge in lower-right pane — small, clearly secondary -->
+  <circle cx="125" cy="155" r="11" fill="#5D4037"/>
+  <path d="M121 149 L121 161 L131 155 Z" fill="#FFF8F0"/>
+  <!-- Chimney with smoke -->
+  <rect x="138" y="42" width="16" height="26" fill="#5D4037"/>
+  <circle cx="146" cy="36" r="5" fill="#FFE0B2" opacity="0.8"/>
+  <circle cx="152" cy="26" r="4" fill="#FFE0B2" opacity="0.6"/>
+</svg>

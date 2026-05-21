@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>HomeTube — HT Monogram</title>
+  <defs>
+    <linearGradient id="bg4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7C4DFF"/>
+      <stop offset="100%" stop-color="#3D5AFE"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="184" height="184" rx="36" fill="url(#bg4)"/>
+  <!-- H shape doubling as a house with a play in the crossbar -->
+  <rect x="40" y="48" width="20" height="104" rx="4" fill="#FFF8F0"/>
+  <rect x="140" y="48" width="20" height="104" rx="4" fill="#FFF8F0"/>
+  <rect x="40" y="92" width="120" height="20" fill="#FFF8F0"/>
+  <!-- Roof connecting the two posts -->
+  <path d="M36 52 L100 22 L164 52 L160 52 L160 60 L40 60 L40 52 Z" fill="#FFCA28"/>
+  <!-- Play button on the crossbar -->
+  <circle cx="100" cy="102" r="16" fill="#E53935"/>
+  <path d="M95 94 L95 110 L110 102 Z" fill="#FFF8F0"/>
+</svg>

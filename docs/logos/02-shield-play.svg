@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>HomeTube — Shield + Play</title>
+  <defs>
+    <linearGradient id="sh" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4FC3F7"/>
+      <stop offset="100%" stop-color="#1976D2"/>
+    </linearGradient>
+  </defs>
+  <!-- Shield -->
+  <path d="M100 18 L172 42 V104 C172 144 140 174 100 186 C60 174 28 144 28 104 V42 Z"
+        fill="url(#sh)" stroke="#0D47A1" stroke-width="3"/>
+  <!-- Little roof inside shield (home cue) -->
+  <path d="M60 96 L100 64 L140 96 L132 96 L132 134 L68 134 L68 96 Z"
+        fill="#FFF8F0" opacity="0.95"/>
+  <!-- Play triangle -->
+  <path d="M88 102 L88 128 L112 115 Z" fill="#E53935"/>
+</svg>
