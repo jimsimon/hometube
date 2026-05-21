@@ -908,10 +908,16 @@ fn sidecar_item_to_row(item: &SidecarPlaylistItem, now: i64) -> ItemRow {
         .into_iter()
         .find_map(|k| item.thumbnails.get(k))
         .map(|t| t.url.clone());
-    let published_at = item
-        .published_at
-        .as_deref()
-        .and_then(|s| parse_relative_to_unix(s, now));
+    let published_at = item.published_at.as_deref().and_then(|s| {
+        let parsed = parse_relative_to_unix(s, now);
+        if parsed.is_none() && !s.trim().is_empty() {
+            // Surface format drift (locale leaks, new InnerTube shapes,
+            // comma-grouped numbers, etc.) so we can extend the parser
+            // before too many rows accumulate without a timestamp.
+            tracing::debug!(raw = %s, "sidecar relative-time string not parseable");
+        }
+        parsed
+    });
     ItemRow {
         video_id: item.video_id.clone(),
         title: item.title.clone(),
@@ -939,11 +945,12 @@ fn sidecar_item_to_row(item: &SidecarPlaylistItem, now: i64) -> ItemRow {
 /// order between sidecar items and RSS items is what matters, not
 /// sub-day precision.
 pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
-    // Lowercase and strip common prefixes ("Streamed", "Premiered")
-    // and the trailing "ago".
+    // Lowercase and strip known prefixes ("Streamed", "Streamed live",
+    // "Premiered") and the trailing "ago".
     let lower = raw.trim().to_ascii_lowercase();
     let body = lower
-        .strip_prefix("streamed ")
+        .strip_prefix("streamed live ")
+        .or_else(|| lower.strip_prefix("streamed "))
         .or_else(|| lower.strip_prefix("premiered "))
         .unwrap_or(&lower);
     let body = body.strip_suffix(" ago").unwrap_or(body).trim();
@@ -955,17 +962,23 @@ pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
         _ => {}
     }
 
-    // "a day ago" / "an hour ago" — treat the article as 1.
-    let mut parts = body.split_whitespace();
-    let count_tok = parts.next()?;
-    let unit_tok = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
+    // Tokenise as 2 or 3 words so "a few seconds" / "a couple hours"
+    // are handled alongside "3 days" / "an hour".
+    let toks: Vec<&str> = body.split_whitespace().collect();
+    let (count_tok, unit_tok): (&str, &str) = match toks.as_slice() {
+        [c, u] => (*c, *u),
+        ["a", "few", u] => ("few", *u),
+        ["a", "couple", u] | ["a", "couple", "of", u] => ("couple", *u),
+        _ => return None,
+    };
     // Parse as unsigned so "-3 days ago" can't yield a future
     // timestamp that would pin the item to the top of the feed.
+    // Also reject thousands separators / decimals to keep semantics
+    // unambiguous; we'd rather log and fall back than guess.
     let count: i64 = match count_tok {
         "a" | "an" => 1,
+        "few" => 3,
+        "couple" => 2,
         n => n.parse::<u32>().ok()? as i64,
     };
     let unit_secs: i64 = match unit_tok.trim_end_matches('s') {
@@ -978,10 +991,15 @@ pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
         "year" => 365 * 86_400,
         _ => return None,
     };
-    // Saturating arithmetic on both ops: a maliciously large count
-    // shouldn't panic in debug or wrap in release.
+    // Saturating multiply, then refuse to emit a negative-far-past
+    // timestamp: if the offset exceeds `now`, the input is absurd —
+    // signal "unparseable" so callers fall back to fetched_at instead
+    // of pinning the row to ~1970.
     let offset = count.saturating_mul(unit_secs);
-    Some(now.saturating_sub(offset))
+    if offset > now {
+        return None;
+    }
+    Some(now - offset)
 }
 
 #[cfg(test)]
@@ -992,20 +1010,41 @@ mod relative_parser_tests {
 
     #[test]
     fn parses_common_units() {
-        assert_eq!(parse_relative_to_unix("30 seconds ago", NOW), Some(NOW - 30));
-        assert_eq!(parse_relative_to_unix("5 minutes ago", NOW), Some(NOW - 300));
+        assert_eq!(
+            parse_relative_to_unix("30 seconds ago", NOW),
+            Some(NOW - 30)
+        );
+        assert_eq!(
+            parse_relative_to_unix("5 minutes ago", NOW),
+            Some(NOW - 300)
+        );
         assert_eq!(parse_relative_to_unix("2 hours ago", NOW), Some(NOW - 7200));
-        assert_eq!(parse_relative_to_unix("3 days ago", NOW), Some(NOW - 3 * 86_400));
-        assert_eq!(parse_relative_to_unix("1 week ago", NOW), Some(NOW - 7 * 86_400));
-        assert_eq!(parse_relative_to_unix("2 months ago", NOW), Some(NOW - 60 * 86_400));
-        assert_eq!(parse_relative_to_unix("1 year ago", NOW), Some(NOW - 365 * 86_400));
+        assert_eq!(
+            parse_relative_to_unix("3 days ago", NOW),
+            Some(NOW - 3 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("1 week ago", NOW),
+            Some(NOW - 7 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("2 months ago", NOW),
+            Some(NOW - 60 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("1 year ago", NOW),
+            Some(NOW - 365 * 86_400)
+        );
     }
 
     #[test]
     fn parses_singular_and_articles() {
         assert_eq!(parse_relative_to_unix("1 day ago", NOW), Some(NOW - 86_400));
         assert_eq!(parse_relative_to_unix("a day ago", NOW), Some(NOW - 86_400));
-        assert_eq!(parse_relative_to_unix("an hour ago", NOW), Some(NOW - 3_600));
+        assert_eq!(
+            parse_relative_to_unix("an hour ago", NOW),
+            Some(NOW - 3_600)
+        );
     }
 
     #[test]
@@ -1015,14 +1054,37 @@ mod relative_parser_tests {
             Some(NOW - 14 * 86_400)
         );
         assert_eq!(
+            parse_relative_to_unix("Streamed live 4 hours ago", NOW),
+            Some(NOW - 4 * 3_600)
+        );
+        assert_eq!(
             parse_relative_to_unix("Premiered 5 months ago", NOW),
             Some(NOW - 150 * 86_400)
         );
     }
 
     #[test]
+    fn parses_few_and_couple() {
+        assert_eq!(
+            parse_relative_to_unix("a few seconds ago", NOW),
+            Some(NOW - 3)
+        );
+        assert_eq!(
+            parse_relative_to_unix("a couple hours ago", NOW),
+            Some(NOW - 2 * 3_600)
+        );
+        assert_eq!(
+            parse_relative_to_unix("a couple of days ago", NOW),
+            Some(NOW - 2 * 86_400)
+        );
+    }
+
+    #[test]
     fn case_and_whitespace_insensitive() {
-        assert_eq!(parse_relative_to_unix("  3 DAYS AGO  ", NOW), Some(NOW - 3 * 86_400));
+        assert_eq!(
+            parse_relative_to_unix("  3 DAYS AGO  ", NOW),
+            Some(NOW - 3 * 86_400)
+        );
     }
 
     #[test]
@@ -1036,6 +1098,10 @@ mod relative_parser_tests {
         assert_eq!(parse_relative_to_unix("", NOW), None);
         assert_eq!(parse_relative_to_unix("3 fortnights ago", NOW), None);
         assert_eq!(parse_relative_to_unix("2024-01-01", NOW), None);
+        // Thousands separators / decimals are rejected (we'd rather
+        // fall back to fetched_at than guess at the intent).
+        assert_eq!(parse_relative_to_unix("1,234 days ago", NOW), None);
+        assert_eq!(parse_relative_to_unix("1.5 hours ago", NOW), None);
     }
 
     #[test]
@@ -1045,12 +1111,11 @@ mod relative_parser_tests {
     }
 
     #[test]
-    fn extreme_counts_saturate_without_panicking() {
-        // Should not panic in debug or wrap in release.
-        let huge = "4294967295 years ago"; // u32::MAX
-        let got = parse_relative_to_unix(huge, NOW);
-        assert!(got.is_some());
-        assert!(got.unwrap() <= NOW);
+    fn extreme_counts_return_none_instead_of_negative_timestamp() {
+        // u32::MAX years is wildly out of range; we'd rather return
+        // None (callers fall back to fetched_at) than emit a deeply
+        // negative timestamp that would pin the row to the far past.
+        assert_eq!(parse_relative_to_unix("4294967295 years ago", NOW), None);
     }
 }
 

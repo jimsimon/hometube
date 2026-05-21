@@ -14,6 +14,14 @@
 -- harmless no-op for scheduling (the refresher already considers
 -- them due). sqlx wraps each .sql migration in a single transaction,
 -- so the UPDATE + DELETE here apply atomically.
+--
+-- The DELETE is intentionally narrow: it only targets rows whose
+-- `published_raw` looks like a relative-time string (contains "ago",
+-- or is one of the known shorthand forms). RSS-ingest rows that
+-- happen to have NULL `published_at` because the ISO-8601 parse
+-- failed are left alone — those carry an ISO-8601-shaped string and
+-- a refresh wouldn't re-parse them any differently, so deleting them
+-- would just churn the cache.
 
 UPDATE feed_sources
    SET next_poll_at = 0
@@ -21,7 +29,17 @@ UPDATE feed_sources
        SELECT DISTINCT kind, source_id
          FROM feed_source_items
         WHERE published_at IS NULL
+          AND published_raw IS NOT NULL
+          AND (
+               published_raw LIKE '%ago%'
+            OR LOWER(TRIM(published_raw)) IN ('just now', 'yesterday', 'a moment', 'moments')
+          )
    );
 
 DELETE FROM feed_source_items
- WHERE published_at IS NULL;
+ WHERE published_at IS NULL
+   AND published_raw IS NOT NULL
+   AND (
+        published_raw LIKE '%ago%'
+     OR LOWER(TRIM(published_raw)) IN ('just now', 'yesterday', 'a moment', 'moments')
+   );
