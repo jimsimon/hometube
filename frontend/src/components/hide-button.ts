@@ -54,7 +54,7 @@ export class HideButton extends LitElement {
     }
     button:hover,
     button:focus-visible {
-      background: var(--wa-color-surface-border, #f3f4f6);
+      background: var(--wa-color-surface-raised, #f3f4f6);
       outline: none;
     }
     button[disabled] {
