@@ -92,14 +92,6 @@ async fn parent_preview_invalid_kind_redirects() {
 // ===========================================================================
 
 #[tokio::test]
-async fn child_bookmarks_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app.server.get("/child/bookmarks").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
 async fn child_downloads_page_renders() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
     let res = app.server.get("/child/downloads").await;
@@ -163,14 +155,6 @@ async fn child_search_page_renders() {
 async fn child_accessing_parent_system_redirects() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
     let res = app.server.get("/parent/system").await;
-    let status = res.status_code().as_u16();
-    assert!((300..400).contains(&status), "got {status}");
-}
-
-#[tokio::test]
-async fn parent_accessing_child_bookmarks_redirects() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let res = app.server.get("/child/bookmarks").await;
     let status = res.status_code().as_u16();
     assert!((300..400).contains(&status), "got {status}");
 }

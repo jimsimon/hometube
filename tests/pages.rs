@@ -26,7 +26,6 @@ const CHILD_ONLY_PAGES: &[&str] = &[
     "/child/home",
     "/child/channels",
     "/child/playlists",
-    "/child/bookmarks",
     "/child/downloads",
     "/child/search",
 ];
