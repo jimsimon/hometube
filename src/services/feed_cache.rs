@@ -151,14 +151,17 @@ pub async fn replace_source_items(
         .await?;
     }
 
-    // Trim down to PER_SOURCE_CAP most recent. NULL `published_at`
-    // sorts last via ORDER BY ... DESC NULLS LAST equivalent.
+    // Trim down to PER_SOURCE_CAP most recent. When `published_at`
+    // is NULL (sidecar fallback path, where YouTube only gave us a
+    // relative time string like "3 days ago"), fall back to
+    // `fetched_at` so sidecar-sourced rows aren't all treated as
+    // epoch-old and discarded ahead of genuinely older RSS rows.
     sqlx::query(
         "DELETE FROM feed_source_items \
          WHERE kind = ? AND source_id = ? AND video_id NOT IN ( \
              SELECT video_id FROM feed_source_items \
               WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, 0) DESC, fetched_at DESC \
+              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
               LIMIT ? \
          )",
     )
@@ -501,10 +504,10 @@ pub async fn feed_for_child(
          candidates AS ( \
              SELECT i.video_id, i.title, i.channel_id, i.channel_title, \
                     i.thumbnail_url, i.published_raw, i.published_at, \
-                    i.kind, i.source_id, \
+                    i.fetched_at, i.kind, i.source_id, \
                     ROW_NUMBER() OVER ( \
                         PARTITION BY i.video_id \
-                        ORDER BY COALESCE(i.published_at, 0) DESC, i.fetched_at DESC \
+                        ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.fetched_at DESC \
                     ) AS rn \
                FROM feed_source_items i \
                JOIN allowed a ON a.kind = i.kind AND a.source_id = i.source_id \
@@ -518,7 +521,7 @@ pub async fn feed_for_child(
          SELECT video_id, title, channel_id, channel_title, \
                 thumbnail_url, published_raw, published_at, kind, source_id \
            FROM candidates WHERE rn = 1 \
-          ORDER BY COALESCE(published_at, 0) DESC \
+          ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
           LIMIT ?2",
     )
     .bind(child_id)
@@ -770,6 +773,49 @@ mod tests {
         let feed = feed_for_child(&pool, child, 10).await.unwrap();
         let ids: Vec<&str> = feed.iter().map(|i| i.video_id.as_str()).collect();
         assert_eq!(ids, vec!["vA"]);
+    }
+
+    #[tokio::test]
+    async fn feed_for_child_orders_null_published_at_by_fetched_at() {
+        // Regression: sidecar fallback writes items with
+        // `published_at = NULL`. They must still surface near the top
+        // when their `fetched_at` is recent, instead of being sorted
+        // behind every RSS-timestamped item via COALESCE(..., 0).
+        let pool = setup_db().await;
+        let child = insert_child(&pool, "kid").await;
+
+        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
+        upsert_source(&pool, KIND_CHANNEL, "UC2").await.unwrap();
+
+        // UC1: an RSS-timestamped item from "long ago".
+        replace_source_items(&pool, KIND_CHANNEL, "UC1", &[mk_item("vOld", 100)], 100)
+            .await
+            .unwrap();
+        // UC2: a sidecar-style item with NULL published_at, fetched
+        // much more recently than vOld was published.
+        let sidecar = ItemRow {
+            video_id: "vNew".into(),
+            title: "title-vNew".into(),
+            channel_id: Some("UC2".into()),
+            channel_title: Some("Channel Two".into()),
+            thumbnail_url: Some("https://t/x.jpg".into()),
+            published_at: None,
+            published_raw: Some("3 days ago".into()),
+        };
+        replace_source_items(&pool, KIND_CHANNEL, "UC2", &[sidecar], 10_000)
+            .await
+            .unwrap();
+
+        allow_channel(&pool, child, "UC1").await;
+        allow_channel(&pool, child, "UC2").await;
+
+        let feed = feed_for_child(&pool, child, 10).await.unwrap();
+        let ids: Vec<&str> = feed.iter().map(|i| i.video_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["vNew", "vOld"],
+            "sidecar item (NULL published_at, fetched_at=10000) should rank above RSS item (published_at=100)"
+        );
     }
 
     #[tokio::test]

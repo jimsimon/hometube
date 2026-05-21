@@ -781,7 +781,10 @@ async fn run_sidecar_fallback(
 
     match outcome {
         SidecarRefresherOutcome::Items(items) => {
-            let rows: Vec<ItemRow> = items.iter().map(sidecar_item_to_row).collect();
+            let rows: Vec<ItemRow> = items
+                .iter()
+                .map(|it| sidecar_item_to_row(it, now))
+                .collect();
             persist_items(pool, &source.kind, &source.source_id, &rows, now).await?;
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
@@ -887,31 +890,167 @@ async fn run_sidecar_fallback(
 /// Adapter from the sidecar's `PlaylistItem` shape to the
 /// `feed_cache::ItemRow` shape `replace_source_items` consumes.
 ///
-/// Critical mismatch: sidecar `published_at` is a human-readable
-/// relative string ("3 days ago") rather than an ISO 8601 timestamp,
-/// because YouTube's InnerTube responses describe upload time that
-/// way and youtubei.js passes it through. We store the raw string in
-/// `published_raw` (where the frontend already knows how to display
-/// it) and leave the numeric `published_at` as `None`. The
-/// `feed_for_child` ordering query falls back to `fetched_at DESC`
-/// when `published_at` is null, which is the right behaviour for
-/// fallback items — they all arrived in one batch and their relative
-/// order doesn't carry useful signal.
-fn sidecar_item_to_row(item: &SidecarPlaylistItem) -> ItemRow {
+/// Sidecar `published_at` is a human-readable relative string
+/// ("3 days ago") rather than an ISO 8601 timestamp, because
+/// YouTube's InnerTube responses describe upload time that way and
+/// youtubei.js passes it through. We keep the raw string in
+/// `published_raw` (the frontend renders it directly) and best-effort
+/// convert it to an approximate unix timestamp for the numeric
+/// `published_at` so the "new videos" feed orders sidecar items
+/// alongside RSS-sourced items with real timestamps. If the string
+/// can't be parsed we leave `published_at = None`; the
+/// `feed_for_child` query then falls back to `fetched_at` via
+/// `COALESCE(published_at, fetched_at) DESC`.
+fn sidecar_item_to_row(item: &SidecarPlaylistItem, now: i64) -> ItemRow {
     // Pick a thumbnail by descending quality, mirroring the heuristic
     // used elsewhere (routes/feed.rs `pick_thumbnail` and similar).
     let thumbnail_url = ["maxres", "high", "standard", "medium", "default"]
         .into_iter()
         .find_map(|k| item.thumbnails.get(k))
         .map(|t| t.url.clone());
+    let published_at = item
+        .published_at
+        .as_deref()
+        .and_then(|s| parse_relative_to_unix(s, now));
     ItemRow {
         video_id: item.video_id.clone(),
         title: item.title.clone(),
         channel_id: item.channel_id.clone(),
         channel_title: item.channel_title.clone(),
         thumbnail_url,
-        published_at: None,
+        published_at,
         published_raw: item.published_at.clone(),
+    }
+}
+
+/// Best-effort parser for YouTube/InnerTube relative time strings
+/// like "3 days ago", "1 hour ago", "Streamed 2 weeks ago", or
+/// "Premiered 5 months ago". Returns an approximate unix timestamp
+/// (`now - offset`) or `None` if the string doesn't match the
+/// expected shape.
+///
+/// Assumes English-language InnerTube output (youtubei.js's default).
+/// If a locale ever leaks through, items become unparseable and fall
+/// back to `fetched_at` via the `feed_for_child` ORDER BY rather
+/// than producing nonsense timestamps.
+///
+/// Month and year are approximated as 30 and 365 days respectively;
+/// this is good enough for "new videos" ordering, where the relative
+/// order between sidecar items and RSS items is what matters, not
+/// sub-day precision.
+pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
+    // Lowercase and strip common prefixes ("Streamed", "Premiered")
+    // and the trailing "ago".
+    let lower = raw.trim().to_ascii_lowercase();
+    let body = lower
+        .strip_prefix("streamed ")
+        .or_else(|| lower.strip_prefix("premiered "))
+        .unwrap_or(&lower);
+    let body = body.strip_suffix(" ago").unwrap_or(body).trim();
+
+    // Common no-offset / fixed-offset shorthands.
+    match body {
+        "just now" | "moments" | "a moment" => return Some(now),
+        "yesterday" => return Some(now.saturating_sub(86_400)),
+        _ => {}
+    }
+
+    // "a day ago" / "an hour ago" — treat the article as 1.
+    let mut parts = body.split_whitespace();
+    let count_tok = parts.next()?;
+    let unit_tok = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    // Parse as unsigned so "-3 days ago" can't yield a future
+    // timestamp that would pin the item to the top of the feed.
+    let count: i64 = match count_tok {
+        "a" | "an" => 1,
+        n => n.parse::<u32>().ok()? as i64,
+    };
+    let unit_secs: i64 = match unit_tok.trim_end_matches('s') {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 7 * 86_400,
+        "month" => 30 * 86_400,
+        "year" => 365 * 86_400,
+        _ => return None,
+    };
+    // Saturating arithmetic on both ops: a maliciously large count
+    // shouldn't panic in debug or wrap in release.
+    let offset = count.saturating_mul(unit_secs);
+    Some(now.saturating_sub(offset))
+}
+
+#[cfg(test)]
+mod relative_parser_tests {
+    use super::parse_relative_to_unix;
+
+    const NOW: i64 = 1_700_000_000;
+
+    #[test]
+    fn parses_common_units() {
+        assert_eq!(parse_relative_to_unix("30 seconds ago", NOW), Some(NOW - 30));
+        assert_eq!(parse_relative_to_unix("5 minutes ago", NOW), Some(NOW - 300));
+        assert_eq!(parse_relative_to_unix("2 hours ago", NOW), Some(NOW - 7200));
+        assert_eq!(parse_relative_to_unix("3 days ago", NOW), Some(NOW - 3 * 86_400));
+        assert_eq!(parse_relative_to_unix("1 week ago", NOW), Some(NOW - 7 * 86_400));
+        assert_eq!(parse_relative_to_unix("2 months ago", NOW), Some(NOW - 60 * 86_400));
+        assert_eq!(parse_relative_to_unix("1 year ago", NOW), Some(NOW - 365 * 86_400));
+    }
+
+    #[test]
+    fn parses_singular_and_articles() {
+        assert_eq!(parse_relative_to_unix("1 day ago", NOW), Some(NOW - 86_400));
+        assert_eq!(parse_relative_to_unix("a day ago", NOW), Some(NOW - 86_400));
+        assert_eq!(parse_relative_to_unix("an hour ago", NOW), Some(NOW - 3_600));
+    }
+
+    #[test]
+    fn strips_streamed_and_premiered_prefix() {
+        assert_eq!(
+            parse_relative_to_unix("Streamed 2 weeks ago", NOW),
+            Some(NOW - 14 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("Premiered 5 months ago", NOW),
+            Some(NOW - 150 * 86_400)
+        );
+    }
+
+    #[test]
+    fn case_and_whitespace_insensitive() {
+        assert_eq!(parse_relative_to_unix("  3 DAYS AGO  ", NOW), Some(NOW - 3 * 86_400));
+    }
+
+    #[test]
+    fn parses_fixed_offset_shorthands() {
+        assert_eq!(parse_relative_to_unix("just now", NOW), Some(NOW));
+        assert_eq!(parse_relative_to_unix("yesterday", NOW), Some(NOW - 86_400));
+    }
+
+    #[test]
+    fn unparseable_returns_none() {
+        assert_eq!(parse_relative_to_unix("", NOW), None);
+        assert_eq!(parse_relative_to_unix("3 fortnights ago", NOW), None);
+        assert_eq!(parse_relative_to_unix("2024-01-01", NOW), None);
+    }
+
+    #[test]
+    fn rejects_negative_counts() {
+        // Negative counts must not produce a future timestamp.
+        assert_eq!(parse_relative_to_unix("-3 days ago", NOW), None);
+    }
+
+    #[test]
+    fn extreme_counts_saturate_without_panicking() {
+        // Should not panic in debug or wrap in release.
+        let huge = "4294967295 years ago"; // u32::MAX
+        let got = parse_relative_to_unix(huge, NOW);
+        assert!(got.is_some());
+        assert!(got.unwrap() <= NOW);
     }
 }
 
