@@ -1486,6 +1486,7 @@ export class VideoPlayer extends LitElement {
               >
                 ${this.audioOnly ? "Show video" : "Audio only"}
               </button>
+              <slot name="actions"></slot>
             </div>
           </div>`
         : null}

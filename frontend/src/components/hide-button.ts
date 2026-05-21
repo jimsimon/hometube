@@ -1,7 +1,9 @@
 /**
  * <hometube-hide-button video-id="..." video-title="..." ...>
  *
- * Watch-page action. On click POSTs `/api/hidden` with the current
+ * Watch-page action, slotted into `<hometube-video-player slot="actions">`
+ * so it sits alongside Like / Subscribe / Audio only in the player's
+ * chrome row. On click POSTs `/api/hidden` with the current
  * video's metadata and redirects the browser to `/child/home` so the
  * back button doesn't return to the now-hidden video. The server
  * additionally denies further `/child/video/:id` navigation via the
@@ -42,17 +44,17 @@ export class HideButton extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
-      padding: 0.45rem 0.85rem;
+      padding: 0.4rem 0.75rem;
       border-radius: 0.375rem;
-      border: 1px solid var(--wa-color-surface-border, #d1d5db);
-      background: var(--wa-color-surface-raised, white);
-      color: inherit;
+      border: 1px solid var(--wa-color-surface-border, #ccc);
+      background: transparent;
+      color: var(--wa-color-text-normal, inherit);
       font: inherit;
       cursor: pointer;
     }
     button:hover,
     button:focus-visible {
-      background: var(--wa-color-surface-border, #f3f4f6);
+      background: var(--wa-color-surface-raised, #f3f4f6);
       outline: none;
     }
     button[disabled] {

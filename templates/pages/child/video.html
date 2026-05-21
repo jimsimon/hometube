@@ -27,16 +27,16 @@
     <hometube-video-player
       video-id="{{ video_id }}"
       {% if start_at > 0 %}start-at="{{ start_at }}"{% endif %}
-    ></hometube-video-player>
-    <div class="player-actions">
+    >
       <hometube-hide-button
+        slot="actions"
         video-id="{{ video_id }}"
         video-title="{{ video_title }}"
         channel-id="{{ channel_id }}"
         channel-title="{{ channel_title }}"
         thumbnail-url="{{ thumbnail_url }}"
       ></hometube-hide-button>
-    </div>
+    </hometube-video-player>
   </div>
 
   <aside class="up-next-column" aria-label="Up next">
@@ -68,12 +68,6 @@
   }
   .player-column {
     min-width: 0;
-  }
-  .player-actions {
-    margin-top: 0.75rem;
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
   }
   .up-next-column {
     position: sticky;
