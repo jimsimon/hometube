@@ -69,8 +69,11 @@ type LikeRowTuple = (
 
 /// Shared SELECT projection used by `list` and `like`. Computes
 /// `visible` from a direct-video allowlist match OR an allowlisted
-/// channel match against the per-like `channel_id`.
-const LIKE_ROW_SELECT: &str = "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
+/// channel match against the per-like `channel_id`. Concatenated at
+/// compile time with each handler's WHERE clause to avoid per-request
+/// `String` allocations.
+const LIKE_LIST_SQL: &str = concat!(
+    "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
             l.channel_id, l.channel_title, l.liked_at, \
             CASE WHEN a.id IS NOT NULL OR c.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
@@ -78,7 +81,23 @@ const LIKE_ROW_SELECT: &str = "SELECT l.id, l.video_id, l.video_title, l.video_t
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
        ON c.child_account_id = l.child_account_id \
-      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id";
+      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id",
+    " WHERE l.child_account_id = ? AND l.is_deleted = 0 \
+       ORDER BY visible DESC, l.liked_at DESC",
+);
+
+const LIKE_ONE_SQL: &str = concat!(
+    "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
+            l.channel_id, l.channel_title, l.liked_at, \
+            CASE WHEN a.id IS NOT NULL OR c.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
+     FROM video_likes l \
+     LEFT JOIN allowlisted_videos a \
+       ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
+     LEFT JOIN allowlisted_channels c \
+       ON c.child_account_id = l.child_account_id \
+      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id",
+    " WHERE l.child_account_id = ? AND l.video_id = ?",
+);
 
 fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
     let (
@@ -113,12 +132,7 @@ pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<LikeRow>>> {
-    let sql = format!(
-        "{LIKE_ROW_SELECT} \
-         WHERE l.child_account_id = ? AND l.is_deleted = 0 \
-         ORDER BY visible DESC, l.liked_at DESC"
-    );
-    let rows: Vec<LikeRowTuple> = sqlx::query_as(&sql)
+    let rows: Vec<LikeRowTuple> = sqlx::query_as(LIKE_LIST_SQL)
         .bind(current.id)
         .fetch_all(&state.db)
         .await?;
@@ -174,8 +188,7 @@ pub async fn like(
     .execute(&state.db)
     .await?;
 
-    let sql = format!("{LIKE_ROW_SELECT} WHERE l.child_account_id = ? AND l.video_id = ?");
-    let row: LikeRowTuple = sqlx::query_as(&sql)
+    let row: LikeRowTuple = sqlx::query_as(LIKE_ONE_SQL)
         .bind(current.id)
         .bind(&video_id)
         .fetch_one(&state.db)

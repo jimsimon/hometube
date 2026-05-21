@@ -17,3 +17,29 @@
 
 ALTER TABLE video_likes ADD COLUMN channel_id TEXT;
 ALTER TABLE video_likes ADD COLUMN channel_title TEXT;
+
+-- Best-effort backfill from the video metadata cache. Rows whose video
+-- isn't (or is no longer) in the cache stay NULL and degrade to the
+-- previous video-only visibility behavior until the child re-likes the
+-- video, at which point the POST body refreshes both columns. Wrapped
+-- in NULLIF so blank JSON values don't shadow a future re-like.
+UPDATE video_likes
+SET channel_id = COALESCE(
+        channel_id,
+        NULLIF(
+            (SELECT json_extract(m.metadata_json, '$.channel_id')
+             FROM video_metadata_cache m
+             WHERE m.video_id = video_likes.video_id),
+            ''
+        )
+    ),
+    channel_title = COALESCE(
+        channel_title,
+        NULLIF(
+            (SELECT json_extract(m.metadata_json, '$.channel_title')
+             FROM video_metadata_cache m
+             WHERE m.video_id = video_likes.video_id),
+            ''
+        )
+    )
+WHERE channel_id IS NULL OR channel_title IS NULL;

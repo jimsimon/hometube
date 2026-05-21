@@ -56,6 +56,11 @@ export class LikeButton extends LitElement {
   @state() private busy = false;
   @state() private error = "";
 
+  /** Monotonic refresh token. Bumped on each `refresh()` call and on
+   *  disconnect so a late `/api/likes` response from a previous video
+   *  can't overwrite `this.liked` with a stale value. */
+  private refreshToken = 0;
+
   static styles = css`
     :host {
       display: inline-block;
@@ -94,11 +99,21 @@ export class LikeButton extends LitElement {
     if (changed.has("videoId")) void this.refresh();
   }
 
+  override disconnectedCallback(): void {
+    this.refreshToken++;
+    super.disconnectedCallback();
+  }
+
   private async refresh(): Promise<void> {
     if (!this.videoId) return;
+    const token = ++this.refreshToken;
+    const videoId = this.videoId;
     try {
       const likes = await api.get<LikeRow[]>("/api/likes");
-      this.liked = likes.some((l) => l.video_id === this.videoId);
+      // Discard if a newer refresh (or unmount) has happened, or if the
+      // videoId we were querying for is no longer the current one.
+      if (token !== this.refreshToken || videoId !== this.videoId) return;
+      this.liked = likes.some((l) => l.video_id === videoId);
     } catch {
       // Silent.
     }
