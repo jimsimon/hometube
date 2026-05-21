@@ -309,8 +309,8 @@ pub async fn recent_evictions(pool: &SqlitePool, limit: i64) -> AppResult<Vec<Ev
 /// Return `(human-message, detailed-output)` after running the cleanup.
 ///
 /// Step 1 (allowlist cleanup): for every distinct `video_id` in
-/// `segment_cache`, drop it if no child has it allowlisted directly,
-/// via channel, or via playlist.  Logged with reason `not_allowlisted`.
+/// `segment_cache`, drop it if no child has it allowlisted directly
+/// or via channel.  Logged with reason `not_allowlisted`.
 ///
 /// Step 2 (LRU eviction): if a max size is configured (i.e. not
 /// "Unlimited") and the cache is still over the limit, evict by
@@ -457,21 +457,7 @@ async fn video_is_anywhere_allowlisted(pool: &SqlitePool, video_id: &str) -> App
             return Ok(true);
         }
     }
-
-    // Allowlist via playlist: check whether the video appears in any
-    // playlist a child has allowlisted (via child_playlist_videos →
-    // child_playlists.youtube_playlist_id) — best-effort.
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM child_playlist_videos cpv \
-         INNER JOIN child_playlists cp ON cp.id = cpv.playlist_id \
-         INNER JOIN allowlisted_playlists ap ON ap.playlist_id = cp.youtube_playlist_id \
-         WHERE cpv.video_id = ?",
-    )
-    .bind(video_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
-    Ok(n > 0)
+    Ok(false)
 }
 
 async fn evict_video(pool: &SqlitePool, video_id: &str, why: &str) -> AppResult<(u64, u64)> {

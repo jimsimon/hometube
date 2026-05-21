@@ -36,22 +36,6 @@ async fn parent_activity_page_renders() {
 }
 
 #[tokio::test]
-async fn parent_playlists_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let res = app.server.get("/parent/playlists").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn parent_playlist_detail_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let res = app.server.get("/parent/playlist/1").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
 async fn parent_preview_video_page_renders() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let res = app.server.get("/parent/preview/video/abc123").await;
@@ -63,14 +47,6 @@ async fn parent_preview_video_page_renders() {
 async fn parent_preview_channel_page_renders() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let res = app.server.get("/parent/preview/channel/UCabc").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn parent_preview_playlist_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let res = app.server.get("/parent/preview/playlist/PLabc").await;
     let status = res.status_code();
     assert!(status.is_success(), "got {status}");
 }
@@ -141,30 +117,6 @@ async fn child_channels_page_renders() {
 async fn child_channel_detail_page_renders() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
     let res = app.server.get("/child/channel/UCabc").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn child_playlists_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app.server.get("/child/playlists").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn child_playlist_own_page_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app.server.get("/child/playlist/123").await;
-    let status = res.status_code();
-    assert!(status.is_success(), "got {status}");
-}
-
-#[tokio::test]
-async fn child_playlist_family_prefix_renders() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app.server.get("/child/playlist/family:42").await;
     let status = res.status_code();
     assert!(status.is_success(), "got {status}");
 }

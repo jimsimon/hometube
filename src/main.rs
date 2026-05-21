@@ -160,7 +160,6 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
 /// Insert a `feed_sources` row for every distinct
 /// `allowlisted_channels.channel_id` so the background refresher has
 /// something to poll on a fresh database / after the schema migration.
-/// Playlists are intentionally skipped (deferred per the plan).
 async fn backfill_feed_sources(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
     // The trailing `WHERE true` disambiguates the UPSERT's `ON CONFLICT`
     // from a potential JOIN `ON` clause in the SELECT. Without it SQLite

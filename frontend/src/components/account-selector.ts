@@ -29,7 +29,6 @@
  * Replaces:
  *   - the inline child-selector dropdown in `<hometube-nav-parent>`
  *   - the inline child checkbox group in
- *     `<hometube-family-playlist-form>`
  */
 
 import { LitElement, html, css, nothing } from "lit";

@@ -19,10 +19,6 @@ fn search_type_parse_valid() {
         Some(SearchType::Channel)
     ));
     assert!(matches!(
-        SearchType::parse("playlist"),
-        Some(SearchType::Playlist)
-    ));
-    assert!(matches!(
         SearchType::parse("video"),
         Some(SearchType::Video)
     ));

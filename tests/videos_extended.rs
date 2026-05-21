@@ -268,58 +268,6 @@ async fn manifest_returns_404_without_usable_formats() {
 }
 
 // ---------------------------------------------------------------------------
-// Access via playlist allowlist
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn metadata_allowed_via_playlist_allowlist() {
-    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let child_id = auth.account_id;
-    let parent_id = app.parent_id.unwrap();
-
-    seed_metadata_json(
-        &app.pool,
-        "vid-pl",
-        &base_metadata("vid-pl", "chan-unrelated"),
-    )
-    .await;
-
-    // Create an allowlisted playlist.
-    sqlx::query(
-        "INSERT INTO allowlisted_playlists (child_account_id, playlist_id, playlist_title, added_by) \
-         VALUES (?, 'PL-ABC', 'My Playlist', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    // Create a local child_playlists row referencing that YouTube playlist.
-    let pl_id: i64 = sqlx::query_scalar(
-        "INSERT INTO child_playlists (child_account_id, youtube_playlist_id, title, is_own) \
-         VALUES (?, 'PL-ABC', 'My Playlist', 0) RETURNING id",
-    )
-    .bind(child_id)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
-
-    // Add the video to the playlist.
-    sqlx::query(
-        "INSERT INTO child_playlist_videos (playlist_id, video_id, video_title, position) \
-         VALUES (?, 'vid-pl', 'Test Video', 0)",
-    )
-    .bind(pl_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    let res = app.server.get("/api/videos/vid-pl").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-}
-
-// ---------------------------------------------------------------------------
 // Preview endpoint (parent only)
 // ---------------------------------------------------------------------------
 

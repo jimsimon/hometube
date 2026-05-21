@@ -17,7 +17,7 @@ let fetchSpy: ReturnType<typeof vi.fn>;
 const EMPTY_SEARCH_BODY = {
   q: "",
   kind: "all",
-  results: { channels: [], playlists: [], videos: [] },
+  results: { channels: [], videos: [] },
   next_page_token: null,
 };
 
@@ -118,7 +118,6 @@ describe("<hometube-search-results> onSearchChange", () => {
 
     expect(el.q).toBe("");
     expect((el as unknown as { channels: unknown[] }).channels).toEqual([]);
-    expect((el as unknown as { playlists: unknown[] }).playlists).toEqual([]);
     expect((el as unknown as { videos: unknown[] }).videos).toEqual([]);
     expect((el as unknown as { loading: boolean }).loading).toBe(false);
 
@@ -161,7 +160,6 @@ describe("<hometube-search-results> onSearchChange", () => {
       kind: "all",
       results: {
         channels: [{ channel_id: "UC1", channel_title: "Stale", channel_thumbnail_url: null }],
-        playlists: [],
         videos: [],
       },
       next_page_token: null,

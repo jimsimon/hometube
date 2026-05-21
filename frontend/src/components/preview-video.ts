@@ -2,7 +2,7 @@
  * <hometube-preview-video video-id="...">
  *
  * Parent-side video preview. Mirrors the role
- * `<hometube-preview-channel>` and `<hometube-preview-playlist>`
+ * `<hometube-preview-channel>`
  * play but for a single video — fetches metadata via
  * `/api/preview/video/:id` (parent-only, allowlist-bypassed) and
  * renders the title, channel, and a thumbnail. Used inside the

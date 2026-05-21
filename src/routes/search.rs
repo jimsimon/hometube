@@ -10,8 +10,6 @@
 //!   see content that is reachable from their allowlist, and every
 //!   query is logged to `search_log` for parent visibility.
 
-use std::collections::HashSet;
-
 use axum::{
     extract::{Query, State},
     Json,
@@ -34,7 +32,7 @@ const MAX_LIMIT: u32 = 50;
 #[derive(Debug, Deserialize)]
 pub struct ParentSearchQuery {
     pub q: String,
-    /// `"channel"`, `"playlist"`, or `"video"`.
+    /// `"channel"` or `"video"`.
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -46,13 +44,13 @@ pub struct SearchResponse {
     pub items: Vec<SearchItem>,
 }
 
-/// `GET /api/parent/search?q=&type=channel|playlist|video`.
+/// `GET /api/parent/search?q=&type=channel|video`.
 pub async fn parent_search(
     State(state): State<AppState>,
     Query(q): Query<ParentSearchQuery>,
 ) -> AppResult<Json<SearchResponse>> {
     let kind = SearchType::parse(&q.kind)
-        .ok_or_else(|| AppError::BadRequest("type must be channel|playlist|video".into()))?;
+        .ok_or_else(|| AppError::BadRequest("type must be channel|video".into()))?;
     let yt = YoutubeClient::from_db(&state.db).await?;
     let items = yt.search(&q.q, kind, q.max_results.unwrap_or(15)).await?;
     Ok(Json(SearchResponse { items }))
@@ -65,20 +63,14 @@ pub async fn parent_search(
 #[derive(Debug, Deserialize)]
 pub struct ChildSearchQuery {
     pub q: String,
-    /// One of `channel`, `playlist`, `video`, or `all` (default).
+    /// One of `channel`, `video`, or `all` (default).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
     /// Optional pagination cursor returned in a previous response's
     /// `next_page_token` field. The token is an opaque base64url-encoded
     /// JSON object of the form `{"offset": N}` and is applied uniformly
-    /// to every result bucket (channels / playlists / videos). When
-    /// absent we start at offset 0.
-    ///
-    /// We picked this scheme over a SQLite `rowid` cursor because the
-    /// child search aggregates rows from up to seven different tables —
-    /// `rowid` would have to be encoded per-bucket, which is more
-    /// complex than the integer offset that maps cleanly to SQL
-    /// `OFFSET`.
+    /// to every result bucket (channels / videos). When absent we
+    /// start at offset 0.
     #[serde(default)]
     pub page_token: Option<String>,
     #[serde(default)]
@@ -110,14 +102,6 @@ pub struct ChildChannelHit {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct ChildPlaylistHit {
-    pub playlist_id: String,
-    pub playlist_title: String,
-    pub playlist_thumbnail_url: Option<String>,
-    pub source: &'static str,
-}
-
-#[derive(Debug, Serialize, Clone)]
 pub struct ChildVideoHit {
     pub video_id: String,
     pub title: String,
@@ -129,7 +113,6 @@ pub struct ChildVideoHit {
 #[derive(Debug, Serialize)]
 pub struct ChildSearchResults {
     pub channels: Vec<ChildChannelHit>,
-    pub playlists: Vec<ChildPlaylistHit>,
     pub videos: Vec<ChildVideoHit>,
 }
 
@@ -145,12 +128,10 @@ pub struct ChildSearchResponse {
 ///
 /// Searches across:
 ///
-/// - **Channels** the child can reach via `allowlisted_channels`,
-///   `allowlisted_videos.channel_title`, or playlist channels.
-/// - **Playlists** in `allowlisted_playlists` + the child's own
-///   `child_playlists` + (Phase 18) family playlists assigned to them.
-/// - **Videos** in `allowlisted_videos`, `watch_history`, and
-///   `child_playlist_videos` whose title matches `q`.
+/// - **Channels** the child can reach via `allowlisted_channels` or
+///   their subscriptions.
+/// - **Videos** in `allowlisted_videos`, `watch_history`, and the
+///   recent uploads cache for allowlisted channels.
 ///
 /// The query is logged to `search_log` regardless of result count so
 /// parents can see what their child is searching for.
@@ -179,27 +160,21 @@ pub async fn child_search(
 
     let mut results = ChildSearchResults {
         channels: Vec::new(),
-        playlists: Vec::new(),
         videos: Vec::new(),
     };
 
     let want_channels = matches!(kind_label.as_str(), "channel" | "all");
-    let want_playlists = matches!(kind_label.as_str(), "playlist" | "all");
     let want_videos = matches!(kind_label.as_str(), "video" | "all");
 
     if want_channels {
         results.channels = search_channels(&state, current.id, &pattern, limit, offset).await?;
-    }
-    if want_playlists {
-        results.playlists = search_playlists(&state, current.id, &pattern, limit, offset).await?;
     }
     if want_videos {
         results.videos = search_videos(&state, current.id, &pattern, limit, offset).await?;
     }
 
     // Apply access control to every video hit so a blocked-then-
-    // allowlisted edge case still hides the video. We don't have the
-    // playlist context here so pass an empty slice — the channel ID is
+    // allowlisted edge case still hides the video. The channel ID is
     // enough to keep the channel-allowlist branch alive.
     let mut filtered_videos = Vec::with_capacity(results.videos.len());
     for hit in results.videos.drain(..) {
@@ -208,7 +183,6 @@ pub async fn child_search(
             current.id,
             &hit.video_id,
             hit.channel_id.as_deref(),
-            &[],
         )
         .await
         .unwrap_or(false)
@@ -218,7 +192,7 @@ pub async fn child_search(
     }
     results.videos = filtered_videos;
 
-    let total = results.channels.len() + results.playlists.len() + results.videos.len();
+    let total = results.channels.len() + results.videos.len();
 
     // Always log, regardless of result count. Only log the first page so
     // a single search session doesn't produce duplicate `search_log`
@@ -265,9 +239,7 @@ pub async fn child_search(
     // Emit a `next_page_token` only if any individual bucket appears to
     // be saturated at the per-bucket `limit`. A bucket with strictly
     // fewer rows than `limit` has been fully drained.
-    let has_more = results.channels.len() as i64 >= limit
-        || results.playlists.len() as i64 >= limit
-        || results.videos.len() as i64 >= limit;
+    let has_more = results.channels.len() as i64 >= limit || results.videos.len() as i64 >= limit;
     let next_page_token = has_more.then(|| {
         encode_page_token(&PageCursor {
             offset: offset + limit,
@@ -327,104 +299,6 @@ async fn search_channels(
         .collect())
 }
 
-async fn search_playlists(
-    state: &AppState,
-    child_id: i64,
-    pattern: &str,
-    limit: i64,
-    offset: i64,
-) -> AppResult<Vec<ChildPlaylistHit>> {
-    let mut out: Vec<ChildPlaylistHit> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // We fetch `limit + offset` from each bucket and apply the offset
-    // after dedup so the cursor is well-defined across all three
-    // sources. Each bucket is small (allowlist sizes, own playlists,
-    // family playlists) so the over-fetch is negligible.
-    let fetch_limit = limit + offset;
-
-    // Allowlisted playlists.
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT playlist_id, playlist_title, playlist_thumbnail_url \
-         FROM allowlisted_playlists \
-         WHERE child_account_id = ? AND playlist_title LIKE ? ESCAPE '\\' \
-         ORDER BY playlist_title LIMIT ?",
-    )
-    .bind(child_id)
-    .bind(pattern)
-    .bind(fetch_limit)
-    .fetch_all(&state.db)
-    .await?;
-    for (id, title, thumb) in rows {
-        if seen.insert(id.clone()) {
-            out.push(ChildPlaylistHit {
-                playlist_id: id,
-                playlist_title: title,
-                playlist_thumbnail_url: thumb,
-                source: "allowlist",
-            });
-        }
-    }
-
-    // Child's own playlists. We surface the local primary-key id
-    // (string-encoded) so the UI can deep-link to /child/playlist/:id.
-    let own: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, title FROM child_playlists \
-         WHERE child_account_id = ? AND is_deleted = 0 AND title LIKE ? ESCAPE '\\' \
-         ORDER BY title LIMIT ?",
-    )
-    .bind(child_id)
-    .bind(pattern)
-    .bind(fetch_limit)
-    .fetch_all(&state.db)
-    .await?;
-    for (id, title) in own {
-        let key = format!("local:{id}");
-        if seen.insert(key.clone()) {
-            out.push(ChildPlaylistHit {
-                playlist_id: id.to_string(),
-                playlist_title: title,
-                playlist_thumbnail_url: None,
-                source: "own",
-            });
-        }
-    }
-
-    // Family playlists assigned to this child. Phase 18's schema makes
-    // family playlists visible only when there's a matching row in
-    // `family_playlist_members` for the child.
-    let family: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT fp.id, fp.title \
-         FROM family_playlists fp \
-         INNER JOIN family_playlist_members m ON m.playlist_id = fp.id \
-         WHERE m.child_account_id = ? AND fp.title LIKE ? ESCAPE '\\' \
-         ORDER BY fp.title LIMIT ?",
-    )
-    .bind(child_id)
-    .bind(pattern)
-    .bind(fetch_limit)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    for (id, title) in family {
-        let key = format!("family:{id}");
-        if seen.insert(key.clone()) {
-            out.push(ChildPlaylistHit {
-                playlist_id: format!("family:{id}"),
-                playlist_title: title,
-                playlist_thumbnail_url: None,
-                source: "family",
-            });
-        }
-    }
-
-    // Apply offset + limit *after* dedup so paging is consistent across
-    // bucket sources.
-    let start = (offset as usize).min(out.len());
-    let end = (start + limit as usize).min(out.len());
-    Ok(out[start..end].to_vec())
-}
-
 async fn search_videos(
     state: &AppState,
     child_id: i64,
@@ -433,31 +307,24 @@ async fn search_videos(
     offset: i64,
 ) -> AppResult<Vec<ChildVideoHit>> {
     // We search local cached metadata first to keep the request fast.
-    // Five local sources, gathered via UNION ALL + a per-video GROUP BY:
+    // Three local sources, gathered via UNION ALL + a per-video GROUP BY:
     //
     //   1. allowlisted_videos       — direct per-video allowlist
     //   2. watch_history            — videos already proven viewable
-    //   3. child_playlist_videos    — videos in the kid's playlists
-    //   4. feed_source_items via    — videos surfaced through an
+    //   3. feed_source_items via    — videos surfaced through an
     //      allowlisted_channels       allowlisted channel's recent uploads
-    //   5. feed_source_items via    — videos surfaced through an
-    //      allowlisted_playlists      allowlisted playlist's contents
     //
-    // (4) and (5) are necessary because a child whose access derives
-    // *only* from a channel/playlist allowlist would otherwise be
-    // unable to search for those videos at all — they'd be able to
-    // watch from the channel feed view, but not find it again via
-    // search. `feed_source_items` caches the ~20 most-recent videos
-    // per allowlisted source (migration 009); older videos remain
-    // unsearchable until the cache is expanded (separate concern).
+    // (3) is necessary because a child whose access derives *only*
+    // from a channel allowlist would otherwise be unable to search
+    // for those videos at all. `feed_source_items` caches the ~20
+    // most-recent videos per allowlisted source.
     //
     // We use UNION ALL + GROUP BY rather than UNION because UNION
-    // dedups only on full-row equality — and buckets 1–3 have no
-    // `channel_id` while buckets 4–5 do, so the same video could
-    // appear twice with different rows. GROUP BY video_id collapses
-    // them; MAX(channel_id) prefers the bucket-4/5 form (real id
-    // beats NULL under MAX), giving `can_child_view` the data it
-    // needs to exercise the channel-allowlist branch.
+    // dedups only on full-row equality — buckets 1–2 have no
+    // `channel_id` while bucket 3 does. GROUP BY video_id collapses
+    // them; MAX(channel_id) prefers the bucket-3 form (real id beats
+    // NULL under MAX), giving `can_child_view` the data it needs to
+    // exercise the channel-allowlist branch.
     type SearchRow = (
         String,
         String,
@@ -482,13 +349,6 @@ async fn search_videos(
                    channel_title, video_thumbnail_url \
               FROM watch_history WHERE child_account_id = ? \
             UNION ALL \
-            SELECT cpv.video_id, cpv.video_title, \
-                   NULL AS channel_id, \
-                   cpv.channel_title, cpv.video_thumbnail_url \
-              FROM child_playlist_videos cpv \
-              INNER JOIN child_playlists cp ON cp.id = cpv.playlist_id \
-              WHERE cp.child_account_id = ? AND cp.is_deleted = 0 \
-            UNION ALL \
             SELECT fsi.video_id, fsi.title AS video_title, \
                    fsi.channel_id, fsi.channel_title, \
                    fsi.thumbnail_url AS video_thumbnail_url \
@@ -496,22 +356,12 @@ async fn search_videos(
               INNER JOIN allowlisted_channels ac \
                 ON ac.channel_id = fsi.source_id AND fsi.kind = 'channel' \
               WHERE ac.child_account_id = ? \
-            UNION ALL \
-            SELECT fsi.video_id, fsi.title AS video_title, \
-                   fsi.channel_id, fsi.channel_title, \
-                   fsi.thumbnail_url AS video_thumbnail_url \
-              FROM feed_source_items fsi \
-              INNER JOIN allowlisted_playlists ap \
-                ON ap.playlist_id = fsi.source_id AND fsi.kind = 'playlist' \
-              WHERE ap.child_account_id = ? \
          ) \
          WHERE video_title LIKE ? ESCAPE '\\' \
          GROUP BY video_id \
          ORDER BY video_title \
          LIMIT ? OFFSET ?",
     )
-    .bind(child_id)
-    .bind(child_id)
     .bind(child_id)
     .bind(child_id)
     .bind(child_id)

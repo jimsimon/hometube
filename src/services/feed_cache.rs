@@ -23,7 +23,6 @@ pub const PER_SOURCE_CAP: i64 = 20;
 
 /// `kind` values used in `feed_sources.kind` / `feed_source_items.kind`.
 pub const KIND_CHANNEL: &str = "channel";
-pub const KIND_PLAYLIST: &str = "playlist";
 
 /// One item destined for `feed_source_items`. Built by the source-
 /// specific fetchers (RSS, sidecar) and handed to
@@ -97,8 +96,7 @@ pub async fn upsert_source(pool: &SqlitePool, kind: &str, source_id: &str) -> Ap
 pub async fn gc_orphan_sources(pool: &SqlitePool) -> AppResult<u64> {
     let result = sqlx::query(
         "DELETE FROM feed_sources \
-         WHERE (kind = 'channel' AND source_id NOT IN (SELECT channel_id FROM allowlisted_channels)) \
-            OR (kind = 'playlist' AND source_id NOT IN (SELECT playlist_id FROM allowlisted_playlists))",
+         WHERE kind = 'channel' AND source_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
     )
     .execute(pool)
     .await?;
@@ -280,10 +278,10 @@ pub async fn record_poll_skipped(
     reason: &str,
     next_poll_at: i64,
 ) -> AppResult<()> {
-    // Also reset `consecutive_errors` so rows that previously accumulated
-    // errors under the pre-fix deferred-playlist behaviour stop showing a
-    // misleading non-zero error count on the diagnostics page once they
-    // transition to the intentionally-skipped path.
+    // Also reset `consecutive_errors` so rows that previously
+    // accumulated errors under a removed source kind stop showing a
+    // misleading non-zero error count on the diagnostics page once
+    // they transition to the intentionally-skipped path.
     sqlx::query(
         "UPDATE feed_sources SET \
              last_error         = ?, \
@@ -497,9 +495,6 @@ pub async fn feed_for_child(
         "WITH allowed(kind, source_id) AS ( \
              SELECT 'channel', channel_id \
                FROM allowlisted_channels WHERE child_account_id = ?1 \
-             UNION ALL \
-             SELECT 'playlist', playlist_id \
-               FROM allowlisted_playlists WHERE child_account_id = ?1 \
          ), \
          candidates AS ( \
              SELECT i.video_id, i.title, i.channel_id, i.channel_title, \
@@ -850,86 +845,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feed_dedupes_video_appearing_in_two_sources() {
-        let pool = setup_db().await;
-        let child = insert_child(&pool, "kid").await;
-
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        upsert_source(&pool, KIND_PLAYLIST, "PL1").await.unwrap();
-
-        replace_source_items(&pool, KIND_CHANNEL, "UC1", &[mk_item("vSame", 100)], 0)
-            .await
-            .unwrap();
-        replace_source_items(&pool, KIND_PLAYLIST, "PL1", &[mk_item("vSame", 200)], 0)
-            .await
-            .unwrap();
-
-        allow_channel(&pool, child, "UC1").await;
-        sqlx::query(
-            "INSERT INTO allowlisted_playlists \
-                (child_account_id, playlist_id, playlist_title, added_by) \
-             VALUES (?, 'PL1', 'X', ?)",
-        )
-        .bind(child)
-        .bind(child)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let feed = feed_for_child(&pool, child, 10).await.unwrap();
-        assert_eq!(feed.len(), 1, "expected dedupe");
-        assert_eq!(feed[0].video_id, "vSame");
-        // The newer (playlist) copy should win — its published_at=200,
-        // which sorts ahead of the channel copy's published_at=100.
-        assert!(feed[0]
-            .published_at
-            .as_deref()
-            .map(|s| s.ends_with("200Z"))
-            .unwrap_or(false));
-    }
-
-    #[tokio::test]
-    async fn record_poll_skipped_does_not_touch_polled_or_success_columns() {
-        let pool = setup_db().await;
-        upsert_source(&pool, KIND_PLAYLIST, "PL1").await.unwrap();
-        // Simulate legacy state: a non-zero consecutive_errors carried
-        // over from the pre-fix code path that treated unsupported kinds
-        // as failures. The skipped path must clear this so the
-        // diagnostics page doesn't keep showing a misleading error
-        // count.
-        sqlx::query("UPDATE feed_sources SET consecutive_errors = 5 WHERE source_id = 'PL1'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        record_poll_skipped(&pool, KIND_PLAYLIST, "PL1", "deferred", 12345)
-            .await
-            .unwrap();
-        let (lp, ls, le, errs, next): (Option<i64>, Option<i64>, Option<String>, i64, i64) =
-            sqlx::query_as(
-                "SELECT last_polled_at, last_success_at, last_error, \
-                    consecutive_errors, next_poll_at \
-               FROM feed_sources WHERE kind='playlist' AND source_id='PL1'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert!(
-            lp.is_none(),
-            "last_polled_at must not be set by skipped path"
-        );
-        assert!(
-            ls.is_none(),
-            "last_success_at must not be set by skipped path"
-        );
-        assert_eq!(le.as_deref(), Some("deferred"));
-        assert_eq!(
-            errs, 0,
-            "skipped path must reset legacy consecutive_errors so diagnostics stop showing a stale non-zero count"
-        );
-        assert_eq!(next, 12345);
-    }
-
-    #[tokio::test]
     async fn claim_due_sources_leases_so_concurrent_claim_skips() {
         let pool = setup_db().await;
         for id in ["UC1", "UC2", "UC3"] {
@@ -1006,24 +921,24 @@ mod tests {
         // underlying failure history. `record_poll_deferred` must
         // leave the counter alone.
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_PLAYLIST, "PLkeep").await.unwrap();
+        upsert_source(&pool, KIND_CHANNEL, "UCkeep").await.unwrap();
         // Pre-seed two prior errors so we can prove they survive.
         sqlx::query(
             "UPDATE feed_sources SET consecutive_errors = 2 \
-              WHERE kind = 'playlist' AND source_id = 'PLkeep'",
+              WHERE kind = 'channel' AND source_id = 'UCkeep'",
         )
         .execute(&pool)
         .await
         .unwrap();
 
-        record_poll_deferred(&pool, KIND_PLAYLIST, "PLkeep", "rate-capped", 999, 50)
+        record_poll_deferred(&pool, KIND_CHANNEL, "UCkeep", "rate-capped", 999, 50)
             .await
             .unwrap();
 
         let (errs, last_polled, last_err, next): (i64, Option<i64>, Option<String>, i64) =
             sqlx::query_as(
                 "SELECT consecutive_errors, last_polled_at, last_error, next_poll_at \
-                   FROM feed_sources WHERE kind='playlist' AND source_id='PLkeep'",
+                   FROM feed_sources WHERE kind='channel' AND source_id='UCkeep'",
             )
             .fetch_one(&pool)
             .await

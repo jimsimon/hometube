@@ -4,8 +4,8 @@
 
 A self-hosted YouTube frontend for kids that gives parents fine-grained
 control over what content their children can access, while syncing
-children's activity (likes, subscriptions, playlists) back to their
-real YouTube accounts.
+children's activity (likes, subscriptions) back to their real YouTube
+accounts.
 
 ## Status
 
@@ -15,16 +15,14 @@ feature-complete for self-hosting, and the remaining work is hardening
 
 ## Highlights
 
-- **Parent-controlled allowlists** of channels, playlists, and individual
-  videos, with parental preview before allowlisting
+- **Parent-controlled allowlists** of channels and individual videos,
+  with parental preview before allowlisting
 - **Profile switcher with PIN protection** for parent accounts
-- **Two-way YouTube sync** — likes, subscriptions, and playlists round-trip
-  to the child's real Google account
+- **Two-way YouTube sync** — likes and subscriptions round-trip to the
+  child's real Google account
 - **Daily-limit enforcement** with per-day-of-week schedules + audio
   fade-out wind-down
 - **No ads, no comments, no algorithmic recommendations** by design
-- **Family playlists** — parents can curate lists of videos and share
-  them with one or more children
 - **Sleep timer + wind-down overlay** — fades out audio and pauses
   playback at expiry
 - **Captions + audio-only mode** — server-side WebVTT conversion via
@@ -119,8 +117,6 @@ wizard asks for.
   in private browsing disables OPFS entirely. Background Fetch is
   Chromium-only.
 - **Single family** — One instance = one family. No multi-tenancy.
-- **YouTube playlist sync** — Rate-limited by the API. Bulk reorders
-  may need throttling on very large playlists.
 
 ## License
 

@@ -27,12 +27,6 @@
       channel-id="{{ resource_id }}"
     ></hometube-preview-channel>
   </div>
-  {% else if kind == "playlist" %}
-  <div class="page-section">
-    <hometube-preview-playlist
-      playlist-id="{{ resource_id }}"
-    ></hometube-preview-playlist>
-  </div>
   {% endif %}
 </section>
 {% endblock %}
@@ -49,5 +43,4 @@
 {% block page_scripts %}
 <script type="module" src="/assets/components/video-player.js"></script>
 <script type="module" src="/assets/components/preview-channel.js"></script>
-<script type="module" src="/assets/components/preview-playlist.js"></script>
 {% endblock %}

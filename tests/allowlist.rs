@@ -105,38 +105,6 @@ async fn channels_round_trip_via_db_seed() {
 }
 
 #[tokio::test]
-async fn playlists_round_trip_via_db_seed() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let child_id = app.child_id.unwrap();
-    let parent_id = app.parent_id.unwrap();
-
-    sqlx::query(
-        "INSERT INTO allowlisted_playlists \
-            (child_account_id, playlist_id, playlist_title, playlist_thumbnail_url, added_by) \
-         VALUES (?, 'pl-1', 'My PL', NULL, ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    let res = app
-        .server
-        .get(&format!("/api/children/{child_id}/allowlist/playlists"))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-
-    let res = app
-        .server
-        .delete(&format!(
-            "/api/children/{child_id}/allowlist/playlists/pl-1"
-        ))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
 async fn allowlist_rejects_non_child_target() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let parent_id = app.parent_id.unwrap();

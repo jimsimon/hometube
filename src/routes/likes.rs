@@ -43,7 +43,7 @@ pub struct LikeRow {
     pub liked_at: i64,
     /// `true` when the liked video is reachable through the child's
     /// allowlist (direct video allowlist; the simpler join because
-    /// `video_likes` has no channel/playlist metadata column).
+    /// `video_likes` has no channel metadata column).
     pub visible: bool,
 }
 

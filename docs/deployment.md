@@ -8,7 +8,7 @@ HomeTube runs as a three-container Docker Compose stack:
 | `discovery` | `ghcr.io/jimsimon/hometube-discovery` | youtubei.js sidecar for search + metadata |
 | `pot-server` | `brainicism/bgutil-ytdlp-pot-provider` | Proof-of-Origin tokens for yt-dlp |
 
-The app needs both sidecars at runtime — the discovery service replaces the YouTube Data API for search/channel/playlist lookups, and the PO-token server lets yt-dlp bypass YouTube's bot detection. None of the three are optional.
+The app needs both sidecars at runtime — the discovery service replaces the YouTube Data API for search/channel lookups, and the PO-token server lets yt-dlp bypass YouTube's bot detection. None of the three are optional.
 
 After first boot, all configuration (parent accounts, child profiles, allowlists) is collected through an in-app setup wizard. There is no config file to edit.
 

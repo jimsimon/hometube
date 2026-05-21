@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
 use crate::services::access::can_child_view;
-use crate::services::youtube::{ChannelInfo, PlaylistItem, YoutubeClient};
+use crate::services::youtube::{ChannelInfo, ChannelVideoItem, YoutubeClient};
 use crate::state::AppState;
 
 /// Default page size when paging through a channel's videos.
@@ -57,19 +57,20 @@ pub struct ListVideosQuery {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelVideosPage {
-    pub items: Vec<PlaylistItem>,
+    pub items: Vec<ChannelVideoItem>,
     pub next_page_token: Option<String>,
 }
 
 /// `GET /api/channels/:channelId/videos`.
 ///
-/// Pulls a page of recent uploads via the YouTube uploads playlist, then
-/// drops anything the child isn't allowed to see (blocked or not on the
-/// allowlist). The `most_viewed` sort applies a stable secondary sort by
-/// `view_count` — but YouTube's `playlistItems.list` doesn't expose view
-/// counts, so we treat the `latest` ordering as authoritative and only
-/// re-order when a real view-count source is available. For now,
-/// `most_viewed` is accepted but degrades gracefully to `latest`.
+/// Pulls a page of the channel's recent uploads (via the discovery
+/// sidecar), then drops anything the child isn't allowed to see
+/// (blocked or not on the allowlist). The `most_viewed` sort applies
+/// a stable secondary sort by `view_count` — but the sidecar's
+/// channel-videos response doesn't expose view counts, so we treat
+/// the `latest` ordering as authoritative and only re-order when a
+/// real view-count source is available. For now, `most_viewed` is
+/// accepted but degrades gracefully to `latest`.
 pub async fn list_videos(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -91,7 +92,6 @@ pub async fn list_videos(
             current.id,
             &it.video_id,
             it.channel_id.as_deref().or(Some(channel_id.as_str())),
-            &[],
         )
         .await
         .unwrap_or(false);

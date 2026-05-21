@@ -1,7 +1,7 @@
 //! Blocked-videos routes (parent only).
 //!
 //! A blocked video overrides every allowlist entry — even if the video is
-//! in an allowlisted channel/playlist, blocking it hides it from the
+//! in an allowlisted channel, blocking it hides it from the
 //! child. Used for one-off "this video, but not the rest of the channel"
 //! decisions.
 

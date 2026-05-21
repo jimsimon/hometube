@@ -1,7 +1,7 @@
 /**
  * <hometube-allowlist-manager child-id="...">
  *
- * Three-tab UI (channels / playlists / videos) for managing what a
+ * Two-tab UI (channels / videos) for managing what a
  * single child can see. Each tab combines:
  *   - a YouTube search box (parent-side: /api/parent/search)
  *   - a list of allowlisted items with remove buttons
@@ -18,20 +18,18 @@ import { debounce } from "../services/debounce.js";
 import {
   pickThumbnail,
   type AllowlistedChannel,
-  type AllowlistedPlaylist,
   type AllowlistedVideo,
   type SearchItem,
   type SearchResponse,
 } from "../types/index.js";
 
 import "./preview-channel.js";
-import "./preview-playlist.js";
 import "./preview-video.js";
 import "./loading-spinner.js";
 import "./error-banner.js";
 import "./content-card.js";
 
-type Kind = "channel" | "playlist" | "video";
+type Kind = "channel" | "video";
 
 /**
  * Delay (ms) between the last keystroke in the search box and the
@@ -48,7 +46,6 @@ export class AllowlistManager extends LitElement {
 
   @state() private activeTab: Kind = "channel";
   @state() private channels: AllowlistedChannel[] = [];
-  @state() private playlists: AllowlistedPlaylist[] = [];
   @state() private videos: AllowlistedVideo[] = [];
   @state() private searchQ = "";
   @state() private searchResults: SearchItem[] = [];
@@ -57,7 +54,7 @@ export class AllowlistManager extends LitElement {
   /**
    * Currently-previewed search result. When non-null the preview
    * `<wa-dialog>` is open and showing the corresponding component
-   * (channel / playlist / video). The dialog closes when this goes
+   * (channel / video). The dialog closes when this goes
    * back to `null` — either via the explicit close button, the
    * `wa-after-hide` event, or after a successful "Add to allowlist".
    */
@@ -186,13 +183,11 @@ export class AllowlistManager extends LitElement {
   private async refreshAll(): Promise<void> {
     if (this.childId == null) return;
     try {
-      const [c, p, v] = await Promise.all([
+      const [c, v] = await Promise.all([
         api.get<AllowlistedChannel[]>(`/api/children/${this.childId}/allowlist/channels`),
-        api.get<AllowlistedPlaylist[]>(`/api/children/${this.childId}/allowlist/playlists`),
         api.get<AllowlistedVideo[]>(`/api/children/${this.childId}/allowlist/videos`),
       ]);
       this.channels = c;
-      this.playlists = p;
       this.videos = v;
     } catch (err) {
       this.error = (err as Error).message;
@@ -267,14 +262,12 @@ export class AllowlistManager extends LitElement {
     const payload =
       kind === "channel"
         ? { channel_id: item.id }
-        : kind === "playlist"
-          ? { playlist_id: item.id }
-          : {
-              video_id: item.id,
-              title: item.title,
-              channel_title: item.channel_title,
-              thumbnail_url: pickThumbnail(item.thumbnails),
-            };
+        : {
+            video_id: item.id,
+            title: item.title,
+            channel_title: item.channel_title,
+            thumbnail_url: pickThumbnail(item.thumbnails),
+          };
     try {
       await api.post(base, payload);
       await this.refreshAll();
@@ -323,7 +316,7 @@ export class AllowlistManager extends LitElement {
     }
     return html`
       <div role="tablist" class="row">
-        ${(["channel", "playlist", "video"] as Kind[]).map(
+        ${(["channel", "video"] as Kind[]).map(
           (k) => html`
             <button
               role="tab"
@@ -407,19 +400,17 @@ export class AllowlistManager extends LitElement {
         ${item
           ? this.previewKind === "channel"
             ? html`<hometube-preview-channel channel-id=${item.id}></hometube-preview-channel>`
-            : this.previewKind === "playlist"
-              ? html`<hometube-preview-playlist playlist-id=${item.id}></hometube-preview-playlist>`
-              : html`
-                  <hometube-preview-video video-id=${item.id}></hometube-preview-video>
-                  <p style="margin-top: 0.75rem;">
-                    <a
-                      href="/parent/preview/video/${encodeURIComponent(item.id)}"
-                      style="color: var(--wa-color-brand-on-quiet);"
-                    >
-                      Watch full preview →
-                    </a>
-                  </p>
-                `
+            : html`
+                <hometube-preview-video video-id=${item.id}></hometube-preview-video>
+                <p style="margin-top: 0.75rem;">
+                  <a
+                    href="/parent/preview/video/${encodeURIComponent(item.id)}"
+                    style="color: var(--wa-color-brand-on-quiet);"
+                  >
+                    Watch full preview →
+                  </a>
+                </p>
+              `
           : nothing}
         <div
           style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; margin-top: 1rem;"
@@ -460,30 +451,6 @@ export class AllowlistManager extends LitElement {
                   size="small"
                   variant="default"
                   @click=${() => void this.removeItem(c.channel_id)}
-                >
-                  Remove
-                </wa-button>
-              </hometube-content-card>
-            `,
-          )}
-        </div>
-      `;
-    }
-    if (this.activeTab === "playlist") {
-      if (this.playlists.length === 0) return html`<p class="empty">No playlists yet.</p>`;
-      return html`
-        <div class="grid">
-          ${this.playlists.map(
-            (p) => html`
-              <hometube-content-card
-                variant="compact"
-                title=${p.playlist_title}
-                .thumbnailUrl=${p.playlist_thumbnail_url}
-              >
-                <wa-button
-                  size="small"
-                  variant="default"
-                  @click=${() => void this.removeItem(p.playlist_id)}
                 >
                   Remove
                 </wa-button>

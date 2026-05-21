@@ -1,8 +1,8 @@
 //! YouTube content discovery client.
 //!
 //! Wraps the discovery sidecar (powered by youtubei.js) used by parent-side
-//! discovery (search, channel/playlist/video lookup) and by the inbound
-//! feed generator. The sidecar communicates with YouTube's InnerTube API
+//! discovery (search, channel/video lookup) and by the inbound feed
+//! generator. The sidecar communicates with YouTube's InnerTube API
 //! directly, eliminating the dependency on the official YouTube Data API v3.
 //!
 //! ## Caching
@@ -46,7 +46,6 @@ const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 #[derive(Debug, Clone, Copy)]
 pub enum SearchType {
     Channel,
-    Playlist,
     Video,
 }
 
@@ -54,7 +53,6 @@ impl SearchType {
     fn as_str(self) -> &'static str {
         match self {
             SearchType::Channel => "channel",
-            SearchType::Playlist => "playlist",
             SearchType::Video => "video",
         }
     }
@@ -62,7 +60,6 @@ impl SearchType {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "channel" => Some(SearchType::Channel),
-            "playlist" => Some(SearchType::Playlist),
             "video" => Some(SearchType::Video),
             _ => None,
         }
@@ -83,7 +80,7 @@ pub struct ThumbnailInfo {
 /// A normalised search result item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchItem {
-    /// `"channel"`, `"playlist"`, or `"video"`.
+    /// `"channel"` or `"video"`.
     pub kind: String,
     pub id: String,
     pub title: String,
@@ -107,22 +104,6 @@ pub struct ChannelInfo {
     pub thumbnails: HashMap<String, ThumbnailInfo>,
     pub subscriber_count: Option<i64>,
     pub video_count: Option<i64>,
-    /// Uploads playlist ID (`UU...`) — used for "latest videos" feed.
-    pub uploads_playlist_id: Option<String>,
-}
-
-/// A playlist resource (subset).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistInfo {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub description: String,
-    pub channel_id: Option<String>,
-    pub channel_title: Option<String>,
-    #[serde(default)]
-    pub thumbnails: HashMap<String, ThumbnailInfo>,
-    pub item_count: Option<i64>,
 }
 
 /// A video resource (subset). Comments are intentionally absent.
@@ -142,10 +123,10 @@ pub struct VideoInfo {
     pub view_count: Option<i64>,
 }
 
-/// One row from a playlist items response — represents a video inside a
-/// playlist.
+/// One row from a channel-videos response — represents a video listed
+/// on a channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistItem {
+pub struct ChannelVideoItem {
     pub video_id: String,
     pub title: String,
     pub channel_id: Option<String>,
@@ -172,9 +153,9 @@ pub enum SidecarRefresherOutcome {
     /// The source exists. `items` may be empty (live but quiet
     /// channel) or populated; in either case the refresher treats it
     /// as a successful poll.
-    Items(Vec<PlaylistItem>),
-    /// The sidecar returned a clean 404 with a "channel not found" /
-    /// "playlist not found" payload. The source is confidently dead;
+    Items(Vec<ChannelVideoItem>),
+    /// The sidecar returned a clean 404 with a "channel not found"
+    /// payload. The source is confidently dead;
     /// the refresher shelves it (pushes `next_poll_at` 1 year out).
     NotFound,
     /// The sidecar itself failed (5xx, network timeout, parse error,
@@ -286,7 +267,7 @@ impl YoutubeClient {
         Ok(body)
     }
 
-    /// Search for channels, playlists, or videos.
+    /// Search for channels or videos.
     pub async fn search(
         &self,
         q: &str,
@@ -323,16 +304,6 @@ impl YoutubeClient {
         Ok(serde_json::from_value(body).ok())
     }
 
-    /// Get metadata for a single playlist.
-    pub async fn get_playlist(&self, id: &str) -> AppResult<Option<PlaylistInfo>> {
-        let path = format!("/playlists/{}", percent_encode(id));
-        let body = self.get_json(&path).await?;
-        if body.get("error").is_some() {
-            return Ok(None);
-        }
-        Ok(serde_json::from_value(body).ok())
-    }
-
     /// Get metadata for a single video.
     pub async fn get_video(&self, id: &str) -> AppResult<Option<VideoInfo>> {
         let path = format!("/videos/{}", percent_encode(id));
@@ -345,14 +316,13 @@ impl YoutubeClient {
 
     /// List a channel's most recent uploads.
     ///
-    /// Delegates to the sidecar's `/channel-videos/:channelId` endpoint
-    /// which resolves the uploads playlist internally.
+    /// Delegates to the sidecar's `/channel-videos/:channelId` endpoint.
     pub async fn list_channel_videos(
         &self,
         channel_id: &str,
         max_results: u32,
         page_token: Option<&str>,
-    ) -> AppResult<Page<PlaylistItem>> {
+    ) -> AppResult<Page<ChannelVideoItem>> {
         let mut path = format!(
             "/channel-videos/{}?maxResults={}",
             percent_encode(channel_id),
@@ -362,7 +332,7 @@ impl YoutubeClient {
             path.push_str(&format!("&pageToken={}", percent_encode(tok)));
         }
         let body = self.get_json(&path).await?;
-        let page: Page<PlaylistItem> = serde_json::from_value(body).unwrap_or_else(|_| Page {
+        let page: Page<ChannelVideoItem> = serde_json::from_value(body).unwrap_or_else(|_| Page {
             items: Vec::new(),
             next_page_token: None,
         });
@@ -388,21 +358,6 @@ impl YoutubeClient {
             "/channel-videos/{}?maxResults={}",
             percent_encode(channel_id),
             max_results.min(50)
-        );
-        self.refresher_fetch_uncached(&path).await
-    }
-
-    /// Same shape as [`Self::refresher_list_channel_videos`] but for
-    /// playlists.
-    pub async fn refresher_list_playlist_items(
-        &self,
-        playlist_id: &str,
-        max_results: u32,
-    ) -> SidecarRefresherOutcome {
-        let path = format!(
-            "/playlist-items/{}?maxResults={}",
-            percent_encode(playlist_id),
-            max_results.min(500)
         );
         self.refresher_fetch_uncached(&path).await
     }
@@ -447,36 +402,13 @@ impl YoutubeClient {
             }
         };
         // The sidecar wraps items the same way for both endpoints.
-        let page: Page<PlaylistItem> = match serde_json::from_value(body) {
+        let page: Page<ChannelVideoItem> = match serde_json::from_value(body) {
             Ok(p) => p,
             Err(err) => {
                 return SidecarRefresherOutcome::Error(format!("sidecar shape: {err}"));
             }
         };
         SidecarRefresherOutcome::Items(page.items)
-    }
-
-    /// List the items of a playlist.
-    pub async fn list_playlist_items(
-        &self,
-        playlist_id: &str,
-        max_results: u32,
-        page_token: Option<&str>,
-    ) -> AppResult<Page<PlaylistItem>> {
-        let mut path = format!(
-            "/playlist-items/{}?maxResults={}",
-            percent_encode(playlist_id),
-            max_results.min(50)
-        );
-        if let Some(tok) = page_token {
-            path.push_str(&format!("&pageToken={}", percent_encode(tok)));
-        }
-        let body = self.get_json(&path).await?;
-        let page: Page<PlaylistItem> = serde_json::from_value(body).unwrap_or_else(|_| Page {
-            items: Vec::new(),
-            next_page_token: None,
-        });
-        Ok(page)
     }
 }
 
@@ -533,7 +465,6 @@ mod tests {
     #[test]
     fn search_type_as_str_round_trips() {
         assert_eq!(SearchType::Channel.as_str(), "channel");
-        assert_eq!(SearchType::Playlist.as_str(), "playlist");
         assert_eq!(SearchType::Video.as_str(), "video");
     }
 
@@ -570,31 +501,12 @@ mod tests {
             "description": "About",
             "thumbnails": {"default": {"url": "http://t/d.jpg"}},
             "subscriber_count": 1000,
-            "video_count": 50,
-            "uploads_playlist_id": "UUabc"
+            "video_count": 50
         });
         let ch: ChannelInfo = serde_json::from_value(json).unwrap();
         assert_eq!(ch.id, "UCabc");
         assert_eq!(ch.title, "Channel");
         assert_eq!(ch.subscriber_count, Some(1000));
-        assert_eq!(ch.uploads_playlist_id, Some("UUabc".into()));
-    }
-
-    #[test]
-    fn deserialize_playlist_info() {
-        let json = serde_json::json!({
-            "id": "PLabc",
-            "title": "Playlist",
-            "description": "desc",
-            "channel_id": "UCx",
-            "channel_title": "ChX",
-            "thumbnails": {},
-            "item_count": 42
-        });
-        let pl: PlaylistInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(pl.id, "PLabc");
-        assert_eq!(pl.title, "Playlist");
-        assert_eq!(pl.item_count, Some(42));
     }
 
     #[test]
@@ -627,7 +539,7 @@ mod tests {
             "published_at": "2024-01-01T00:00:00Z",
             "position": 3
         });
-        let item: PlaylistItem = serde_json::from_value(json).unwrap();
+        let item: ChannelVideoItem = serde_json::from_value(json).unwrap();
         assert_eq!(item.video_id, "vid123");
         assert_eq!(item.title, "Item");
         assert_eq!(item.position, Some(3));
@@ -642,7 +554,7 @@ mod tests {
             ],
             "next_page_token": "tok123"
         });
-        let page: Page<PlaylistItem> = serde_json::from_value(json).unwrap();
+        let page: Page<ChannelVideoItem> = serde_json::from_value(json).unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.next_page_token, Some("tok123".into()));
     }
