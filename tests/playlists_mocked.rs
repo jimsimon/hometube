@@ -356,6 +356,16 @@ async fn download_stream_resolves_format_for_child() {
     .await
     .unwrap();
 
+    // Downloads are fail-closed; enable for this child.
+    sqlx::query(
+        "INSERT INTO child_settings (child_account_id, downloads_enabled) VALUES (?, 1) \
+         ON CONFLICT(child_account_id) DO UPDATE SET downloads_enabled = 1",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
     // The stream endpoint will try to fetch from the upstream URL (which
     // will fail), but the format resolution and access check logic is covered.
     let res = app
