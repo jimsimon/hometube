@@ -74,6 +74,18 @@ interface ShakaPlayer {
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
   destroy(): void;
+  getControls(): ShakaControls;
+}
+
+interface ShakaControls {
+  addEventListener(event: string, handler: () => void): void;
+  removeEventListener(event: string, handler: () => void): void;
+  getCastProxy(): ShakaCastProxy;
+}
+
+interface ShakaCastProxy {
+  isCasting(): boolean;
+  canCast(): boolean;
 }
 
 // Cast the imported namespace to our typed shape.
@@ -379,6 +391,15 @@ export class VideoPlayer extends LitElement {
   private player: ShakaPlayer | null = null;
   /** shaka.ui.Overlay instance (manages the control bar). */
   private ui: ShakaUI | null = null;
+  /**
+   * Captured handle for the `caststatuschanged` listener installed
+   * when chromecast is enabled, so we can remove it cleanly on
+   * teardown. `null` when cast is disabled or before attach.
+   */
+  private castStatusHandler: {
+    controls: ShakaControls;
+    handler: () => void;
+  } | null = null;
   /** Spherical (360°) renderer instance — created lazily for VR videos. */
   private sphericalRenderer: { destroy(): void; resize(): void } | null = null;
   /** Projection pose extracted from the first WebM init segment. */
@@ -560,9 +581,6 @@ export class VideoPlayer extends LitElement {
     // inconsistent for short or quickly-navigated sessions.
     window.addEventListener("pagehide", this.onPageHide);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
-    // Stats overlay toggle. Ctrl+Alt+S (Cmd+Alt+S on macOS). Attached
-    // at document scope so it fires regardless of focus — the user
-    // doesn't need to click the player first.
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -739,27 +757,41 @@ export class VideoPlayer extends LitElement {
     //
     // Preference order (kid-targeted: locale-first, original-language
     // fallback):
-    //   1. Browser-locale + opus  → e.g. fr-FR opus dub
-    //   2. Browser-locale + mp4a  → same locale, codec fallback
-    //   3. Any opus               → no localized dub: codec-only entry
-    //                               matches all opus tracks, then
-    //                               Shaka's internal `primary` filter
-    //                               narrows to Role=main (original
-    //                               language) emitted by dash.rs
-    //   4. Any mp4a               → same, mp4a fallback
+    //   1. Full BCP-47 locale + opus  → e.g. fr-FR opus dub
+    //   2. Full BCP-47 locale + mp4a  → same locale, codec fallback
+    //   3. Primary subtag + opus      → e.g. fr opus dub when only
+    //                                   "fr" exists (YouTube AI dubs
+    //                                   typically carry the primary
+    //                                   subtag, not the region)
+    //   4. Primary subtag + mp4a      → same, mp4a fallback
+    //   5. Any opus                   → no localized dub: codec-only
+    //                                   entry matches all opus tracks,
+    //                                   then Shaka's internal `primary`
+    //                                   filter narrows to Role=main
+    //                                   (original language) emitted by
+    //                                   dash.rs
+    //   6. Any mp4a                   → same, mp4a fallback
     //
     // Opus is listed before mp4a within each tier because it's
     // ~30% more bandwidth-efficient at equivalent quality and YouTube
-    // serves it for every language.
-    const audioLocale = (
-      typeof navigator !== "undefined" ? navigator.language : "en"
-    ) || "en";
-    player.configure("preferredAudio", [
-      { language: audioLocale, codec: "opus" },
-      { language: audioLocale, codec: "mp4a" },
-      { codec: "opus" },
-      { codec: "mp4a" },
-    ]);
+    // serves it for every language. Shaka does prefix-match `en` →
+    // `en-US`, so steps 3/4 also help when the manifest happens to
+    // carry the region-qualified tag but the user's locale doesn't.
+    const browserLocale = (typeof navigator !== "undefined" ? navigator.language : "en") || "en";
+    const primarySubtag = browserLocale.split("-", 1)[0];
+    const localeEntries =
+      primarySubtag !== browserLocale
+        ? [
+            { language: browserLocale, codec: "opus" },
+            { language: browserLocale, codec: "mp4a" },
+            { language: primarySubtag, codec: "opus" },
+            { language: primarySubtag, codec: "mp4a" },
+          ]
+        : [
+            { language: browserLocale, codec: "opus" },
+            { language: browserLocale, codec: "mp4a" },
+          ];
+    player.configure("preferredAudio", [...localeEntries, { codec: "opus" }, { codec: "mp4a" }]);
 
     // Video codec preference: VP9 first, AVC1 as fallback. VP9
     // reaches 4K on YouTube (AVC1 caps at 1080p), is ~30–50% more
@@ -794,9 +826,7 @@ export class VideoPlayer extends LitElement {
     // tampered local settings copy — the kid can flip the UI flag,
     // but without `cast_manifest_url` from the server, the receiver
     // has nothing to fetch.
-    const castEnabled = !!(
-      this.settings?.chromecast_enabled && this.stream?.cast_manifest_url
-    );
+    const castEnabled = !!(this.settings?.chromecast_enabled && this.stream?.cast_manifest_url);
 
     // Lazy-load the Cast sender SDK *only* when this child is allowed
     // to cast. The SDK reaches out to gstatic.com and starts polling
@@ -905,23 +935,31 @@ export class VideoPlayer extends LitElement {
         await player.load(audioUrl, undefined, "audio/webm");
       }
     } else {
-      // When casting is enabled, load the server-minted cast manifest
-      // URL even for local playback. It carries a `cast_token` query
-      // param that the backend accepts in place of a session cookie,
-      // so the *same URL string* works on both the kid's tablet (with
-      // cookies, but tolerates the extra params) and the Chromecast
-      // receiver (no cookies, relies on the token). Shaka's CastProxy
-      // forwards whatever URL the player has loaded to the receiver
-      // on cast — having a token-bearing URL ready avoids the need
-      // for a last-second URL swap when the cast button is hit.
-      const manifestUrl =
-        castEnabled && this.stream?.cast_manifest_url
-          ? this.stream.cast_manifest_url
-          : `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      // Load the *cookie-authenticated* manifest URL for local
+      // playback. We swap to the token-bearing cast URL only when
+      // the user actively starts a cast session (see the
+      // `caststatuschanged` handler installed below). Keeping the
+      // cast token out of the local player's request stream means
+      // it doesn't appear in DevTools network logs, error reports,
+      // or anything else captured during normal viewing — narrowing
+      // the surface to "in flight only while casting" even though
+      // the token is already strongly bound to the child id and
+      // re-validated on every request server-side.
+      const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
       // Explicitly specify the MIME type so shaka doesn't have to guess
       // from the URL or Content-Type header (which may be text/xml or
       // application/octet-stream depending on the server config).
       await player.load(manifestUrl, undefined, "application/dash+xml");
+    }
+
+    // Install the cast URL-swap listener once playback is established.
+    // The listener fires from Shaka's controls when the cast session
+    // status changes; we re-load with the appropriate URL so the
+    // receiver (which serializes the player's currently-loaded URL on
+    // connect) gets a token-bearing one only when there's actually a
+    // receiver about to fetch it.
+    if (castEnabled && this.stream?.cast_manifest_url) {
+      this.installCastUrlSwapHandler(this.stream.cast_manifest_url);
     }
 
     // Add caption tracks (non-fatal — some languages may 404).
@@ -983,6 +1021,51 @@ export class VideoPlayer extends LitElement {
     }
   }
 
+  /**
+   * Listen for Shaka cast-status transitions and swap the player's
+   * loaded manifest URL accordingly so the token-bearing URL only
+   * touches the wire while a cast session is actively connecting/
+   * connected. Re-loading uses the current `videoEl.currentTime` so
+   * the swap is transparent to the viewer (modulo a brief re-buffer,
+   * which casting inherently has anyway).
+   *
+   * `castManifestUrl` is captured at install time — the stream
+   * response only includes it when this child is allowed to cast
+   * (server-side enforcement, see `routes::videos::get_stream`),
+   * and we already checked presence at the call site.
+   */
+  private installCastUrlSwapHandler(castManifestUrl: string): void {
+    const controls = this.ui?.getControls();
+    const proxy = controls?.getCastProxy();
+    if (!controls || !proxy) return;
+    // Track the last known cast state so we only swap on actual
+    // transitions; `caststatuschanged` also fires on `canCast`
+    // changes (a new receiver appearing on the network), and we
+    // don't want to re-load the player for those.
+    let wasCasting = proxy.isCasting();
+    const onStatus = async (): Promise<void> => {
+      const isCasting = proxy.isCasting();
+      if (isCasting === wasCasting) return;
+      wasCasting = isCasting;
+      const player = this.player;
+      const video = this.videoEl;
+      if (!player || !video) return;
+      const localUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      const target = isCasting ? castManifestUrl : localUrl;
+      const startTime = video.currentTime;
+      try {
+        await player.load(target, startTime, "application/dash+xml");
+      } catch {
+        // Swap failure on cast start would leave the receiver fetching
+        // a 401'd URL — not recoverable here. Cast stop swap failures
+        // are similarly unrecoverable but cosmetic. In both cases the
+        // user can refresh the page to recover.
+      }
+    };
+    controls.addEventListener("caststatuschanged", onStatus);
+    this.castStatusHandler = { controls, handler: onStatus };
+  }
+
   private async destroyPlayer(): Promise<void> {
     if (this.sphericalRenderer) {
       this.sphericalRenderer.destroy();
@@ -1000,6 +1083,17 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("seeked", this.onSeeked);
       this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
       this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
+    }
+    if (this.castStatusHandler) {
+      // Remove the listener *before* destroying the UI so the
+      // controls reference is still valid. Without this, a stale
+      // cast-status event after destroy would call into a detached
+      // player.
+      this.castStatusHandler.controls.removeEventListener(
+        "caststatuschanged",
+        this.castStatusHandler.handler,
+      );
+      this.castStatusHandler = null;
     }
     if (this.ui) {
       this.ui.destroy();
@@ -1433,14 +1527,6 @@ export class VideoPlayer extends LitElement {
     }
   };
 
-  /**
-   * Toggle the "stats for nerds" overlay. Bound to Ctrl+Alt+S (or
-   * Cmd+Alt+S on macOS — `event.altKey` covers Option on Mac, which
-   * is the conventional binding). The shortcut is intentionally not
-   * Ctrl+Shift+S because that's the default DevTools "save snapshot"
-   * binding in Chromium, and not Ctrl+Shift+/ (YouTube's binding)
-   * because `/` is unreliable across non-US keyboard layouts.
-   */
   override render() {
     if (this.error) {
       return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
