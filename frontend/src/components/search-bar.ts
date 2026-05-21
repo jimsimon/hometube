@@ -28,7 +28,13 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
 import { debounce } from "../services/debounce.js";
 
-const DEBOUNCE_MS = 200;
+// 300ms matches `<hometube-allowlist-manager>` and is the
+// conventional search-debounce window. The previous 200ms was shorter
+// than a typical keystroke interval (~50 WPM ≈ 220ms/char), so the
+// timer fired between characters and the user effectively saw one
+// /api/search request per keystroke — i.e. no coalescing at normal
+// typing speeds.
+const DEBOUNCE_MS = 300;
 const MAX_SUGGESTIONS = 5;
 
 type SearchKind = "all" | "channel" | "playlist" | "video";
