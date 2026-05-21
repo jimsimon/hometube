@@ -13,8 +13,8 @@
  *     403.
  *   - Dispatches `hometube:current-time` on every `timeupdate` and
  *     `hometube:video-ended` on `ended`.
- *   - Hosts the bookmark / sleep-timer / like / subscribe / download
- *     controls in a "chrome" row below the video.
+ *   - Hosts the sleep-timer / like / subscribe / download controls
+ *     in a "chrome" row below the video.
  *   - Tracks the autoplay consecutive-watch count via `sessionStorage`
  *     and surfaces a "Continue watching?" prompt when the cap is hit.
  *   - Audio-only mode swaps the player source to a single
@@ -25,7 +25,7 @@
  *   - Quality selector respects `child_settings.max_quality` (filter
  *     formats above the cap) and the playback-speed control is hidden
  *     when `playback_speed_locked = true`.
- *   - Supports `start-at` for bookmark deep-links.
+ *   - Supports `start-at` for `?t=<seconds>` deep-links.
  *   - Adds a "Download" button when `child_settings.downloads_enabled`
  *     is on; the click handler talks to the offline-downloads service
  *     to pipe the response into the Cache API.
@@ -92,7 +92,6 @@ import {
   saveVideoToOpfs,
 } from "../services/offline.js";
 import type {
-  Bookmark,
   CaptionTrack,
   ChildSettings,
   HeartbeatResponse,
@@ -101,7 +100,6 @@ import type {
   VideoMetadata,
 } from "../types/index.js";
 
-import "./bookmark-button.js";
 import "./sleep-timer.js";
 import "./like-button.js";
 import "./subscribe-button.js";
@@ -331,7 +329,7 @@ export class VideoPlayer extends LitElement {
 
   /**
    * Parental-preview mode. Disables heartbeats, continue-watching, and
-   * the bookmark/like/subscribe chrome (those are child-only).
+   * the like/subscribe chrome (those are child-only).
    */
   @property({ type: Boolean })
   preview = false;
@@ -343,7 +341,6 @@ export class VideoPlayer extends LitElement {
   @state() private metadata: VideoMetadata | null = null;
   @state() private stream: StreamResponse | null = null;
   @state() private settings: ChildSettings | null = null;
-  @state() private bookmarks: Bookmark[] = [];
   @state() private captionTracks: CaptionTrack[] = [];
   @state() private error = "";
   @state() private continuePromptOpen = false;
@@ -468,21 +465,6 @@ export class VideoPlayer extends LitElement {
         margin-top: 1rem;
         align-items: center;
       }
-      .seek-overlay {
-        position: relative;
-        height: 0.5rem;
-        margin-top: -0.5rem;
-        pointer-events: none;
-      }
-      .bookmark-marker {
-        position: absolute;
-        top: 0;
-        width: 0.4rem;
-        height: 100%;
-        background: var(--wa-color-warning-fill, #d97706);
-        border-radius: 2px;
-        transform: translateX(-50%);
-      }
       .continue-prompt {
         position: absolute;
         inset: 0;
@@ -551,7 +533,6 @@ export class VideoPlayer extends LitElement {
     this.injectShakaStyles();
     if (this.videoId) void this.load();
     document.addEventListener("hometube:sleep-timer-expired", this.onSleepExpired as EventListener);
-    document.addEventListener("hometube:bookmarks-loaded", this.onBookmarksLoaded as EventListener);
     document.addEventListener("hometube:autoplay-cap-reached", this.onAutoplayCap as EventListener);
     // Flush progress when the page is hidden/unloaded (tab close,
     // navigation to next video, app backgrounded on mobile). Without
@@ -586,10 +567,6 @@ export class VideoPlayer extends LitElement {
     document.removeEventListener(
       "hometube:sleep-timer-expired",
       this.onSleepExpired as EventListener,
-    );
-    document.removeEventListener(
-      "hometube:bookmarks-loaded",
-      this.onBookmarksLoaded as EventListener,
     );
     document.removeEventListener(
       "hometube:autoplay-cap-reached",
@@ -1226,13 +1203,6 @@ export class VideoPlayer extends LitElement {
     requestAnimationFrame(fade);
   };
 
-  private onBookmarksLoaded = (e: Event): void => {
-    const detail = (e as CustomEvent<{ bookmarks: Bookmark[] }>).detail;
-    if (Array.isArray(detail?.bookmarks)) {
-      this.bookmarks = detail.bookmarks;
-    }
-  };
-
   private onAutoplayCap = (): void => {
     this.continuePromptOpen = true;
   };
@@ -1266,6 +1236,7 @@ export class VideoPlayer extends LitElement {
       video_title: this.metadata.title,
       video_thumbnail_url: this.metadata.thumbnail_url,
       channel_title: this.metadata.channel_title,
+      channel_id: this.metadata.channel_id,
     };
     if (elapsedSeconds != null) payload.elapsed_seconds = elapsedSeconds;
     return payload;
@@ -1380,24 +1351,6 @@ export class VideoPlayer extends LitElement {
     );
   }
 
-  private renderBookmarkMarkers() {
-    if (!this.videoEl || !this.metadata) return nothing;
-    const duration = Math.max(1, this.videoEl.duration ?? 0);
-    if (!isFinite(duration) || duration <= 0) return nothing;
-    return html`
-      <div class="seek-overlay" aria-hidden="true">
-        ${this.bookmarks.map((b) => {
-          const pct = Math.min(100, Math.max(0, (b.timestamp_seconds / duration) * 100));
-          return html`<span
-            class="bookmark-marker"
-            style="left: ${pct}%"
-            title=${b.label ?? `${b.timestamp_seconds}s`}
-          ></span>`;
-        })}
-      </div>
-    `;
-  }
-
   /** "Download for offline" handler — uses the Cache API. */
   private onDownload = async (): Promise<void> => {
     if (!this.metadata || !this.stream) return;
@@ -1487,7 +1440,7 @@ export class VideoPlayer extends LitElement {
             `
           : nothing}
       </div>
-      ${this.renderBookmarkMarkers()} ${this.renderCountdown()}
+      ${this.renderCountdown()}
       ${this.metadata
         ? html`<div class="meta">
             <h1>${this.metadata.title ?? "Untitled"}</h1>
@@ -1508,7 +1461,6 @@ export class VideoPlayer extends LitElement {
                           channel-id=${this.metadata.channel_id}
                         ></hometube-subscribe-button>`
                       : nothing}
-                    <hometube-bookmark-button video-id=${this.videoId}></hometube-bookmark-button>
                     <hometube-sleep-timer></hometube-sleep-timer>
                     ${this.settings?.downloads_enabled !== false
                       ? html`<button

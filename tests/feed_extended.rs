@@ -61,6 +61,163 @@ async fn continue_watching_returns_seeded_history_with_access_check() {
 }
 
 #[tokio::test]
+async fn continue_watching_drops_effectively_finished_videos() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Five watched + allowlisted videos cover the finished-detection
+    // edges (tail threshold + ratio threshold combined with `max`):
+    //   vid-done-tail        — 300s clip, watched to 290s (≥ tail 285) → finished
+    //   vid-short-finished   — 20s clip, watched to 20s (≥ ratio 19) → finished
+    //   vid-short-started    — 20s clip, watched to 6s. The bare tail
+    //                          rule (15s) would mark this finished;
+    //                          the ratio rule keeps it visible.
+    //   vid-partial          — 600s clip, half-watched → still listed
+    //   vid-no-dur           — NULL duration must NOT be auto-dropped
+    let seeds = [
+        ("vid-done-tail", Some(300i64), 290i64, 1004i64),
+        ("vid-short-finished", Some(20i64), 20i64, 1003i64),
+        ("vid-short-started", Some(20i64), 6i64, 1002i64),
+        ("vid-partial", Some(600i64), 120i64, 1001i64),
+        ("vid-no-dur", None, 30i64, 1000i64),
+    ];
+    for (video_id, duration, progress, ts) in seeds {
+        sqlx::query(
+            "INSERT INTO watch_history (child_account_id, video_id, video_title, \
+             video_thumbnail_url, channel_title, duration_seconds, progress_seconds, \
+             last_watched_at) VALUES (?, ?, 'T', NULL, 'Ch', ?, ?, ?)",
+        )
+        .bind(child_id)
+        .bind(video_id)
+        .bind(duration)
+        .bind(progress)
+        .bind(ts)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(child_id)
+        .bind(video_id)
+        .bind(parent_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let res = app.server.get("/api/feed/continue-watching").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"vid-partial"),
+        "half-watched video must remain, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"vid-no-dur"),
+        "rows with NULL duration must not be auto-finished, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"vid-short-started"),
+        "short clips barely begun must not be auto-finished by the tail rule, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"vid-done-tail"),
+        "long video within tail window must be dropped, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"vid-short-finished"),
+        "short video fully watched must be dropped, got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn continue_watching_includes_channel_allowlisted_videos() {
+    // Regression: continue-watching used to pass `channel_id=None` to
+    // `can_child_view`, so only individually allowlisted videos
+    // survived the filter. Videos surfaced via an allowlisted channel
+    // were silently dropped from the row.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Allowlist a channel, NOT the individual video.
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'ch-allow', 'My Channel', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // (a) New-style row: channel_id stored directly on watch_history.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, channel_id, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-new', 'Direct', NULL, 'My Channel', 'ch-allow', 600, 120, 1002)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // (b) Legacy row: channel_id NULL but resolvable via
+    // feed_source_items (the refresher cache).
+    sqlx::query(
+        "INSERT INTO feed_sources (kind, source_id, title) \
+         VALUES ('channel', 'ch-allow', 'My Channel')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO feed_source_items (kind, source_id, video_id, title, channel_id, \
+         channel_title, thumbnail_url, published_at, fetched_at) \
+         VALUES ('channel', 'ch-allow', 'vid-legacy', 'Legacy', 'ch-allow', 'My Channel', NULL, 1, 1)",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-legacy', 'Legacy', NULL, 'My Channel', 600, 90, 1001)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/feed/continue-watching").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"vid-new"),
+        "channel-allowlisted video with stored channel_id must surface, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"vid-legacy"),
+        "legacy row with NULL channel_id must resolve via feed_source_items, got {ids:?}"
+    );
+}
+
+#[tokio::test]
 async fn continue_watching_empty_for_fresh_child() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
     let res = app.server.get("/api/feed/continue-watching").await;

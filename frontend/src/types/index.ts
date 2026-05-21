@@ -333,15 +333,6 @@ export interface UpNextItem {
   thumbnail_url: string | null;
 }
 
-export interface Bookmark {
-  id: number;
-  video_id: string;
-  video_title: string | null;
-  timestamp_seconds: number;
-  label: string | null;
-  created_at: number;
-}
-
 export interface SleepTimerRow {
   id: number;
   timer_type: "after_video" | "minutes";

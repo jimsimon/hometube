@@ -31,6 +31,15 @@ use crate::state::AppState;
 
 /// Default limit for "continue watching".
 const CONTINUE_LIMIT: i64 = 20;
+/// A video is considered "finished" (and dropped from continue-watching)
+/// once the saved position is within this many seconds of the end. Picks
+/// up the typical 5–15s of outro/credits that most viewers don't sit
+/// through but the player still records before pause/ended fires.
+const CONTINUE_TAIL_SECONDS: i64 = 15;
+/// …or once the saved position is at least this fraction of the
+/// duration, whichever triggers first. Catches short videos where the
+/// absolute tail threshold would be larger than the whole runtime.
+const CONTINUE_COMPLETION_RATIO: f64 = 0.95;
 /// Hard cap on the new-videos feed.
 const NEW_VIDEOS_LIMIT: usize = 30;
 
@@ -43,6 +52,11 @@ pub struct ContinueWatchingItem {
     pub duration_seconds: Option<i64>,
     pub progress_seconds: i64,
     pub last_watched_at: i64,
+    /// Skipped from the JSON wire shape (the row component doesn't need
+    /// it) but required server-side so the access check can recognise
+    /// channel-allowlisted videos.
+    #[serde(skip_serializing)]
+    pub channel_id: Option<String>,
 }
 
 /// `GET /api/feed/continue-watching`.
@@ -52,7 +66,7 @@ pub async fn continue_watching(
 ) -> AppResult<Json<Vec<ContinueWatchingItem>>> {
     let rows: Vec<ContinueWatchingItem> = sqlx::query_as(
         "SELECT video_id, video_title, video_thumbnail_url, channel_title, \
-                duration_seconds, progress_seconds, last_watched_at \
+                duration_seconds, progress_seconds, last_watched_at, channel_id \
          FROM watch_history \
          WHERE child_account_id = ? \
          ORDER BY last_watched_at DESC \
@@ -63,12 +77,45 @@ pub async fn continue_watching(
     .fetch_all(&state.db)
     .await?;
 
-    // Filter through access control. We don't know the channel/playlist
-    // for historical entries, so we just check the basic allowlist
-    // tables (which is what `can_child_view` does).
+    // Filter through access control + drop effectively-finished videos.
+    // `watch_history.channel_id` is the key bit: when a video was
+    // surfaced via an allowlisted channel, the per-row `channel_id`
+    // lets `can_child_view` find the channel allowlist hit. Rows that
+    // pre-date that column (NULL) fall back to a best-effort lookup
+    // against `feed_source_items`, batched into a single query so we
+    // don't add an N+1 to the existing per-row access check.
+    let legacy_ids: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.channel_id.is_none())
+        .map(|r| r.video_id.as_str())
+        .collect();
+    let legacy_map = match lookup_channel_ids_for_videos(&state.db, &legacy_ids).await {
+        Ok(map) => map,
+        Err(err) => {
+            // Don't fail the whole row over a transient cache lookup
+            // problem — fall back to "no legacy resolution" so freshly
+            // upserted rows (which have channel_id stored directly) and
+            // individually-allowlisted videos still surface. But do log
+            // it: silently reverting to the pre-fix broken behaviour is
+            // exactly what bit us before.
+            tracing::warn!(
+                error = %err,
+                "continue_watching: feed_source_items lookup failed; legacy NULL-channel rows may be hidden"
+            );
+            std::collections::HashMap::new()
+        }
+    };
+
     let mut filtered = Vec::with_capacity(rows.len());
     for row in rows {
-        if can_child_view(&state.db, current.id, &row.video_id, None, &[])
+        if is_effectively_finished(row.progress_seconds, row.duration_seconds) {
+            continue;
+        }
+        let channel_id = row
+            .channel_id
+            .as_deref()
+            .or_else(|| legacy_map.get(&row.video_id).map(String::as_str));
+        if can_child_view(&state.db, current.id, &row.video_id, channel_id, &[])
             .await
             .unwrap_or(false)
         {
@@ -76,6 +123,72 @@ pub async fn continue_watching(
         }
     }
     Ok(Json(filtered))
+}
+
+/// Best-effort batched `video_id → channel_id` lookup for
+/// `watch_history` rows that were written before the `channel_id`
+/// column existed (migration 014). Reads from `feed_source_items`,
+/// which the feed refresher keeps populated for every allowlisted
+/// channel + playlist. Returns an empty map when there are no legacy
+/// rows to resolve, so the caller never pays for the round-trip on a
+/// freshly-migrated DB.
+async fn lookup_channel_ids_for_videos(
+    db: &sqlx::SqlitePool,
+    video_ids: &[&str],
+) -> AppResult<std::collections::HashMap<String, String>> {
+    if video_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    // sqlx doesn't support binding a slice to `IN (?)` directly with
+    // SQLite, so build the placeholder list manually. Inputs are
+    // video_ids we just read out of our own DB, so there's nothing to
+    // sanitise — but we still parameterise rather than interpolate.
+    let placeholders = std::iter::repeat_n("?", video_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT video_id, channel_id FROM feed_source_items \
+         WHERE channel_id IS NOT NULL AND video_id IN ({placeholders})"
+    );
+    let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+    for id in video_ids {
+        q = q.bind(*id);
+    }
+    let rows = q.fetch_all(db).await?;
+    // A single video_id can have rows under multiple `(kind, source_id)`
+    // pairs (e.g. surfaced via both a channel feed and a playlist).
+    // First match wins; we don't try to pick a "best" one because
+    // `can_child_view` only needs *some* channel_id that hits the
+    // allowlist.
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for (video_id, channel_id) in rows {
+        map.entry(video_id).or_insert(channel_id);
+    }
+    Ok(map)
+}
+
+/// Whether a saved (`progress_seconds`, `duration_seconds`) pair should
+/// be treated as "done" for continue-watching purposes. Rows with no
+/// known duration are never auto-finished — we can't tell where the
+/// end is, so we let the user remove them by re-watching.
+fn is_effectively_finished(progress_seconds: i64, duration_seconds: Option<i64>) -> bool {
+    let Some(duration) = duration_seconds else {
+        return false;
+    };
+    if duration <= 0 || progress_seconds <= 0 {
+        return false;
+    }
+    // Use the *later* of the two thresholds so neither rule fires
+    // prematurely on the other's edge case. The tail rule alone would
+    // mark a barely-started 20s clip as finished (15s tail ≥ 5s
+    // played); the ratio rule alone would only kick in past 95% which
+    // can leave a 2-minute video with a few seconds of unwatched
+    // credits stuck in the row. Taking the max keeps long-form videos
+    // bounded by the absolute tail and protects short clips with the
+    // ratio.
+    let tail_threshold = duration.saturating_sub(CONTINUE_TAIL_SECONDS);
+    let ratio_threshold = ((duration as f64) * CONTINUE_COMPLETION_RATIO).ceil() as i64;
+    progress_seconds >= tail_threshold.max(ratio_threshold)
 }
 
 #[derive(Debug, Serialize, Clone)]

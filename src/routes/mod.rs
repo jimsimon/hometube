@@ -39,7 +39,6 @@ pub mod activity;
 pub mod allowlist;
 pub mod auth;
 pub mod blocked;
-pub mod bookmarks;
 pub mod cache;
 pub mod channels;
 pub mod child_settings;
@@ -331,7 +330,7 @@ pub fn router(state: AppState) -> Router {
 
     // -----------------------------------------------------------------
     // Child-only APIs: channels, subscriptions, playlists, likes,
-    // bookmarks, sleep timer, and "my settings" read-only view.
+    // sleep timer, and "my settings" read-only view.
     // -----------------------------------------------------------------
     let child_only = Router::new()
         // Channels
@@ -375,21 +374,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/likes/{video_id}",
             post(likes::like).delete(likes::unlike),
-        )
-        // Bookmarks. Note that `/api/bookmarks/:videoId` (GET) and
-        // `/api/bookmarks/:id` (PUT/DELETE) share the same path
-        // pattern as far as axum's router is concerned — they're
-        // distinguished by HTTP method, so we register them on a
-        // single MethodRouter.
-        .route(
-            "/api/bookmarks",
-            get(bookmarks::list).post(bookmarks::create),
-        )
-        .route(
-            "/api/bookmarks/{id}",
-            get(bookmarks::list_for_video)
-                .put(bookmarks::update)
-                .delete(bookmarks::delete),
         )
         // Per-child hidden videos
         .route("/api/hidden", get(hidden::list).post(hidden::add))
@@ -463,7 +447,6 @@ pub fn router(state: AppState) -> Router {
         .route("/child/channel/{channel_id}", get(pages::child_channel))
         .route("/child/playlists", get(pages::child_playlists))
         .route("/child/playlist/{id}", get(pages::child_playlist))
-        .route("/child/bookmarks", get(pages::child_bookmarks))
         .route("/child/hidden", get(pages::child_hidden))
         .route("/child/downloads", get(pages::child_downloads))
         .route("/child/search", get(pages::child_search));

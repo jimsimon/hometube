@@ -354,69 +354,6 @@ async fn playlists_create_with_empty_title_400() {
 }
 
 #[tokio::test]
-async fn bookmarks_crud() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-
-    let res = app
-        .server
-        .post("/api/bookmarks")
-        .json(&json!({
-            "video_id": "vid-1",
-            "video_title": "Hello",
-            "timestamp_seconds": 30,
-            "label": "good part",
-        }))
-        .await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    let id = body["id"].as_i64().unwrap();
-
-    // List all.
-    let res = app.server.get("/api/bookmarks").await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    assert!(!body.as_array().unwrap().is_empty());
-
-    // Update label.
-    let res = app
-        .server
-        .put(&format!("/api/bookmarks/{id}"))
-        .json(&json!({ "label": "great part" }))
-        .await;
-    assert!(res.status_code().is_success());
-
-    // Delete.
-    let res = app.server.delete(&format!("/api/bookmarks/{id}")).await;
-    assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
-async fn bookmarks_for_video_returns_only_matches() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    app.server
-        .post("/api/bookmarks")
-        .json(&json!({
-            "video_id": "vid-a",
-            "timestamp_seconds": 10,
-        }))
-        .await;
-    app.server
-        .post("/api/bookmarks")
-        .json(&json!({
-            "video_id": "vid-b",
-            "timestamp_seconds": 20,
-        }))
-        .await;
-
-    let res = app.server.get("/api/bookmarks/vid-a").await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    let arr = body.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["video_id"], "vid-a");
-}
-
-#[tokio::test]
 async fn timer_lifecycle() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
 

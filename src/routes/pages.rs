@@ -313,23 +313,6 @@ pub async fn parent_playlist(
 }
 
 #[derive(Template)]
-#[template(path = "pages/child/bookmarks.html")]
-struct ChildBookmarksTemplate {
-    display_name: String,
-}
-
-/// `GET /child/bookmarks` — list of saved bookmarks across videos.
-pub async fn child_bookmarks(current: Option<CurrentAccount>) -> AppResult<Response> {
-    require_child(current, |c| {
-        let tpl = ChildBookmarksTemplate {
-            display_name: c.display_name,
-        };
-        Ok(Html(tpl.render()?).into_response())
-    })
-    .await
-}
-
-#[derive(Template)]
 #[template(path = "pages/child/hidden.html")]
 struct ChildHiddenTemplate {
     display_name: String,
@@ -692,9 +675,7 @@ struct ChildVideoTemplate {
 pub struct VideoPageQuery {
     #[serde(default)]
     pub from: Option<String>,
-    /// Optional initial seek position in seconds (driven by the
-    /// bookmarks list — clicking a bookmark navigates to
-    /// `?t=<seconds>`).
+    /// Optional initial seek position in seconds (`?t=<seconds>`).
     #[serde(default, rename = "t")]
     pub t: Option<i64>,
 }
