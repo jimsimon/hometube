@@ -92,11 +92,41 @@ async fn parent_preview_invalid_kind_redirects() {
 // ===========================================================================
 
 #[tokio::test]
-async fn child_downloads_page_renders() {
+async fn child_downloads_page_renders_when_enabled() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+    // Downloads default to off (fail-closed) — enable them for the
+    // signed-in child so the page actually renders rather than
+    // redirecting to /child/home.
+    let child_id = app.child_id.expect("child seeded");
+    sqlx::query(
+        "INSERT INTO child_settings (child_account_id, downloads_enabled) \
+         VALUES (?, 1) \
+         ON CONFLICT(child_account_id) DO UPDATE SET downloads_enabled = 1",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
     let res = app.server.get("/child/downloads").await;
     let status = res.status_code();
     assert!(status.is_success(), "got {status}");
+}
+
+#[tokio::test]
+async fn child_downloads_page_redirects_when_disabled() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+    // No child_settings row → fail-closed → expect a redirect to
+    // /child/home (not /, which would mean an auth failure).
+    let res = app.server.get("/child/downloads").await;
+    let status = res.status_code().as_u16();
+    assert!((300..400).contains(&status), "got {status}");
+    let location = res
+        .headers()
+        .get("location")
+        .expect("redirect should have a Location header")
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/child/home");
 }
 
 #[tokio::test]

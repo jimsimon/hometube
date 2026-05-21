@@ -79,11 +79,15 @@ async fn ensure_downloads_enabled(state: &AppState, current: &CurrentAccount) ->
     .bind(current.id)
     .fetch_optional(&state.db)
     .await?;
-    // Default to enabled when the row hasn't been seeded yet.
-    if matches!(enabled, Some(0)) {
-        return Err(AppError::Forbidden);
+    // Fail-closed: only an explicit `1` opens the gate. A missing row,
+    // a `0`, or anything else is treated as disabled. This matches the
+    // schema default (`migrations/012_default_downloads_off.sql`) and
+    // the UI gate in `routes/pages.rs::fetch_downloads_enabled`.
+    if matches!(enabled, Some(1)) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
     }
-    Ok(())
 }
 
 /// `GET /api/downloads` — list the current user's tracked downloads.

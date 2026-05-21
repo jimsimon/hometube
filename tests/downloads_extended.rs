@@ -61,6 +61,15 @@ async fn create_download_for_allowlisted_video() {
     .execute(&app.pool)
     .await
     .unwrap();
+    // Downloads are fail-closed; flip the flag on for this child.
+    sqlx::query(
+        "INSERT INTO child_settings (child_account_id, downloads_enabled) VALUES (?, 1) \
+         ON CONFLICT(child_account_id) DO UPDATE SET downloads_enabled = 1",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
 
     let res = app
         .server

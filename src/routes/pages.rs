@@ -15,6 +15,49 @@ use crate::services::access::can_child_view;
 use crate::services::setup;
 use crate::services::video_cache::VideoCache;
 use crate::state::AppState;
+use sqlx::SqlitePool;
+
+/// Context passed alongside `CurrentAccount` into every child page
+/// render closure. Carries the flags consumed by `base-child.html`
+/// (e.g. whether to show the Downloads nav entry).
+#[derive(Clone)]
+struct ChildNavContext {
+    downloads_enabled: bool,
+}
+
+/// Read `child_settings.downloads_enabled` for `child_id`.
+///
+/// Fail-closed: only an explicit `1` row enables downloads. A missing
+/// row, a `0`, or a DB error all resolve to `false`. Matches the
+/// schema default (`migrations/012_default_downloads_off.sql`) and
+/// the API gate `routes/downloads.rs::ensure_downloads_enabled`.
+async fn fetch_downloads_enabled(db: &SqlitePool, child_id: i64) -> bool {
+    let enabled: Option<i64> = match sqlx::query_scalar(
+        "SELECT downloads_enabled FROM child_settings WHERE child_account_id = ?",
+    )
+    .bind(child_id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            // Fail-closed and surface the failure so it's debuggable —
+            // the API gate `ensure_downloads_enabled` propagates the
+            // same error with `?` and 500s. We can't bubble here
+            // without changing every child handler signature, but a
+            // warn makes the otherwise-silent UI hide observable.
+            tracing::warn!(%err, child_id, "failed to read child_settings.downloads_enabled; treating as disabled");
+            return false;
+        }
+    };
+    matches!(enabled, Some(1))
+}
+
+async fn fetch_child_nav_context(db: &SqlitePool, child_id: i64) -> ChildNavContext {
+    ChildNavContext {
+        downloads_enabled: fetch_downloads_enabled(db, child_id).await,
+    }
+}
 
 /// Lightweight video-card payload fed to the
 /// [`partials/video-grid.html`] askama include. Used by any page
@@ -316,6 +359,7 @@ pub async fn parent_playlist(
 #[template(path = "pages/child/hidden.html")]
 struct ChildHiddenTemplate {
     display_name: String,
+    downloads_enabled: bool,
     /// SSR fallback grid for browsers without JavaScript. Pulls
     /// the child's hidden videos straight from `hidden_videos` so the
     /// page is useful even when the Lit component can't hydrate.
@@ -329,9 +373,13 @@ pub async fn child_hidden(
 ) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Child) => {
-            let videos = fetch_hidden_video_cards(&state, c.id).await;
+            let (videos, downloads_enabled) = tokio::join!(
+                fetch_hidden_video_cards(&state, c.id),
+                fetch_downloads_enabled(&state.db, c.id),
+            );
             let tpl = ChildHiddenTemplate {
                 display_name: c.display_name,
+                downloads_enabled,
                 videos,
             };
             Ok(Html(tpl.render()?).into_response())
@@ -378,16 +426,29 @@ async fn fetch_hidden_video_cards(state: &AppState, child_id: i64) -> Vec<VideoC
 #[template(path = "pages/child/downloads.html")]
 struct ChildDownloadsTemplate {
     display_name: String,
+    downloads_enabled: bool,
 }
 
 /// `GET /child/downloads` — list of videos saved for offline viewing.
 /// The actual storage is in the browser; the page just hosts the
 /// `<hometube-offline-downloads-list>` web component which reads the
 /// local manifest.
-pub async fn child_downloads(current: Option<CurrentAccount>) -> AppResult<Response> {
-    require_child(current, |c| {
+///
+/// When `child_settings.downloads_enabled` is false for the current
+/// child we bounce them back to `/child/home` rather than render an
+/// unreachable feature — the Downloads nav link is also hidden in
+/// `base-child.html` for the same reason.
+pub async fn child_downloads(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
+    require_child(&state, current, |c, ctx| {
+        if !ctx.downloads_enabled {
+            return Ok(Redirect::to("/child/home").into_response());
+        }
         let tpl = ChildDownloadsTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
         };
         Ok(Html(tpl.render()?).into_response())
     })
@@ -398,6 +459,7 @@ pub async fn child_downloads(current: Option<CurrentAccount>) -> AppResult<Respo
 #[template(path = "pages/child/video-unavailable.html")]
 struct ChildVideoUnavailableTemplate {
     display_name: String,
+    downloads_enabled: bool,
     video_id: String,
     /// Optional friendly message — set when extraction errored vs the
     /// generic "not allowlisted" path.
@@ -409,37 +471,28 @@ struct ChildVideoUnavailableTemplate {
     videos: Vec<VideoCardData>,
 }
 
+/// Arguments for [`render_video_unavailable`]. Grouped into a struct
+/// so callers don't have to remember positional order across the
+/// growing field list (display name, downloads flag, video id, etc.).
+pub struct VideoUnavailable {
+    pub display_name: String,
+    pub downloads_enabled: bool,
+    pub video_id: String,
+    /// Optional friendly message — set when extraction errored vs the
+    /// generic "not allowlisted" path.
+    pub message: Option<String>,
+}
+
 /// Render the friendly "this video is unavailable" page. Exposed so
 /// other handlers (e.g. on yt-dlp extraction failure) can route to it
 /// directly.
-pub fn render_video_unavailable(
-    display_name: String,
-    video_id: String,
-    message: Option<String>,
-) -> AppResult<Response> {
+pub fn render_video_unavailable(args: VideoUnavailable) -> AppResult<Response> {
     let tpl = ChildVideoUnavailableTemplate {
-        display_name,
-        video_id,
-        message,
+        display_name: args.display_name,
+        downloads_enabled: args.downloads_enabled,
+        video_id: args.video_id,
+        message: args.message,
         videos: Vec::new(),
-    };
-    Ok(Html(tpl.render()?).into_response())
-}
-
-/// Variant of [`render_video_unavailable`] that includes a list of
-/// suggested videos rendered via the SSR
-/// [`partials/video-grid.html`] include.
-pub fn render_video_unavailable_with_suggestions(
-    display_name: String,
-    video_id: String,
-    message: Option<String>,
-    videos: Vec<VideoCardData>,
-) -> AppResult<Response> {
-    let tpl = ChildVideoUnavailableTemplate {
-        display_name,
-        video_id,
-        message,
-        videos,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -448,6 +501,7 @@ pub fn render_video_unavailable_with_suggestions(
 #[template(path = "pages/child/home.html")]
 struct ChildHomeTemplate {
     display_name: String,
+    downloads_enabled: bool,
     /// SSR fallback grid for browsers without JavaScript. Rendered
     /// inside a `<noscript>` block via the
     /// [`partials/video-grid.html`] include so the home page is
@@ -465,9 +519,13 @@ pub async fn child_home(
 ) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Child) => {
-            let videos = fetch_allowlisted_video_cards(&state, c.id, 12).await;
+            let (videos, downloads_enabled) = tokio::join!(
+                fetch_allowlisted_video_cards(&state, c.id, 12),
+                fetch_downloads_enabled(&state.db, c.id),
+            );
             let tpl = ChildHomeTemplate {
                 display_name: c.display_name,
+                downloads_enabled,
                 videos,
             };
             Ok(Html(tpl.render()?).into_response())
@@ -524,13 +582,18 @@ async fn fetch_allowlisted_video_cards(
 #[template(path = "pages/child/channels.html")]
 struct ChildChannelsTemplate {
     display_name: String,
+    downloads_enabled: bool,
 }
 
 /// `GET /child/channels` — list of subscribed channels for the child.
-pub async fn child_channels(current: Option<CurrentAccount>) -> AppResult<Response> {
-    require_child(current, |c| {
+pub async fn child_channels(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
+    require_child(&state, current, |c, ctx| {
         let tpl = ChildChannelsTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
         };
         Ok(Html(tpl.render()?).into_response())
     })
@@ -541,17 +604,20 @@ pub async fn child_channels(current: Option<CurrentAccount>) -> AppResult<Respon
 #[template(path = "pages/child/channel.html")]
 struct ChildChannelTemplate {
     display_name: String,
+    downloads_enabled: bool,
     channel_id: String,
 }
 
 /// `GET /child/channel/:channelId` — single channel page.
 pub async fn child_channel(
+    State(state): State<AppState>,
     current: Option<CurrentAccount>,
     Path(channel_id): Path<String>,
 ) -> AppResult<Response> {
-    require_child(current, |c| {
+    require_child(&state, current, |c, ctx| {
         let tpl = ChildChannelTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
             channel_id: channel_id.clone(),
         };
         Ok(Html(tpl.render()?).into_response())
@@ -563,13 +629,18 @@ pub async fn child_channel(
 #[template(path = "pages/child/playlists.html")]
 struct ChildPlaylistsTemplate {
     display_name: String,
+    downloads_enabled: bool,
 }
 
 /// `GET /child/playlists`.
-pub async fn child_playlists(current: Option<CurrentAccount>) -> AppResult<Response> {
-    require_child(current, |c| {
+pub async fn child_playlists(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
+    require_child(&state, current, |c, ctx| {
         let tpl = ChildPlaylistsTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
         };
         Ok(Html(tpl.render()?).into_response())
     })
@@ -580,6 +651,7 @@ pub async fn child_playlists(current: Option<CurrentAccount>) -> AppResult<Respo
 #[template(path = "pages/child/playlist.html")]
 struct ChildPlaylistTemplate {
     display_name: String,
+    downloads_enabled: bool,
     /// Local primary-key id (string-encoded).
     playlist_id: String,
     /// `"child"` for child-owned playlists, `"family"` for family
@@ -593,10 +665,11 @@ struct ChildPlaylistTemplate {
 /// (family playlist). The shape is forwarded verbatim to the Lit
 /// component.
 pub async fn child_playlist(
+    State(state): State<AppState>,
     current: Option<CurrentAccount>,
     Path(playlist_id): Path<String>,
 ) -> AppResult<Response> {
-    require_child(current, |c| {
+    require_child(&state, current, |c, ctx| {
         let (playlist_kind, raw_id) = if let Some(rest) = playlist_id.strip_prefix("family:") {
             ("family".to_string(), rest.to_string())
         } else {
@@ -604,6 +677,7 @@ pub async fn child_playlist(
         };
         let tpl = ChildPlaylistTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
             playlist_id: raw_id,
             playlist_kind,
         };
@@ -616,6 +690,7 @@ pub async fn child_playlist(
 #[template(path = "pages/child/search.html")]
 struct ChildSearchTemplate {
     display_name: String,
+    downloads_enabled: bool,
     q: String,
     kind: String,
 }
@@ -632,12 +707,14 @@ pub struct SearchPageQuery {
 /// real result rendering happens in `<hometube-search-results>` once
 /// the query is sent to `/api/search`.
 pub async fn child_search(
+    State(state): State<AppState>,
     current: Option<CurrentAccount>,
     Query(q): Query<SearchPageQuery>,
 ) -> AppResult<Response> {
-    require_child(current, |c| {
+    require_child(&state, current, |c, ctx| {
         let tpl = ChildSearchTemplate {
             display_name: c.display_name,
+            downloads_enabled: ctx.downloads_enabled,
             q: q.q.clone().unwrap_or_default(),
             kind: q.kind.clone().unwrap_or_else(|| "all".to_string()),
         };
@@ -650,6 +727,7 @@ pub async fn child_search(
 #[template(path = "pages/child/video.html")]
 struct ChildVideoTemplate {
     display_name: String,
+    downloads_enabled: bool,
     video_id: String,
     /// Up-next source context, in `playlist:ID` / `channel:ID` /
     /// `video:ID` shape. May be empty.
@@ -700,9 +778,10 @@ pub async fn child_video(
     }
 
     let cache = VideoCache::new();
-    let extract = cache
-        .get_or_extract(&state.db, &state.config, &video_id)
-        .await;
+    let (extract, downloads_enabled) = tokio::join!(
+        cache.get_or_extract(&state.db, &state.config, &video_id),
+        fetch_downloads_enabled(&state.db, c.id),
+    );
 
     match extract {
         Ok(result) => {
@@ -717,6 +796,7 @@ pub async fn child_video(
             .unwrap_or(false);
             let tpl = ChildVideoTemplate {
                 display_name: c.display_name,
+                downloads_enabled,
                 video_id,
                 from: q.from.unwrap_or_default(),
                 unavailable: !allowed,
@@ -738,21 +818,44 @@ pub async fn child_video(
                 &err.to_string(),
             )
             .await;
-            render_video_unavailable(
-                c.display_name,
+            render_video_unavailable(VideoUnavailable {
+                display_name: c.display_name,
+                downloads_enabled,
                 video_id,
-                Some("We couldn't load this video right now. Please try again later.".to_string()),
-            )
+                message: Some(
+                    "We couldn't load this video right now. Please try again later.".to_string(),
+                ),
+            })
         }
     }
 }
 
-async fn require_child<F>(current: Option<CurrentAccount>, render: F) -> AppResult<Response>
+/// Auth gate for every `/child/*` page handler.
+///
+/// On a child account, fetches the [`ChildNavContext`] (currently just
+/// `downloads_enabled`) and passes it into the synchronous render
+/// closure. Parents are bounced to `/parent/home`; everyone else to `/`.
+///
+/// The settings fetch runs serially before the closure. That's
+/// intentional: every handler that uses this helper has a sync render
+/// closure with no other I/O to overlap with, so there's nothing for
+/// `tokio::join!` to gain. Handlers that *do* have additional async
+/// work to overlap (`child_home`, `child_hidden`, `child_video`) skip
+/// this helper and call [`fetch_downloads_enabled`] directly inside a
+/// `tokio::join!`.
+async fn require_child<F>(
+    state: &AppState,
+    current: Option<CurrentAccount>,
+    render: F,
+) -> AppResult<Response>
 where
-    F: FnOnce(CurrentAccount) -> AppResult<Response>,
+    F: FnOnce(CurrentAccount, ChildNavContext) -> AppResult<Response>,
 {
     match current {
-        Some(c) if matches!(c.account_type, AccountType::Child) => render(c),
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            let ctx = fetch_child_nav_context(&state.db, c.id).await;
+            render(c, ctx)
+        }
         Some(c) if matches!(c.account_type, AccountType::Parent) => {
             Ok(Redirect::to("/parent/home").into_response())
         }
