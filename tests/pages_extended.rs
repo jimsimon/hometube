@@ -115,11 +115,18 @@ async fn child_downloads_page_renders_when_enabled() {
 #[tokio::test]
 async fn child_downloads_page_redirects_when_disabled() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    // No child_settings row → fail-closed → expect a redirect away
-    // from /child/downloads.
+    // No child_settings row → fail-closed → expect a redirect to
+    // /child/home (not /, which would mean an auth failure).
     let res = app.server.get("/child/downloads").await;
     let status = res.status_code().as_u16();
     assert!((300..400).contains(&status), "got {status}");
+    let location = res
+        .headers()
+        .get("location")
+        .expect("redirect should have a Location header")
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/child/home");
 }
 
 #[tokio::test]

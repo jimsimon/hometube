@@ -32,14 +32,24 @@ struct ChildNavContext {
 /// schema default (`migrations/012_default_downloads_off.sql`) and
 /// the API gate `routes/downloads.rs::ensure_downloads_enabled`.
 async fn fetch_downloads_enabled(db: &SqlitePool, child_id: i64) -> bool {
-    let enabled: Option<i64> = sqlx::query_scalar(
+    let enabled: Option<i64> = match sqlx::query_scalar(
         "SELECT downloads_enabled FROM child_settings WHERE child_account_id = ?",
     )
     .bind(child_id)
     .fetch_optional(db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(v) => v,
+        Err(err) => {
+            // Fail-closed and surface the failure so it's debuggable —
+            // the API gate `ensure_downloads_enabled` propagates the
+            // same error with `?` and 500s. We can't bubble here
+            // without changing every child handler signature, but a
+            // warn makes the otherwise-silent UI hide observable.
+            tracing::warn!(%err, child_id, "failed to read child_settings.downloads_enabled; treating as disabled");
+            return false;
+        }
+    };
     matches!(enabled, Some(1))
 }
 
