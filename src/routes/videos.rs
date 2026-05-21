@@ -306,11 +306,13 @@ pub async fn get_stream_manifest(
         // request time, not just at token mint time. Without this,
         // a token minted while cast was enabled would keep working
         // for up to 6 hours after a parent disables cast — which
-        // defeats the point of the per-child gate. Parents are
-        // exempt from this check (they always pass the mint gate),
-        // but we still get here only if account is a child since
-        // that's the only kind of account that gets cast tokens
-        // minted under the current logic in `get_stream`.
+        // defeats the point of the per-child gate.
+        //
+        // Parents also get cast tokens minted (see `get_stream`),
+        // but skip this check because they have no `child_settings`
+        // row and aren't subject to the parental gate — the parent
+        // account itself *is* the gate. The match guard is therefore
+        // load-bearing: removing it would 403 every parent cast.
         if matches!(synthetic.account_type, AccountType::Child) {
             let enabled: i64 = sqlx::query_scalar(
                 "SELECT chromecast_enabled FROM child_settings WHERE child_account_id = ?",
