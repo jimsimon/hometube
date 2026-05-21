@@ -465,12 +465,6 @@ export class VideoPlayer extends LitElement {
         margin-top: 1rem;
         align-items: center;
       }
-      .seek-overlay {
-        position: relative;
-        height: 0.5rem;
-        margin-top: -0.5rem;
-        pointer-events: none;
-      }
       .continue-prompt {
         position: absolute;
         inset: 0;
