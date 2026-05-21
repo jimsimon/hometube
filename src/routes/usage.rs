@@ -44,6 +44,12 @@ pub struct HeartbeatBody {
     pub video_thumbnail_url: Option<String>,
     #[serde(default)]
     pub channel_title: Option<String>,
+    /// Channel ID for the video, used by continue-watching to run an
+    /// access check against `allowlisted_channels`. Optional because
+    /// not every player surface (e.g. preview) populates it, and old
+    /// clients won't send it at all.
+    #[serde(default)]
+    pub channel_id: Option<String>,
     /// How long since the last heartbeat (defaults to 30s if omitted).
     #[serde(default)]
     pub elapsed_seconds: Option<i64>,
@@ -256,6 +262,8 @@ pub struct ProgressBody {
     pub video_thumbnail_url: Option<String>,
     #[serde(default)]
     pub channel_title: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
 }
 
 /// `POST /api/usage/progress`.
@@ -283,6 +291,7 @@ pub async fn progress(
         video_title: body.video_title,
         video_thumbnail_url: body.video_thumbnail_url,
         channel_title: body.channel_title,
+        channel_id: body.channel_id,
         elapsed_seconds: None,
     };
     upsert_watch_history(&state, current.id, &hb).await?;
@@ -304,14 +313,15 @@ async fn upsert_watch_history(
     sqlx::query(
         "INSERT INTO watch_history \
             (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, \
-             duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch()) \
+             channel_id, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             progress_seconds = excluded.progress_seconds, \
             duration_seconds = COALESCE(excluded.duration_seconds, watch_history.duration_seconds), \
             video_title = COALESCE(?, watch_history.video_title), \
             video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, watch_history.video_thumbnail_url), \
             channel_title = COALESCE(excluded.channel_title, watch_history.channel_title), \
+            channel_id = COALESCE(excluded.channel_id, watch_history.channel_id), \
             last_watched_at = unixepoch()",
     )
     .bind(child_id)
@@ -319,6 +329,7 @@ async fn upsert_watch_history(
     .bind(title_insert)
     .bind(body.video_thumbnail_url.clone())
     .bind(body.channel_title.clone())
+    .bind(body.channel_id.clone())
     .bind(body.duration_seconds)
     .bind(body.position_seconds)
     .bind(title_update)

@@ -1236,6 +1236,7 @@ export class VideoPlayer extends LitElement {
       video_title: this.metadata.title,
       video_thumbnail_url: this.metadata.thumbnail_url,
       channel_title: this.metadata.channel_title,
+      channel_id: this.metadata.channel_id,
     };
     if (elapsedSeconds != null) payload.elapsed_seconds = elapsedSeconds;
     return payload;
