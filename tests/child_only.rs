@@ -15,6 +15,7 @@ use tower_cookies::cookie::Cookie;
 
 const CHILD_GET_ENDPOINTS: &[&str] = &[
     "/api/feed/continue-watching",
+    "/api/feed/watch-again",
     "/api/feed/new-videos",
     "/api/subscriptions",
     "/api/playlists",

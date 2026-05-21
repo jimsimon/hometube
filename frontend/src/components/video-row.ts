@@ -1,5 +1,5 @@
 /**
- * <hometube-video-row feed="continue-watching|new-videos" heading="...">
+ * <hometube-video-row feed="continue-watching|watch-again|new-videos" heading="...">
  *
  * Horizontal scrolling row of `<hometube-video-card>`s. Fetches the
  * appropriate feed endpoint on connect and renders a heading above the
@@ -10,13 +10,13 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import { api } from "../services/api.js";
-import type { ContinueWatchingItem, NewVideoItem } from "../types/index.js";
+import type { ContinueWatchingItem, NewVideoItem, WatchAgainItem } from "../types/index.js";
 
 import "./video-card.js";
 import "./loading-spinner.js";
 import "./error-banner.js";
 
-type Feed = "continue-watching" | "new-videos";
+type Feed = "continue-watching" | "watch-again" | "new-videos";
 
 interface Card {
   videoId: string;
@@ -101,6 +101,18 @@ export class VideoRow extends LitElement {
             it.duration_seconds && it.duration_seconds > 0
               ? Math.min(1, it.progress_seconds / it.duration_seconds)
               : 0,
+        }));
+      } else if (this.feed === "watch-again") {
+        const items = await api.get<WatchAgainItem[]>("/api/feed/watch-again");
+        this.cards = items.map((it) => ({
+          videoId: it.video_id,
+          title: it.video_title,
+          thumbnailUrl: it.video_thumbnail_url,
+          channelTitle: it.channel_title,
+          durationSeconds: it.duration_seconds,
+          // Videos in this feed are already complete; render without
+          // an in-progress indicator.
+          progress: 0,
         }));
       } else {
         const items = await api.get<NewVideoItem[]>("/api/feed/new-videos");
