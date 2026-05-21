@@ -39,9 +39,36 @@ export class LikeButton extends LitElement {
   @property({ type: String, attribute: "thumbnail-url" })
   thumbnailUrl = "";
 
+  /**
+   * Channel id for the video. Persisted on the like row so the
+   * server's `visible` flag can match against `allowlisted_channels`
+   * (not just direct video-allowlist entries). Optional.
+   */
+  @property({ type: String, attribute: "channel-id" })
+  channelId = "";
+
+  /** Channel title for the video. Used to render the channel name on
+   *  the liked-videos grid without a follow-up fetch. Optional. */
+  @property({ type: String, attribute: "channel-title" })
+  channelTitle = "";
+
+  /**
+   * Video length in seconds. Persisted on the like row so the liked
+   * grid can render a duration badge. The player already has this via
+   * `metadata.duration_seconds`; pass it through to avoid re-fetching
+   * yt-dlp metadata. Optional; `0` is treated as "unknown".
+   */
+  @property({ type: Number, attribute: "duration-seconds" })
+  durationSeconds = 0;
+
   @state() private liked = false;
   @state() private busy = false;
   @state() private error = "";
+
+  /** Monotonic refresh token. Bumped on each `refresh()` call and on
+   *  disconnect so a late `/api/likes` response from a previous video
+   *  can't overwrite `this.liked` with a stale value. */
+  private refreshToken = 0;
 
   static styles = css`
     :host {
@@ -81,11 +108,21 @@ export class LikeButton extends LitElement {
     if (changed.has("videoId")) void this.refresh();
   }
 
+  override disconnectedCallback(): void {
+    this.refreshToken++;
+    super.disconnectedCallback();
+  }
+
   private async refresh(): Promise<void> {
     if (!this.videoId) return;
+    const token = ++this.refreshToken;
+    const videoId = this.videoId;
     try {
       const likes = await api.get<LikeRow[]>("/api/likes");
-      this.liked = likes.some((l) => l.video_id === this.videoId);
+      // Discard if a newer refresh (or unmount) has happened, or if the
+      // videoId we were querying for is no longer the current one.
+      if (token !== this.refreshToken || videoId !== this.videoId) return;
+      this.liked = likes.some((l) => l.video_id === videoId);
     } catch {
       // Silent.
     }
@@ -108,6 +145,9 @@ export class LikeButton extends LitElement {
         const body = {
           title: this.videoTitle || null,
           thumbnail_url: this.thumbnailUrl || null,
+          channel_id: this.channelId || null,
+          channel_title: this.channelTitle || null,
+          duration_seconds: this.durationSeconds > 0 ? this.durationSeconds : null,
         };
         await api.post(`/api/likes/${encodeURIComponent(this.videoId)}`, body);
         this.liked = true;

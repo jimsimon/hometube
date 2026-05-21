@@ -374,6 +374,110 @@ async fn fetch_hidden_video_cards(state: &AppState, child_id: i64) -> Vec<VideoC
 }
 
 #[derive(Template)]
+#[template(path = "pages/child/liked.html")]
+struct ChildLikedTemplate {
+    display_name: String,
+    downloads_enabled: bool,
+    /// SSR fallback grid for browsers without JavaScript. Pulls
+    /// the child's liked videos that are still reachable through the
+    /// allowlist (so the no-JS grid never links to a video that would
+    /// 403 on click).
+    videos: Vec<VideoCardData>,
+}
+
+/// `GET /child/liked` — list of videos this child has liked.
+pub async fn child_liked(
+    State(state): State<AppState>,
+    current: Option<CurrentAccount>,
+) -> AppResult<Response> {
+    match current {
+        Some(c) if matches!(c.account_type, AccountType::Child) => {
+            let (videos, downloads_enabled) = tokio::join!(
+                fetch_liked_video_cards(&state, c.id),
+                fetch_downloads_enabled(&state.db, c.id),
+            );
+            let tpl = ChildLikedTemplate {
+                display_name: c.display_name,
+                downloads_enabled,
+                videos,
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        Some(c) if matches!(c.account_type, AccountType::Parent) => {
+            Ok(Redirect::to("/parent/home").into_response())
+        }
+        _ => Ok(Redirect::to("/").into_response()),
+    }
+}
+
+/// Pull liked videos for `child_id` that the child can still play,
+/// shaped as `VideoCardData` for the `<noscript>` fallback grid.
+///
+/// Mirrors [`crate::services::access::can_child_view`] for everything
+/// expressible in SQL against `video_likes`: excludes blocked and
+/// per-child hidden videos, and accepts a video that is either directly
+/// allowlisted OR whose `channel_id` (captured at like-time) is
+/// allowlisted. The remaining gap — playlist-allowlist matches — would
+/// need a separate join table tracking which playlists a like came
+/// from; not worth a schema change for the SSR fallback.
+///
+/// Best-effort: errors are logged and collapse to an empty list so the
+/// page still renders.
+async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCardData> {
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    let rows: Result<Vec<Row>, _> = sqlx::query_as(
+        "SELECT l.video_id, l.video_title, l.video_thumbnail_url, l.channel_title, \
+                l.duration_seconds \
+         FROM video_likes l \
+         LEFT JOIN allowlisted_videos a \
+           ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
+         LEFT JOIN allowlisted_channels c \
+           ON c.child_account_id = l.child_account_id \
+          AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+         WHERE l.child_account_id = ? AND l.is_deleted = 0 \
+           AND (a.id IS NOT NULL OR c.id IS NOT NULL) \
+           AND NOT EXISTS ( \
+                SELECT 1 FROM blocked_videos b \
+                WHERE b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
+           ) \
+           AND NOT EXISTS ( \
+                SELECT 1 FROM hidden_videos h \
+                WHERE h.child_account_id = l.child_account_id AND h.video_id = l.video_id \
+           ) \
+         ORDER BY l.liked_at DESC",
+    )
+    .bind(child_id)
+    .fetch_all(&state.db)
+    .await;
+    match rows {
+        Ok(rs) => rs
+            .into_iter()
+            .map(
+                |(video_id, title, thumbnail_url, channel_title, duration_seconds)| VideoCardData {
+                    video_id,
+                    title: title.unwrap_or_default(),
+                    thumbnail_url,
+                    channel_title,
+                    duration_label: duration_seconds
+                        .filter(|d| *d > 0)
+                        .map(VideoCardData::format_duration),
+                },
+            )
+            .collect(),
+        Err(err) => {
+            tracing::warn!(child_id, error = %err, "failed to load liked videos for SSR grid");
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Template)]
 #[template(path = "pages/child/downloads.html")]
 struct ChildDownloadsTemplate {
     display_name: String,
