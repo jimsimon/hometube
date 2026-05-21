@@ -74,18 +74,6 @@ interface ShakaPlayer {
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
   destroy(): void;
-  getControls(): ShakaControls;
-}
-
-interface ShakaControls {
-  addEventListener(event: string, handler: () => void): void;
-  removeEventListener(event: string, handler: () => void): void;
-  getCastProxy(): ShakaCastProxy;
-}
-
-interface ShakaCastProxy {
-  isCasting(): boolean;
-  canCast(): boolean;
 }
 
 // Cast the imported namespace to our typed shape.
@@ -391,15 +379,6 @@ export class VideoPlayer extends LitElement {
   private player: ShakaPlayer | null = null;
   /** shaka.ui.Overlay instance (manages the control bar). */
   private ui: ShakaUI | null = null;
-  /**
-   * Captured handle for the `caststatuschanged` listener installed
-   * when chromecast is enabled, so we can remove it cleanly on
-   * teardown. `null` when cast is disabled or before attach.
-   */
-  private castStatusHandler: {
-    controls: ShakaControls;
-    handler: () => void;
-  } | null = null;
   /** Spherical (360°) renderer instance — created lazily for VR videos. */
   private sphericalRenderer: { destroy(): void; resize(): void } | null = null;
   /** Projection pose extracted from the first WebM init segment. */
@@ -935,31 +914,39 @@ export class VideoPlayer extends LitElement {
         await player.load(audioUrl, undefined, "audio/webm");
       }
     } else {
-      // Load the *cookie-authenticated* manifest URL for local
-      // playback. We swap to the token-bearing cast URL only when
-      // the user actively starts a cast session (see the
-      // `caststatuschanged` handler installed below). Keeping the
-      // cast token out of the local player's request stream means
-      // it doesn't appear in DevTools network logs, error reports,
-      // or anything else captured during normal viewing — narrowing
-      // the surface to "in flight only while casting" even though
-      // the token is already strongly bound to the child id and
-      // re-validated on every request server-side.
-      const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      // When casting is enabled, load the server-minted cast manifest
+      // URL even for local playback. Shaka's CastProxy serialises the
+      // player's currently-loaded URL to the receiver synchronously at
+      // cast-connect time — *before* any caststatuschanged event fires
+      // on the sender — so a deferred URL swap on `caststatuschanged`
+      // would race the initial state sync (receiver fetches the
+      // cookie-only URL, 401s, then a subsequent mirrored load() with
+      // the cast URL recovers). Eager loading avoids the race at the
+      // cost of having the token in the local request stream.
+      //
+      // The token-in-network-logs concern is bounded by layered
+      // server-side defenses applied at every cast-token request:
+      //   - HMAC binds to (video_id, child_id, exp); a leaked URL only
+      //     unlocks that one kid's access to that one video.
+      //   - The manifest handler re-runs `enforce_access` against the
+      //     bound child id, so a parent's allowlist revocation kills
+      //     the token immediately (not at 6h expiry).
+      //   - The handler re-checks `chromecast_enabled` on the bound
+      //     child, so disabling cast in parent settings also kills
+      //     outstanding tokens immediately.
+      //   - 6h expiry, HTTPS-only, not in browser history or referer.
+      // Combined: a kid copying the URL from DevTools to share with a
+      // sibling gets nothing (child binding); using it from another
+      // browser after their session expires gets 6h max, subject to
+      // parent revocation at any moment.
+      const manifestUrl =
+        castEnabled && this.stream?.cast_manifest_url
+          ? this.stream.cast_manifest_url
+          : `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
       // Explicitly specify the MIME type so shaka doesn't have to guess
       // from the URL or Content-Type header (which may be text/xml or
       // application/octet-stream depending on the server config).
       await player.load(manifestUrl, undefined, "application/dash+xml");
-    }
-
-    // Install the cast URL-swap listener once playback is established.
-    // The listener fires from Shaka's controls when the cast session
-    // status changes; we re-load with the appropriate URL so the
-    // receiver (which serializes the player's currently-loaded URL on
-    // connect) gets a token-bearing one only when there's actually a
-    // receiver about to fetch it.
-    if (castEnabled && this.stream?.cast_manifest_url) {
-      this.installCastUrlSwapHandler(this.stream.cast_manifest_url);
     }
 
     // Add caption tracks (non-fatal — some languages may 404).
@@ -1021,51 +1008,6 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  /**
-   * Listen for Shaka cast-status transitions and swap the player's
-   * loaded manifest URL accordingly so the token-bearing URL only
-   * touches the wire while a cast session is actively connecting/
-   * connected. Re-loading uses the current `videoEl.currentTime` so
-   * the swap is transparent to the viewer (modulo a brief re-buffer,
-   * which casting inherently has anyway).
-   *
-   * `castManifestUrl` is captured at install time — the stream
-   * response only includes it when this child is allowed to cast
-   * (server-side enforcement, see `routes::videos::get_stream`),
-   * and we already checked presence at the call site.
-   */
-  private installCastUrlSwapHandler(castManifestUrl: string): void {
-    const controls = this.ui?.getControls();
-    const proxy = controls?.getCastProxy();
-    if (!controls || !proxy) return;
-    // Track the last known cast state so we only swap on actual
-    // transitions; `caststatuschanged` also fires on `canCast`
-    // changes (a new receiver appearing on the network), and we
-    // don't want to re-load the player for those.
-    let wasCasting = proxy.isCasting();
-    const onStatus = async (): Promise<void> => {
-      const isCasting = proxy.isCasting();
-      if (isCasting === wasCasting) return;
-      wasCasting = isCasting;
-      const player = this.player;
-      const video = this.videoEl;
-      if (!player || !video) return;
-      const localUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
-      const target = isCasting ? castManifestUrl : localUrl;
-      const startTime = video.currentTime;
-      try {
-        await player.load(target, startTime, "application/dash+xml");
-      } catch {
-        // Swap failure on cast start would leave the receiver fetching
-        // a 401'd URL — not recoverable here. Cast stop swap failures
-        // are similarly unrecoverable but cosmetic. In both cases the
-        // user can refresh the page to recover.
-      }
-    };
-    controls.addEventListener("caststatuschanged", onStatus);
-    this.castStatusHandler = { controls, handler: onStatus };
-  }
-
   private async destroyPlayer(): Promise<void> {
     if (this.sphericalRenderer) {
       this.sphericalRenderer.destroy();
@@ -1083,17 +1025,6 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("seeked", this.onSeeked);
       this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
       this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
-    }
-    if (this.castStatusHandler) {
-      // Remove the listener *before* destroying the UI so the
-      // controls reference is still valid. Without this, a stale
-      // cast-status event after destroy would call into a detached
-      // player.
-      this.castStatusHandler.controls.removeEventListener(
-        "caststatuschanged",
-        this.castStatusHandler.handler,
-      );
-      this.castStatusHandler = null;
     }
     if (this.ui) {
       this.ui.destroy();

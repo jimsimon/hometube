@@ -302,6 +302,27 @@ pub async fn get_stream_manifest(
             account_type: account.typed(),
             session_id: String::new(),
         };
+        // Re-check the per-child `chromecast_enabled` setting at
+        // request time, not just at token mint time. Without this,
+        // a token minted while cast was enabled would keep working
+        // for up to 6 hours after a parent disables cast — which
+        // defeats the point of the per-child gate. Parents are
+        // exempt from this check (they always pass the mint gate),
+        // but we still get here only if account is a child since
+        // that's the only kind of account that gets cast tokens
+        // minted under the current logic in `get_stream`.
+        if matches!(synthetic.account_type, AccountType::Child) {
+            let enabled: i64 = sqlx::query_scalar(
+                "SELECT chromecast_enabled FROM child_settings WHERE child_account_id = ?",
+            )
+            .bind(synthetic.id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0);
+            if enabled == 0 {
+                return Err(AppError::Forbidden);
+            }
+        }
         enforce_access(&state.db, &synthetic, &video_id, &result).await?;
     }
 
