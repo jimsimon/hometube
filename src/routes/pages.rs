@@ -410,9 +410,22 @@ pub async fn child_liked(
     }
 }
 
-/// Pull liked videos for `child_id` that are still allowlisted, shaped
-/// as `VideoCardData` for the `<noscript>` fallback grid. Best-effort:
-/// errors collapse to an empty list so the page still renders.
+/// Pull liked videos for `child_id` that the child can still play,
+/// shaped as `VideoCardData` for the `<noscript>` fallback grid.
+///
+/// Mirrors the parts of [`crate::services::access::can_child_view`]
+/// that can be expressed in SQL against `video_likes`: excludes blocked
+/// videos, excludes per-child hidden videos, and requires a direct
+/// `allowlisted_videos` row. **Limitation:** `video_likes` does not
+/// store the source `channel_id` / `playlist_id`, so likes that would
+/// be playable purely via an allowlisted channel or playlist (no direct
+/// video-allowlist row) are not surfaced here. The hydrated Lit grid
+/// uses the same `visible` flag from `/api/likes`, so the two stay in
+/// sync; fixing the broader gap requires backfilling channel/playlist
+/// columns on `video_likes` and is intentionally out of scope.
+///
+/// Best-effort: errors are logged and collapse to an empty list so the
+/// page still renders.
 async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCardData> {
     type Row = (String, Option<String>, Option<String>);
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
@@ -421,6 +434,14 @@ async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCa
          INNER JOIN allowlisted_videos a \
            ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
          WHERE l.child_account_id = ? AND l.is_deleted = 0 \
+           AND NOT EXISTS ( \
+                SELECT 1 FROM blocked_videos b \
+                WHERE b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
+           ) \
+           AND NOT EXISTS ( \
+                SELECT 1 FROM hidden_videos h \
+                WHERE h.child_account_id = l.child_account_id AND h.video_id = l.video_id \
+           ) \
          ORDER BY l.liked_at DESC",
     )
     .bind(child_id)
@@ -437,7 +458,10 @@ async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCa
                 duration_label: None,
             })
             .collect(),
-        Err(_) => Vec::new(),
+        Err(err) => {
+            tracing::warn!(child_id, error = %err, "failed to load liked videos for SSR grid");
+            Vec::new()
+        }
     }
 }
 
