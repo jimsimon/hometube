@@ -327,11 +327,7 @@ fn check_url(url: &str) -> AppResult<()> {
 
 /// Notification-type strings accepted in `enabled_types`. Mirrors the
 /// `parent_notifications.notification_type` CHECK constraint.
-pub const KNOWN_TYPES: &[&str] = &[
-    "ytdlp_failure",
-    "new_search_term",
-    "system_update",
-];
+pub const KNOWN_TYPES: &[&str] = &["ytdlp_failure", "new_search_term", "system_update"];
 
 /// Top-level entry point used by the in-app notification dispatcher.
 ///

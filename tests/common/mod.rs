@@ -296,4 +296,3 @@ fn ensure_writable_cookies_path() {
         unsafe { std::env::set_var("YTDLP_COOKIES_PATH", path.to_str().unwrap()) };
     });
 }
-

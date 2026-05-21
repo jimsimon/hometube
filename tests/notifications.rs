@@ -12,9 +12,7 @@ mod common;
 use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
-use hometube::services::notifications::{
-    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE,
-};
+use hometube::services::notifications::{self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE};
 
 #[tokio::test]
 async fn empty_initially() {
