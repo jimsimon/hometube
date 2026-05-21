@@ -89,9 +89,22 @@ pub async fn continue_watching(
         .filter(|r| r.channel_id.is_none())
         .map(|r| r.video_id.as_str())
         .collect();
-    let legacy_map = lookup_channel_ids_for_videos(&state.db, &legacy_ids)
-        .await
-        .unwrap_or_default();
+    let legacy_map = match lookup_channel_ids_for_videos(&state.db, &legacy_ids).await {
+        Ok(map) => map,
+        Err(err) => {
+            // Don't fail the whole row over a transient cache lookup
+            // problem — fall back to "no legacy resolution" so freshly
+            // upserted rows (which have channel_id stored directly) and
+            // individually-allowlisted videos still surface. But do log
+            // it: silently reverting to the pre-fix broken behaviour is
+            // exactly what bit us before.
+            tracing::warn!(
+                error = %err,
+                "continue_watching: feed_source_items lookup failed; legacy NULL-channel rows may be hidden"
+            );
+            std::collections::HashMap::new()
+        }
+    };
 
     let mut filtered = Vec::with_capacity(rows.len());
     for row in rows {
@@ -100,9 +113,9 @@ pub async fn continue_watching(
         }
         let channel_id = row
             .channel_id
-            .clone()
-            .or_else(|| legacy_map.get(&row.video_id).cloned());
-        if can_child_view(&state.db, current.id, &row.video_id, channel_id.as_deref(), &[])
+            .as_deref()
+            .or_else(|| legacy_map.get(&row.video_id).map(String::as_str));
+        if can_child_view(&state.db, current.id, &row.video_id, channel_id, &[])
             .await
             .unwrap_or(false)
         {
@@ -114,7 +127,7 @@ pub async fn continue_watching(
 
 /// Best-effort batched `video_id → channel_id` lookup for
 /// `watch_history` rows that were written before the `channel_id`
-/// column existed (migration 013). Reads from `feed_source_items`,
+/// column existed (migration 014). Reads from `feed_source_items`,
 /// which the feed refresher keeps populated for every allowlisted
 /// channel + playlist. Returns an empty map when there are no legacy
 /// rows to resolve, so the caller never pays for the round-trip on a
@@ -130,8 +143,7 @@ async fn lookup_channel_ids_for_videos(
     // SQLite, so build the placeholder list manually. Inputs are
     // video_ids we just read out of our own DB, so there's nothing to
     // sanitise — but we still parameterise rather than interpolate.
-    let placeholders = std::iter::repeat("?")
-        .take(video_ids.len())
+    let placeholders = std::iter::repeat_n("?", video_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
@@ -166,10 +178,17 @@ fn is_effectively_finished(progress_seconds: i64, duration_seconds: Option<i64>)
     if duration <= 0 || progress_seconds <= 0 {
         return false;
     }
-    if progress_seconds >= duration.saturating_sub(CONTINUE_TAIL_SECONDS) {
-        return true;
-    }
-    (progress_seconds as f64) >= (duration as f64) * CONTINUE_COMPLETION_RATIO
+    // Use the *later* of the two thresholds so neither rule fires
+    // prematurely on the other's edge case. The tail rule alone would
+    // mark a barely-started 20s clip as finished (15s tail ≥ 5s
+    // played); the ratio rule alone would only kick in past 95% which
+    // can leave a 2-minute video with a few seconds of unwatched
+    // credits stuck in the row. Taking the max keeps long-form videos
+    // bounded by the absolute tail and protects short clips with the
+    // ratio.
+    let tail_threshold = duration.saturating_sub(CONTINUE_TAIL_SECONDS);
+    let ratio_threshold = ((duration as f64) * CONTINUE_COMPLETION_RATIO).ceil() as i64;
+    progress_seconds >= tail_threshold.max(ratio_threshold)
 }
 
 #[derive(Debug, Serialize, Clone)]

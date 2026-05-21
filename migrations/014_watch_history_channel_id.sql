@@ -13,14 +13,10 @@
 -- can't be resolved are left NULL; `continue_watching` will fall back
 -- to a per-row lookup so they still surface if/when the source
 -- becomes resolvable.
+-- Migration 009 already created `feed_source_items_video` on
+-- `(video_id)`, so both the backfill below and the runtime fallback in
+-- `continue_watching` are already O(log n). No new index needed.
 ALTER TABLE watch_history ADD COLUMN channel_id TEXT;
-
--- `feed_source_items`' PK is `(kind, source_id, video_id)`, so a bare
--- `WHERE video_id = ?` lookup (used by both the backfill below and the
--- runtime fallback in `continue_watching`) would do a full scan. Add a
--- secondary index so both stay O(log n).
-CREATE INDEX IF NOT EXISTS idx_feed_source_items_video_id
-    ON feed_source_items(video_id);
 
 UPDATE watch_history
 SET channel_id = (

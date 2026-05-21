@@ -66,14 +66,19 @@ async fn continue_watching_drops_effectively_finished_videos() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Three watched + allowlisted videos:
-    //   vid-done-tail   — within 15s of the end → finished
-    //   vid-done-ratio  — past the 95% completion threshold → finished
-    //   vid-partial     — half-watched → still in continue-watching
-    // Plus vid-no-dur with NULL duration which must NOT be auto-dropped.
+    // Five watched + allowlisted videos cover the finished-detection
+    // edges (tail threshold + ratio threshold combined with `max`):
+    //   vid-done-tail        — 300s clip, watched to 290s (≥ tail 285) → finished
+    //   vid-short-finished   — 20s clip, watched to 20s (≥ ratio 19) → finished
+    //   vid-short-started    — 20s clip, watched to 6s. The bare tail
+    //                          rule (15s) would mark this finished;
+    //                          the ratio rule keeps it visible.
+    //   vid-partial          — 600s clip, half-watched → still listed
+    //   vid-no-dur           — NULL duration must NOT be auto-dropped
     let seeds = [
-        ("vid-done-tail", Some(300i64), 290i64, 1003i64),
-        ("vid-done-ratio", Some(1000i64), 960i64, 1002i64),
+        ("vid-done-tail", Some(300i64), 290i64, 1004i64),
+        ("vid-short-finished", Some(20i64), 20i64, 1003i64),
+        ("vid-short-started", Some(20i64), 6i64, 1002i64),
         ("vid-partial", Some(600i64), 120i64, 1001i64),
         ("vid-no-dur", None, 30i64, 1000i64),
     ];
@@ -121,12 +126,16 @@ async fn continue_watching_drops_effectively_finished_videos() {
         "rows with NULL duration must not be auto-finished, got {ids:?}"
     );
     assert!(
-        !ids.contains(&"vid-done-tail"),
-        "video within tail window must be dropped, got {ids:?}"
+        ids.contains(&"vid-short-started"),
+        "short clips barely begun must not be auto-finished by the tail rule, got {ids:?}"
     );
     assert!(
-        !ids.contains(&"vid-done-ratio"),
-        "video past 95% completion must be dropped, got {ids:?}"
+        !ids.contains(&"vid-done-tail"),
+        "long video within tail window must be dropped, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"vid-short-finished"),
+        "short video fully watched must be dropped, got {ids:?}"
     );
 }
 
