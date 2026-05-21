@@ -102,12 +102,6 @@ async fn parent_can_read_per_child_endpoints() {
 
     let res = app
         .server
-        .get(&format!("/api/children/{child_id}/usage-stats"))
-        .await;
-    assert!(res.status_code().is_success());
-
-    let res = app
-        .server
         .get(&format!("/api/children/{child_id}/settings"))
         .await;
     assert!(res.status_code().is_success());
@@ -121,7 +115,7 @@ async fn child_cannot_read_per_child_endpoints() {
     // because the layer requires *parent* role, even for own data.
     let res = app
         .server
-        .get(&format!("/api/children/{child_id}/usage-stats"))
+        .get(&format!("/api/children/{child_id}/settings"))
         .await;
     assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
 }

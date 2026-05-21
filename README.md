@@ -32,8 +32,8 @@ feature-complete for self-hosting, and the remaining work is hardening
 - **Watch-activity dashboard** — daily / weekly / monthly summary,
   bar-chart of last-30-day totals, top channels, full history, and
   search log
-- **Parent notifications** — bell + dropdown for time-limit alerts,
-  yt-dlp failures, sync errors, and system updates
+- **Parent notifications** — bell + dropdown for yt-dlp failures,
+  sync errors, and system updates
 - **Server-side caching** — yt-dlp metadata + on-disk DASH segment cache
   with LRU eviction and parent-tunable size
 - **Self-hosted, single-binary deployment** behind a single Docker

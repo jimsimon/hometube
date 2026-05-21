@@ -84,13 +84,6 @@ export interface ChildSettings {
   chromecast_enabled: boolean;
 }
 
-export interface UsageLimit {
-  day_of_week: number;
-  max_hours: number;
-  allowed_start_time: string;
-  allowed_end_time: string;
-}
-
 export interface SearchItem {
   kind: "channel" | "playlist" | "video";
   id: string;
@@ -218,24 +211,6 @@ export interface StreamResponse {
   cast_manifest_url?: string | null;
   /** True when the video uses spherical/equirectangular projection (360°). */
   is_spherical?: boolean;
-}
-
-export interface AllowedWindow {
-  start: string; // "HH:MM"
-  end: string;
-}
-
-export interface UsageLimitResponse {
-  reason: "limit_exceeded" | "outside_window";
-  remaining_seconds: number;
-  allowed_window?: AllowedWindow | null;
-}
-
-export interface HeartbeatResponse {
-  remaining_seconds: number | null;
-  allowed_window: AllowedWindow | null;
-  limit_exceeded: boolean;
-  reason?: "limit_exceeded" | "outside_window";
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +362,6 @@ export interface SearchLogEntry {
 }
 
 export type NotificationType =
-  | "time_limit_approaching"
-  | "time_limit_reached"
   | "ytdlp_failure"
   | "new_search_term"
   | "system_update";

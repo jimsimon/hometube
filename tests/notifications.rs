@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use common::boot_with_parent_and_child;
 use hometube::models::account::AccountType;
 use hometube::services::notifications::{
-    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE, TYPE_TIME_LIMIT_REACHED,
+    self, TYPE_NEW_SEARCH_TERM, TYPE_SYSTEM_UPDATE,
 };
 
 #[tokio::test]
@@ -66,10 +66,10 @@ async fn mark_read_decrements_unread_count() {
     notifications::dispatch(
         &app.pool,
         auth.account_id,
-        TYPE_TIME_LIMIT_REACHED,
-        "Limit",
-        "limit reached",
-        &serde_json::json!({"child_account_id": 1}),
+        TYPE_SYSTEM_UPDATE,
+        "Update available",
+        "system update ready",
+        &serde_json::json!({"version": "1.2.3"}),
     )
     .await
     .unwrap();

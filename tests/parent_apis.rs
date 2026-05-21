@@ -174,68 +174,6 @@ async fn child_settings_rejects_bad_max_quality() {
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn usage_limits_round_trip() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let child_id = app.child_id.unwrap();
-
-    // Empty initially.
-    let res = app
-        .server
-        .get(&format!("/api/children/{child_id}/usage-limits"))
-        .await;
-    let body: serde_json::Value = res.json();
-    assert!(body.as_array().unwrap().is_empty());
-
-    // Set Mon-Fri.
-    let limits: Vec<serde_json::Value> = (1..=5)
-        .map(|d| {
-            json!({
-                "day_of_week": d,
-                "max_hours": 2.0,
-                "allowed_start_time": "08:00",
-                "allowed_end_time": "20:00",
-            })
-        })
-        .collect();
-    let res = app
-        .server
-        .put(&format!("/api/children/{child_id}/usage-limits"))
-        .json(&limits)
-        .await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    assert_eq!(body.as_array().unwrap().len(), 5);
-}
-
-#[tokio::test]
-async fn usage_limits_rejects_invalid_day() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let child_id = app.child_id.unwrap();
-    let res = app
-        .server
-        .put(&format!("/api/children/{child_id}/usage-limits"))
-        .json(&json!([
-            { "day_of_week": 99, "max_hours": 1.0, "allowed_start_time": "08:00", "allowed_end_time": "20:00" }
-        ]))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn usage_stats_returns_zero_for_fresh_child() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
-    let child_id = app.child_id.unwrap();
-    let res = app
-        .server
-        .get(&format!("/api/children/{child_id}/usage-stats"))
-        .await;
-    assert!(res.status_code().is_success());
-    let body: serde_json::Value = res.json();
-    // The schema includes `today` + `weekly` arrays.
-    assert!(body["weekly"].is_array());
-}
-
 // ---------------------------------------------------------------------------
 // Blocked videos.
 // ---------------------------------------------------------------------------

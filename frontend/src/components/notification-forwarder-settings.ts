@@ -59,8 +59,6 @@ interface ConfigResponse {
 
 const TYPE_LABELS: Record<string, string> = {
   ytdlp_failure: "yt-dlp failures",
-  time_limit_approaching: "Time limit approaching",
-  time_limit_reached: "Time limit reached",
   new_search_term: "New search term",
   system_update: "System updates",
   sync_error: "Sync errors",

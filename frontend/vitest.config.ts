@@ -39,7 +39,6 @@ export default defineConfig({
         'src/components/theme-toggle.ts',
         'src/components/account-selector.ts',
         'src/components/allowlist-manager.ts',
-        'src/components/usage-limit-overlay.ts',
         'src/components/notification-bell.ts',
         'src/components/pin-entry-dialog.ts',
         'src/components/loading-spinner.ts',

@@ -30,7 +30,6 @@ use crate::middleware::{
     account_type::{require_child, require_parent},
     auth::session_layer,
     setup_redirect::setup_redirect,
-    usage_limit::enforce_usage_limit,
 };
 use crate::state::AppState;
 
@@ -127,18 +126,10 @@ pub fn router(state: AppState) -> Router {
             "/api/children/{id}/blocked/{video_id}",
             axum::routing::delete(blocked::delete),
         )
-        // Child settings + usage limits + stats
+        // Child settings
         .route(
             "/api/children/{id}/settings",
             get(child_settings::get_settings).put(child_settings::update_settings),
-        )
-        .route(
-            "/api/children/{id}/usage-limits",
-            get(child_settings::get_limits).put(child_settings::update_limits),
-        )
-        .route(
-            "/api/children/{id}/usage-stats",
-            get(child_settings::usage_stats),
         )
         // Cron job management
         .route("/api/cron/jobs", get(cron::list_jobs))
@@ -277,9 +268,8 @@ pub fn router(state: AppState) -> Router {
         );
 
     // -----------------------------------------------------------------
-    // Video proxy + playback. Open to both parents and children, but
-    // gated through the usage-limit middleware for children. Access
-    // control (allowlist) is enforced inside each handler via
+    // Video proxy + playback. Open to both parents and children.
+    // Access control (allowlist) is enforced inside each handler via
     // [`crate::services::access::can_child_view`].
     //
     // The proxy endpoints (format / thumbnail) additionally pass
@@ -311,8 +301,7 @@ pub fn router(state: AppState) -> Router {
             "/api/videos/{video_id}/captions/{lang}",
             get(videos::get_caption),
         )
-        .merge(proxy_routes)
-        .route_layer(from_fn_with_state(state.clone(), enforce_usage_limit));
+        .merge(proxy_routes);
 
     // -----------------------------------------------------------------
     // Child feed + heartbeat. Used by the child home page and the
@@ -417,17 +406,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/complete", post(setup::complete));
 
     // -----------------------------------------------------------------
-    // HTML pages. The /child/video/:id page is layered with the
-    // usage-limit middleware (matching the plan's coordination notes)
-    // so a child can't bypass the cap by deep-linking. On a 403 the
-    // middleware returns JSON, which the browser displays as plain
-    // text — by the time the player can issue an API call the
-    // <hometube-usage-limit-overlay> takes over and shows a friendly
-    // dialog.
+    // HTML pages.
     // -----------------------------------------------------------------
-    let video_page = Router::new()
-        .route("/child/video/{video_id}", get(pages::child_video))
-        .route_layer(from_fn_with_state(state.clone(), enforce_usage_limit));
+    let video_page = Router::new().route("/child/video/{video_id}", get(pages::child_video));
 
     let page_routes = Router::new()
         .route("/", get(pages::root_or_setup))

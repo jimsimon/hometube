@@ -297,26 +297,3 @@ fn ensure_writable_cookies_path() {
     });
 }
 
-/// Convenience: insert a usage limit row for a child for a single
-/// day-of-week (0=Sunday).
-pub async fn insert_usage_limit(
-    pool: &SqlitePool,
-    child_id: i64,
-    day_of_week: i64,
-    max_hours: f64,
-    start: &str,
-    end: &str,
-) {
-    sqlx::query(
-        "INSERT INTO usage_limits (child_account_id, day_of_week, max_hours, allowed_start_time, allowed_end_time) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(child_id)
-    .bind(day_of_week)
-    .bind(max_hours)
-    .bind(start)
-    .bind(end)
-    .execute(pool)
-    .await
-    .expect("insert usage_limit");
-}
