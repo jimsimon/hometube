@@ -471,8 +471,7 @@ struct ChildVideoUnavailableTemplate {
     videos: Vec<VideoCardData>,
 }
 
-/// Arguments for [`render_video_unavailable`] and
-/// [`render_video_unavailable_with_suggestions`]. Grouped into a struct
+/// Arguments for [`render_video_unavailable`]. Grouped into a struct
 /// so callers don't have to remember positional order across the
 /// growing field list (display name, downloads flag, video id, etc.).
 pub struct VideoUnavailable {
@@ -494,23 +493,6 @@ pub fn render_video_unavailable(args: VideoUnavailable) -> AppResult<Response> {
         video_id: args.video_id,
         message: args.message,
         videos: Vec::new(),
-    };
-    Ok(Html(tpl.render()?).into_response())
-}
-
-/// Variant of [`render_video_unavailable`] that includes a list of
-/// suggested videos rendered via the SSR
-/// [`partials/video-grid.html`] include.
-pub fn render_video_unavailable_with_suggestions(
-    args: VideoUnavailable,
-    videos: Vec<VideoCardData>,
-) -> AppResult<Response> {
-    let tpl = ChildVideoUnavailableTemplate {
-        display_name: args.display_name,
-        downloads_enabled: args.downloads_enabled,
-        video_id: args.video_id,
-        message: args.message,
-        videos,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -848,6 +830,19 @@ pub async fn child_video(
     }
 }
 
+/// Auth gate for every `/child/*` page handler.
+///
+/// On a child account, fetches the [`ChildNavContext`] (currently just
+/// `downloads_enabled`) and passes it into the synchronous render
+/// closure. Parents are bounced to `/parent/home`; everyone else to `/`.
+///
+/// The settings fetch runs serially before the closure. That's
+/// intentional: every handler that uses this helper has a sync render
+/// closure with no other I/O to overlap with, so there's nothing for
+/// `tokio::join!` to gain. Handlers that *do* have additional async
+/// work to overlap (`child_home`, `child_hidden`, `child_video`) skip
+/// this helper and call [`fetch_downloads_enabled`] directly inside a
+/// `tokio::join!`.
 async fn require_child<F>(
     state: &AppState,
     current: Option<CurrentAccount>,
