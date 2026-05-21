@@ -246,6 +246,13 @@ export interface LikeRow {
    */
   channel_id: string | null;
   channel_title: string | null;
+  /**
+   * Video length in seconds. Captured at like-time so the
+   * `/child/liked` grid can render a duration badge without a follow-up
+   * metadata fetch. May be `null` for likes recorded before migration
+   * `019` or when the player couldn't determine the duration.
+   */
+  duration_seconds: number | null;
   liked_at: number;
   /**
    * `true` when the liked video is reachable through the child's

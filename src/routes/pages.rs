@@ -424,9 +424,16 @@ pub async fn child_liked(
 /// Best-effort: errors are logged and collapse to an empty list so the
 /// page still renders.
 async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCardData> {
-    type Row = (String, Option<String>, Option<String>, Option<String>);
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
-        "SELECT l.video_id, l.video_title, l.video_thumbnail_url, l.channel_title \
+        "SELECT l.video_id, l.video_title, l.video_thumbnail_url, l.channel_title, \
+                l.duration_seconds \
          FROM video_likes l \
          LEFT JOIN allowlisted_videos a \
            ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
@@ -452,12 +459,14 @@ async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCa
         Ok(rs) => rs
             .into_iter()
             .map(
-                |(video_id, title, thumbnail_url, channel_title)| VideoCardData {
+                |(video_id, title, thumbnail_url, channel_title, duration_seconds)| VideoCardData {
                     video_id,
                     title: title.unwrap_or_default(),
                     thumbnail_url,
                     channel_title,
-                    duration_label: None,
+                    duration_label: duration_seconds
+                        .filter(|d| *d > 0)
+                        .map(VideoCardData::format_duration),
                 },
             )
             .collect(),

@@ -52,6 +52,15 @@ export class LikeButton extends LitElement {
   @property({ type: String, attribute: "channel-title" })
   channelTitle = "";
 
+  /**
+   * Video length in seconds. Persisted on the like row so the liked
+   * grid can render a duration badge. The player already has this via
+   * `metadata.duration_seconds`; pass it through to avoid re-fetching
+   * yt-dlp metadata. Optional; `0` is treated as "unknown".
+   */
+  @property({ type: Number, attribute: "duration-seconds" })
+  durationSeconds = 0;
+
   @state() private liked = false;
   @state() private busy = false;
   @state() private error = "";
@@ -138,6 +147,7 @@ export class LikeButton extends LitElement {
           thumbnail_url: this.thumbnailUrl || null,
           channel_id: this.channelId || null,
           channel_title: this.channelTitle || null,
+          duration_seconds: this.durationSeconds > 0 ? this.durationSeconds : null,
         };
         await api.post(`/api/likes/${encodeURIComponent(this.videoId)}`, body);
         this.liked = true;

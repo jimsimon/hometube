@@ -37,6 +37,10 @@ pub struct LikeBody {
     /// `allowlisted_channels` without re-fetching yt-dlp metadata.
     pub channel_id: Option<String>,
     pub channel_title: Option<String>,
+    /// Video length in seconds. Captured at like-time from the player
+    /// so the `/child/liked` grid can render a duration badge without
+    /// re-fetching yt-dlp metadata.
+    pub duration_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -47,6 +51,7 @@ pub struct LikeRow {
     pub video_thumbnail_url: Option<String>,
     pub channel_id: Option<String>,
     pub channel_title: Option<String>,
+    pub duration_seconds: Option<i64>,
     pub liked_at: i64,
     /// `true` when the child can currently play the liked video.
     /// Matches the SQL-expressible portion of `can_child_view`: the
@@ -66,6 +71,7 @@ type LikeRowTuple = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<i64>,
     i64,
     i64,
 );
@@ -82,7 +88,7 @@ type LikeRowTuple = (
 
 const LIKE_LIST_SQL: &str = concat!(
     "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-            l.channel_id, l.channel_title, l.liked_at, \
+            l.channel_id, l.channel_title, l.duration_seconds, l.liked_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
@@ -102,7 +108,7 @@ const LIKE_LIST_SQL: &str = concat!(
 
 const LIKE_ONE_SQL: &str = concat!(
     "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-            l.channel_id, l.channel_title, l.liked_at, \
+            l.channel_id, l.channel_title, l.duration_seconds, l.liked_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
@@ -127,6 +133,7 @@ fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
         video_thumbnail_url,
         channel_id,
         channel_title,
+        duration_seconds,
         liked_at,
         visible,
     ) = tuple;
@@ -137,6 +144,7 @@ fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
         video_thumbnail_url,
         channel_id,
         channel_title,
+        duration_seconds,
         liked_at,
         visible: visible != 0,
     }
@@ -178,6 +186,7 @@ pub async fn like(
         thumbnail_url: thumb,
         channel_id,
         channel_title,
+        duration_seconds,
     } = body.map(|Json(b)| b).unwrap_or_default();
     // Treat empty strings as absent so the upsert's `COALESCE` keeps any
     // previously-stored value rather than overwriting it with "".
@@ -185,17 +194,21 @@ pub async fn like(
     let thumb = thumb.filter(|s| !s.trim().is_empty());
     let channel_id = channel_id.filter(|s| !s.trim().is_empty());
     let channel_title = channel_title.filter(|s| !s.trim().is_empty());
+    // A zero-or-negative duration is meaningless; treat as absent so a
+    // subsequent re-like with the real value isn't blocked by COALESCE.
+    let duration_seconds = duration_seconds.filter(|d| *d > 0);
 
     sqlx::query(
         "INSERT INTO video_likes \
             (child_account_id, video_id, video_title, video_thumbnail_url, \
-             channel_id, channel_title, is_deleted) \
-         VALUES (?, ?, ?, ?, ?, ?, 0) \
+             channel_id, channel_title, duration_seconds, is_deleted) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             video_title = COALESCE(excluded.video_title, video_likes.video_title), \
             video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, video_likes.video_thumbnail_url), \
             channel_id = COALESCE(excluded.channel_id, video_likes.channel_id), \
             channel_title = COALESCE(excluded.channel_title, video_likes.channel_title), \
+            duration_seconds = COALESCE(excluded.duration_seconds, video_likes.duration_seconds), \
             is_deleted = 0, \
             updated_at = unixepoch()",
     )
@@ -205,6 +218,7 @@ pub async fn like(
     .bind(&thumb)
     .bind(&channel_id)
     .bind(&channel_title)
+    .bind(duration_seconds)
     .execute(&state.db)
     .await?;
 
