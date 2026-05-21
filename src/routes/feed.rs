@@ -2,9 +2,18 @@
 //!
 //! Three read-only endpoints back the child UI:
 //!
-//! - `GET /api/feed/continue-watching` — recently-watched items from
-//!   `watch_history`, filtered through access control to drop videos
-//!   the parent has since revoked.
+//! - `GET /api/feed/continue-watching` — in-progress items from
+//!   `watch_history` (rows that have NOT yet reached the
+//!   [`is_effectively_finished`] threshold), filtered through access
+//!   control to drop videos the parent has since revoked.
+//! - `GET /api/feed/watch-again` — finished items from `watch_history`
+//!   (rows that HAVE reached [`is_effectively_finished`]), ordered by
+//!   most recently watched, also access-filtered. Within each feed's
+//!   recency window (the top `LIMIT` rows by `last_watched_at`), the
+//!   in-progress/finished partition is disjoint — but the two feeds
+//!   each fetch their own top-N independently before partitioning, so
+//!   a child with many recent rows of one kind may see fewer than N
+//!   items in the other.
 //! - `GET /api/feed/new-videos` — fresh uploads from each allowlisted
 //!   channel + each allowlisted playlist, deduped + sorted.
 //! - `GET /api/feed/up-next` — the next videos to play after the one
@@ -31,10 +40,13 @@ use crate::state::AppState;
 
 /// Default limit for "continue watching".
 const CONTINUE_LIMIT: i64 = 20;
-/// A video is considered "finished" (and dropped from continue-watching)
-/// once the saved position is within this many seconds of the end. Picks
-/// up the typical 5–15s of outro/credits that most viewers don't sit
-/// through but the player still records before pause/ended fires.
+/// Default limit for "watch again".
+const WATCH_AGAIN_LIMIT: i64 = 20;
+/// A video is considered "finished" (dropped from continue-watching,
+/// promoted to watch-again) once the saved position is within this many
+/// seconds of the end. Picks up the typical 5–15s of outro/credits that
+/// most viewers don't sit through but the player still records before
+/// pause/ended fires.
 const CONTINUE_TAIL_SECONDS: i64 = 15;
 /// …or once the saved position is at least this fraction of the
 /// duration, whichever triggers first. Catches short videos where the
@@ -60,6 +72,11 @@ pub struct ContinueWatchingItem {
 }
 
 /// `GET /api/feed/continue-watching`.
+///
+/// Returns in-progress videos — anything in `watch_history` that is
+/// not yet "effectively finished" (see [`is_effectively_finished`]).
+/// Completed videos are surfaced separately by `watch_again` so the
+/// two home rows show disjoint sets.
 pub async fn continue_watching(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -77,19 +94,45 @@ pub async fn continue_watching(
     .fetch_all(&state.db)
     .await?;
 
-    // Filter through access control + drop effectively-finished videos.
-    // `watch_history.channel_id` is the key bit: when a video was
-    // surfaced via an allowlisted channel, the per-row `channel_id`
-    // lets `can_child_view` find the channel allowlist hit. Rows that
-    // pre-date that column (NULL) fall back to a best-effort lookup
-    // against `feed_source_items`, batched into a single query so we
-    // don't add an N+1 to the existing per-row access check.
+    filter_watch_history_rows(&state.db, current.id, rows, |r| {
+        !is_effectively_finished(r.progress_seconds, r.duration_seconds)
+    })
+    .await
+}
+
+/// Common pipeline for `continue-watching` and `watch-again`:
+///
+/// 1. Resolve `channel_id` for legacy NULL-channel rows in a single
+///    batched query against `feed_source_items`.
+/// 2. Apply `keep` (the per-feed completion predicate).
+/// 3. Per-row access check via `can_child_view`, passing the (possibly
+///    legacy-resolved) channel_id so channel-allowlisted videos still
+///    surface.
+///
+/// Per-row access checks are intentional — the access rules involve
+/// blocked/hidden/allowlist tables across multiple dimensions and the
+/// row count is bounded (≤20). Folding them into SQL would not capture
+/// channel allowlist hits without first materialising the channel_id,
+/// which we already do here.
+async fn filter_watch_history_rows<T, F>(
+    db: &sqlx::SqlitePool,
+    child_id: i64,
+    rows: Vec<T>,
+    keep: F,
+) -> AppResult<Json<Vec<T>>>
+where
+    T: WatchHistoryRow,
+    F: Fn(&T) -> bool,
+{
+    // Build the legacy-lookup set from rows that both (a) pass the
+    // per-feed predicate and (b) are missing a stored channel_id. No
+    // point asking feed_source_items about rows we'll drop anyway.
     let legacy_ids: Vec<&str> = rows
         .iter()
-        .filter(|r| r.channel_id.is_none())
-        .map(|r| r.video_id.as_str())
+        .filter(|r| keep(r) && r.channel_id().is_none())
+        .map(|r| r.video_id())
         .collect();
-    let legacy_map = match lookup_channel_ids_for_videos(&state.db, &legacy_ids).await {
+    let legacy_map = match lookup_channel_ids_for_videos(db, &legacy_ids).await {
         Ok(map) => map,
         Err(err) => {
             // Don't fail the whole row over a transient cache lookup
@@ -100,7 +143,7 @@ pub async fn continue_watching(
             // exactly what bit us before.
             tracing::warn!(
                 error = %err,
-                "continue_watching: feed_source_items lookup failed; legacy NULL-channel rows may be hidden"
+                "watch_history feed: feed_source_items lookup failed; legacy NULL-channel rows may be hidden"
             );
             std::collections::HashMap::new()
         }
@@ -108,14 +151,13 @@ pub async fn continue_watching(
 
     let mut filtered = Vec::with_capacity(rows.len());
     for row in rows {
-        if is_effectively_finished(row.progress_seconds, row.duration_seconds) {
+        if !keep(&row) {
             continue;
         }
         let channel_id = row
-            .channel_id
-            .as_deref()
-            .or_else(|| legacy_map.get(&row.video_id).map(String::as_str));
-        if can_child_view(&state.db, current.id, &row.video_id, channel_id, &[])
+            .channel_id()
+            .or_else(|| legacy_map.get(row.video_id()).map(String::as_str));
+        if can_child_view(db, child_id, row.video_id(), channel_id, &[])
             .await
             .unwrap_or(false)
         {
@@ -123,6 +165,78 @@ pub async fn continue_watching(
         }
     }
     Ok(Json(filtered))
+}
+
+/// Common accessors used by [`filter_watch_history_rows`].
+trait WatchHistoryRow {
+    fn video_id(&self) -> &str;
+    fn channel_id(&self) -> Option<&str>;
+}
+
+impl WatchHistoryRow for ContinueWatchingItem {
+    fn video_id(&self) -> &str {
+        &self.video_id
+    }
+    fn channel_id(&self) -> Option<&str> {
+        self.channel_id.as_deref()
+    }
+}
+
+impl WatchHistoryRow for WatchAgainItem {
+    fn video_id(&self) -> &str {
+        &self.video_id
+    }
+    fn channel_id(&self) -> Option<&str> {
+        self.channel_id.as_deref()
+    }
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow, Clone)]
+pub struct WatchAgainItem {
+    pub video_id: String,
+    pub video_title: String,
+    pub video_thumbnail_url: Option<String>,
+    pub channel_title: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub last_watched_at: i64,
+    /// Server-side only: rows in this feed are by definition finished,
+    /// so the UI doesn't render a progress bar. Kept on the struct for
+    /// SQL hydration / future use, but omitted from the wire shape.
+    #[serde(skip_serializing)]
+    pub progress_seconds: i64,
+    /// See `ContinueWatchingItem::channel_id` — needed server-side for
+    /// the channel-allowlist access check.
+    #[serde(skip_serializing)]
+    pub channel_id: Option<String>,
+}
+
+/// `GET /api/feed/watch-again`.
+///
+/// Returns videos the child has finished (see [`is_effectively_finished`]),
+/// ordered by most recently watched. Within the recency window, this
+/// is the disjoint complement of `continue-watching` — see the module
+/// docstring for the caveat about each feed sampling its own top-N.
+pub async fn watch_again(
+    State(state): State<AppState>,
+    current: CurrentAccount,
+) -> AppResult<Json<Vec<WatchAgainItem>>> {
+    let rows: Vec<WatchAgainItem> = sqlx::query_as(
+        "SELECT video_id, video_title, video_thumbnail_url, channel_title, \
+                duration_seconds, progress_seconds, last_watched_at, channel_id \
+         FROM watch_history \
+         WHERE child_account_id = ? \
+         ORDER BY last_watched_at DESC \
+         LIMIT ?",
+    )
+    .bind(current.id)
+    .bind(WATCH_AGAIN_LIMIT)
+    .fetch_all(&state.db)
+    .await?;
+
+    filter_watch_history_rows(&state.db, current.id, rows, |r| {
+        is_effectively_finished(r.progress_seconds, r.duration_seconds)
+    })
+    .await
 }
 
 /// Best-effort batched `video_id → channel_id` lookup for
@@ -171,6 +285,12 @@ async fn lookup_channel_ids_for_videos(
 /// be treated as "done" for continue-watching purposes. Rows with no
 /// known duration are never auto-finished — we can't tell where the
 /// end is, so we let the user remove them by re-watching.
+///
+/// `progress_seconds == 0` is treated as not-finished by design: a row
+/// can land in `watch_history` with a zero (or never-incremented)
+/// position via the heartbeat path before the player has emitted any
+/// progress update. Promoting such rows to "finished" would surface
+/// videos the child never actually watched.
 fn is_effectively_finished(progress_seconds: i64, duration_seconds: Option<i64>) -> bool {
     let Some(duration) = duration_seconds else {
         return false;

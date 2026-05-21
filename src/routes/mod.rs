@@ -321,6 +321,7 @@ pub fn router(state: AppState) -> Router {
     // -----------------------------------------------------------------
     let child_routes = Router::new()
         .route("/api/feed/continue-watching", get(feed::continue_watching))
+        .route("/api/feed/watch-again", get(feed::watch_again))
         .route("/api/feed/new-videos", get(feed::new_videos))
         .route("/api/feed/up-next", get(feed::up_next))
         .route("/api/usage/heartbeat", post(usage::heartbeat))

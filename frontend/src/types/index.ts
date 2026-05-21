@@ -169,6 +169,15 @@ export interface ContinueWatchingItem {
   last_watched_at: number;
 }
 
+export interface WatchAgainItem {
+  video_id: string;
+  video_title: string;
+  video_thumbnail_url: string | null;
+  channel_title: string | null;
+  duration_seconds: number | null;
+  last_watched_at: number;
+}
+
 export interface NewVideoItem {
   video_id: string;
   title: string;

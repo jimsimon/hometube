@@ -226,6 +226,160 @@ async fn continue_watching_empty_for_fresh_child() {
     assert!(body.as_array().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn continue_watching_excludes_completed_videos() {
+    // Effectively-finished videos (per is_effectively_finished:
+    // within CONTINUE_TAIL_SECONDS of the end OR ≥CONTINUE_COMPLETION_RATIO
+    // of duration, whichever is later) should appear only under
+    // "Watch again", never under "Continue watching".
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Completed.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-done', 'Done', NULL, 'Ch', 100, 100, 3000)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    // In-progress.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-half', 'Half', NULL, 'Ch', 100, 30, 3001)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    for vid in ["vid-done", "vid-half"] {
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(child_id)
+        .bind(vid)
+        .bind(parent_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let body: serde_json::Value = app.server.get("/api/feed/continue-watching").await.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["vid-half"]);
+}
+
+// ---------------------------------------------------------------------------
+// Watch again
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn watch_again_returns_only_completed_videos() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Completed video (100% watched).
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-done', 'Done', NULL, 'Ch', 300, 300, 2000)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // In-progress (50%). Should NOT appear.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-half', 'Half', NULL, 'Ch', 300, 150, 2001)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Older completed (95% — at the ratio threshold).
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-old', 'Old', NULL, 'Ch', 100, 95, 1500)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Allowlist all three so access control isn't the filter.
+    for vid in ["vid-done", "vid-half", "vid-old"] {
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
+             VALUES (?, ?, 'T', ?)",
+        )
+        .bind(child_id)
+        .bind(vid)
+        .bind(parent_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let res = app.server.get("/api/feed/watch-again").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    // In-progress excluded; ordered by last_watched_at DESC.
+    assert_eq!(ids, vec!["vid-done", "vid-old"]);
+}
+
+#[tokio::test]
+async fn watch_again_excludes_access_revoked_videos() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+
+    // Completed but no allowlist entry — access denied.
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
+         channel_title, duration_seconds, progress_seconds, last_watched_at) \
+         VALUES (?, 'vid-revoked', 'Revoked', NULL, 'Ch', 100, 100, 1)",
+    )
+    .bind(child_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/feed/watch-again").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn watch_again_empty_for_fresh_child() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let res = app.server.get("/api/feed/watch-again").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert!(body.as_array().unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Up-next
 // ---------------------------------------------------------------------------
