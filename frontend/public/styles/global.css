@@ -194,44 +194,72 @@ main {
 
 /* ─── View transition animations ─────────────────────────────── */
 
-@keyframes slide-from-right {
-  from { transform: translateX(30px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-@keyframes slide-to-left {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(-30px); opacity: 0; }
-}
-@keyframes slide-from-left {
-  from { transform: translateX(-30px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-@keyframes slide-to-right {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(30px); opacity: 0; }
+/*
+ * We use a smooth cross-fade with a subtle scale rather than a horizontal
+ * slide. Slides on full page content tend to feel janky because the page
+ * has variable height (causing layout jumps) and the horizontal translate
+ * fights with the user's scroll position. A cross-fade with a gentle
+ * scale-up on the incoming page reads as a clean, seamless hand-off.
+ *
+ * Easing uses a "standard" Material-style cubic-bezier for natural motion,
+ * and durations are tuned so the old/new overlap fully (no flash of empty
+ * background between frames).
+ */
+
+@keyframes hometube-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
 }
 
+@keyframes hometube-fade-in {
+  from { opacity: 0; transform: scale(0.99); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Default cross-fade for any view transition on page-content. */
+::view-transition-old(page-content) {
+  animation: hometube-fade-out 180ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+::view-transition-new(page-content) {
+  animation: hometube-fade-in 260ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* Forward navigation: incoming page scales up slightly from 0.99. */
 :root:active-view-transition-type(forward) {
-  &::view-transition-old(page-content) {
-    animation: slide-to-left 0.25s ease-out;
-  }
   &::view-transition-new(page-content) {
-    animation: slide-from-right 0.25s ease-out;
+    animation: hometube-fade-in 260ms cubic-bezier(0.4, 0, 0.2, 1) both;
   }
+}
+
+/* Backward navigation: incoming page scales down slightly from 1.01,
+   giving a subtle "zooming out" feel that signals going back. */
+@keyframes hometube-fade-in-back {
+  from { opacity: 0; transform: scale(1.01); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 :root:active-view-transition-type(backward) {
-  &::view-transition-old(page-content) {
-    animation: slide-to-right 0.25s ease-out;
-  }
   &::view-transition-new(page-content) {
-    animation: slide-from-left 0.25s ease-out;
+    animation: hometube-fade-in-back 260ms cubic-bezier(0.4, 0, 0.2, 1) both;
   }
 }
 
+/* Hero element (video thumbnail → player) morphs smoothly. */
 ::view-transition-group(video-hero) {
-  animation-duration: 0.3s;
-  animation-timing-function: ease-in-out;
+  animation-duration: 320ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Respect reduced motion preferences. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(page-content),
+  ::view-transition-new(page-content) {
+    animation-duration: 1ms;
+  }
+  ::view-transition-group(video-hero) {
+    animation-duration: 1ms;
+  }
 }
 
 /* ─── Utilities ──────────────────────────────────────────────── */
