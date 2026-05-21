@@ -361,10 +361,7 @@ export interface SearchLogEntry {
   searched_at: number;
 }
 
-export type NotificationType =
-  | "ytdlp_failure"
-  | "new_search_term"
-  | "system_update";
+export type NotificationType = "ytdlp_failure" | "new_search_term" | "system_update";
 
 export interface NotificationRow {
   id: number;

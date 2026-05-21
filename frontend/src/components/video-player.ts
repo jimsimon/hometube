@@ -90,12 +90,7 @@ import {
   getStorageEstimate,
   saveVideoToOpfs,
 } from "../services/offline.js";
-import type {
-  CaptionTrack,
-  ChildSettings,
-  StreamResponse,
-  VideoMetadata,
-} from "../types/index.js";
+import type { CaptionTrack, ChildSettings, StreamResponse, VideoMetadata } from "../types/index.js";
 
 import "./sleep-timer.js";
 import "./like-button.js";
@@ -1454,7 +1449,6 @@ export class VideoPlayer extends LitElement {
         : null}
     `;
   }
-
 }
 
 declare global {
