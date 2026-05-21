@@ -136,7 +136,7 @@ async fn can_child_view_denies_hidden_even_if_allowlisted() {
     .unwrap();
 
     // Pre-hide check: visible.
-    assert!(can_child_view(&app.pool, child_id, "vid-allow", None, &[])
+    assert!(can_child_view(&app.pool, child_id, "vid-allow", None)
         .await
         .unwrap());
 
@@ -149,14 +149,14 @@ async fn can_child_view_denies_hidden_even_if_allowlisted() {
     assert_eq!(res.status_code(), StatusCode::OK);
 
     // Now denied.
-    assert!(!can_child_view(&app.pool, child_id, "vid-allow", None, &[])
+    assert!(!can_child_view(&app.pool, child_id, "vid-allow", None)
         .await
         .unwrap());
 
     // Unhide → visible again.
     let res = app.server.delete("/api/hidden/vid-allow").await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
-    assert!(can_child_view(&app.pool, child_id, "vid-allow", None, &[])
+    assert!(can_child_view(&app.pool, child_id, "vid-allow", None)
         .await
         .unwrap());
 }

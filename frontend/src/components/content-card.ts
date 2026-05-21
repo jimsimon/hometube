@@ -6,7 +6,7 @@
  *     channel, and optional duration badge. Used in grids.
  *   - "compact": horizontal layout with smaller thumbnail (8rem × 4.5rem)
  *     alongside title and meta text. Used in list contexts (up-next,
- *     allowlist manager, playlist detail).
+ *     allowlist manager).
  *
  * Supports a default `<slot>` for action buttons (e.g., "Remove",
  * "Preview", "Add to allowlist") rendered below the card meta.

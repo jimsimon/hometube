@@ -429,7 +429,7 @@ export class FeedRefresherSettings extends LitElement {
           <div class="metric">
             <div class="metric-value">${c.total_sources}</div>
             <div class="metric-label">Total sources</div>
-            <div class="hint">Allowlisted channels + playlists</div>
+            <div class="hint">Allowlisted channels</div>
           </div>
         </div>
       </section>

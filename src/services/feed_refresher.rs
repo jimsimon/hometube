@@ -36,9 +36,9 @@ use sqlx::SqlitePool;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use crate::services::feed_cache::{self, DueSource, ItemRow, KIND_CHANNEL, KIND_PLAYLIST};
+use crate::services::feed_cache::{self, DueSource, ItemRow, KIND_CHANNEL};
 use crate::services::youtube::{
-    PlaylistItem as SidecarPlaylistItem, SidecarRefresherOutcome, YoutubeClient,
+    ChannelVideoItem as SidecarChannelVideoItem, SidecarRefresherOutcome, YoutubeClient,
 };
 use crate::services::youtube_rss::{self, PollOutcome};
 
@@ -55,9 +55,7 @@ const DEAD_SOURCE_DEFER_SECS: i64 = 365 * 24 * 60 * 60;
 
 /// How many consecutive sidecar `NotFound` responses we require before
 /// shelving a source as dead. A single 404 isn't enough because
-/// playlists routinely flip between public and private (so privacy
-/// toggles would otherwise permanently shelve them), and channels can
-/// briefly 404 during YouTube-side glitches. Each preliminary 404
+/// channels can briefly 404 during YouTube-side glitches. Each preliminary 404
 /// records a normal poll-failure (incrementing `consecutive_errors`
 /// and applying exponential backoff), so the source gets retried
 /// progressively less often until either it recovers or we've seen
@@ -508,12 +506,6 @@ pub async fn run(pool: SqlitePool) {
 /// - **Channel sources** try RSS first (cheapest, lowest anti-bot
 ///   risk). On RSS error, fall back to the youtubei.js sidecar if the
 ///   per-source and aggregate rate caps permit.
-/// - **Playlist sources** have no RSS endpoint, so they go straight to
-///   the sidecar fallback. The same rate caps apply. When the
-///   sidecar fallback is disabled or unavailable, playlists are
-///   shelved (1 year defer) — preserving the pre-fallback behaviour
-///   so we don't accumulate `consecutive_errors` forever on a kind
-///   we have no transport for.
 #[tracing::instrument(
     name = "feed.poll",
     skip_all,
@@ -532,60 +524,8 @@ async fn poll_one(
 ) -> crate::error::AppResult<()> {
     let now = unix_now();
 
-    if source.kind == KIND_PLAYLIST {
-        // No RSS transport for playlists, so the sidecar is the
-        // only path. Three sub-cases, each handled differently:
-        match yt {
-            // (1) Sidecar available and rate caps permit → poll.
-            Some(client) if fallback_caps_permit(source, cfg, fallbacks_this_hour, now) => {
-                run_sidecar_fallback(pool, client, source, cfg, now, None).await?;
-                return Ok(());
-            }
-            // (2) Sidecar available but caps temporarily deny.
-            // This is a *transient* condition (per-source min interval
-            // or aggregate per-hour cap), so reschedule the normal
-            // interval and try again next cycle. Using
-            // `record_poll_deferred` (not `record_poll_skipped`) so
-            // we don't clobber `consecutive_errors` if the source had
-            // a real failure history before being rate-capped.
-            Some(_) => {
-                let next = now + jittered_interval(cfg.channel_interval);
-                feed_cache::record_poll_deferred(
-                    pool,
-                    &source.kind,
-                    &source.source_id,
-                    "playlist: sidecar fallback rate-capped",
-                    next,
-                    now,
-                )
-                .await?;
-                return Ok(());
-            }
-            // (3) Sidecar disabled (kill switch) or client failed to
-            // construct → no working transport at all → shelve for a
-            // year so the row doesn't keep getting retried with
-            // nothing to call. Flipping the kill switch back on, or
-            // restarting the sidecar, will pick the row up again as
-            // soon as `next_poll_at` is manually advanced (or after
-            // the 1 year defer elapses).
-            None => {
-                let one_year_secs: i64 = 365 * 24 * 60 * 60;
-                feed_cache::record_poll_skipped(
-                    pool,
-                    &source.kind,
-                    &source.source_id,
-                    "playlist: sidecar fallback unavailable",
-                    now + one_year_secs,
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-    }
-
     if source.kind != KIND_CHANNEL {
-        // Unknown kind. Shelve it the same way old playlist handling
-        // worked so the row doesn't poison the diagnostics page.
+        // Unknown kind. Shelve so the row doesn't poison diagnostics.
         let one_year_secs: i64 = 365 * 24 * 60 * 60;
         feed_cache::record_poll_skipped(
             pool,
@@ -765,16 +705,12 @@ async fn run_sidecar_fallback(
             yt.refresher_list_channel_videos(&source.source_id, SIDECAR_FALLBACK_MAX_ITEMS)
                 .await
         }
-        KIND_PLAYLIST => {
-            yt.refresher_list_playlist_items(&source.source_id, SIDECAR_FALLBACK_MAX_ITEMS)
-                .await
-        }
         unknown => {
-            // Shouldn't happen — `poll_one`'s `KIND_PLAYLIST` /
-            // `KIND_CHANNEL` / shelve-and-return guards already
-            // filter unknown kinds before we get here — but be
-            // defensive rather than panicking inside the refresher
-            // if a new kind is introduced upstream of this match.
+            // Shouldn't happen — `poll_one`'s `KIND_CHANNEL` /
+            // shelve-and-return guards already filter unknown kinds
+            // before we get here — but be defensive rather than
+            // panicking inside the refresher if a new kind is
+            // introduced upstream of this match.
             SidecarRefresherOutcome::Error(format!("unsupported kind: {unknown}"))
         }
     };
@@ -811,9 +747,9 @@ async fn run_sidecar_fallback(
             );
         }
         SidecarRefresherOutcome::NotFound => {
-            // Debounced shelve: a single 404 isn't enough — privacy
-            // toggles on playlists and brief YouTube-side glitches on
-            // channels would otherwise permanently shelve live rows.
+            // Debounced shelve: a single 404 isn't enough — brief
+            // YouTube-side glitches on channels would otherwise
+            // permanently shelve live rows.
             // Require `SIDECAR_NOTFOUND_SHELVE_THRESHOLD` consecutive
             // failures (including this one), counted via the existing
             // `consecutive_errors` column.
@@ -887,7 +823,7 @@ async fn run_sidecar_fallback(
     Ok(())
 }
 
-/// Adapter from the sidecar's `PlaylistItem` shape to the
+/// Adapter from the sidecar's `ChannelVideoItem` shape to the
 /// `feed_cache::ItemRow` shape `replace_source_items` consumes.
 ///
 /// Sidecar `published_at` is a human-readable relative string
@@ -901,7 +837,7 @@ async fn run_sidecar_fallback(
 /// can't be parsed we leave `published_at = None`; the
 /// `feed_for_child` query then falls back to `fetched_at` via
 /// `COALESCE(published_at, fetched_at) DESC`.
-fn sidecar_item_to_row(item: &SidecarPlaylistItem, now: i64) -> ItemRow {
+fn sidecar_item_to_row(item: &SidecarChannelVideoItem, now: i64) -> ItemRow {
     // Pick a thumbnail by descending quality, mirroring the heuristic
     // used elsewhere (routes/feed.rs `pick_thumbnail` and similar).
     let thumbnail_url = ["maxres", "high", "standard", "medium", "default"]

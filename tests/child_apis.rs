@@ -1,8 +1,8 @@
 //! Broad coverage of child-only routes via direct DB seeding.
 //!
 //! Many child routes upsert YouTube state at write time
-//! (subscriptions, likes, playlists library-add) but accept simple
-//! reads or deletes against pre-existing rows. We seed the DB
+//! (subscriptions, likes) but accept simple reads or deletes against
+//! pre-existing rows. We seed the DB
 //! directly to drive the route handlers through their happy paths
 //! without going off-network.
 
@@ -324,33 +324,6 @@ async fn likes_list_marks_inbound_youtube_likes_invisible_until_allowlisted() {
         .find(|l| l["video_id"] == "app-allowed")
         .expect("allowlisted row present");
     assert_eq!(allowed["visible"], true);
-}
-
-#[tokio::test]
-async fn playlists_create_and_list() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app
-        .server
-        .post("/api/playlists")
-        .json(&json!({ "title": "My Mix", "description": "fun stuff" }))
-        .await;
-    assert!(res.status_code().is_success());
-
-    let res = app.server.get("/api/playlists").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    assert_eq!(body[0]["title"], "My Mix");
-}
-
-#[tokio::test]
-async fn playlists_create_with_empty_title_400() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app
-        .server
-        .post("/api/playlists")
-        .json(&json!({ "title": "", "description": "" }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -44,14 +44,12 @@ pub mod child_settings;
 pub mod cron;
 pub mod downloads;
 pub mod family;
-pub mod family_playlists;
 pub mod feed;
 pub mod hidden;
 pub mod likes;
 pub mod notifications;
 pub mod notifications_config;
 pub mod pages;
-pub mod playlists;
 pub mod preview;
 pub mod search;
 pub mod setup;
@@ -98,15 +96,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/children/{id}/allowlist/channels/{channel_id}",
             axum::routing::delete(allowlist::delete_channel),
-        )
-        // Allowlist: playlists
-        .route(
-            "/api/children/{id}/allowlist/playlists",
-            get(allowlist::list_playlists).post(allowlist::add_playlist),
-        )
-        .route(
-            "/api/children/{id}/allowlist/playlists/{playlist_id}",
-            axum::routing::delete(allowlist::delete_playlist),
         )
         // Allowlist: videos
         .route(
@@ -187,10 +176,6 @@ pub fn router(state: AppState) -> Router {
             "/api/preview/channel/{channel_id}",
             get(preview::preview_channel),
         )
-        .route(
-            "/api/preview/playlist/{playlist_id}",
-            get(preview::preview_playlist),
-        )
         // Watch-activity dashboard (Phase 17)
         .route(
             "/api/children/{id}/activity/summary",
@@ -236,36 +221,6 @@ pub fn router(state: AppState) -> Router {
             post(notifications_config::test),
         )
         .route_layer(axum::middleware::from_fn(require_parent));
-
-    // -----------------------------------------------------------------
-    // Family playlists (Phase 18). Both parents and children hit these
-    // endpoints — the handlers themselves enforce the role-specific
-    // rules (children only see assigned playlists; mutations are
-    // parent-only).
-    // -----------------------------------------------------------------
-    let family_playlist_routes = Router::new()
-        .route(
-            "/api/family-playlists",
-            get(family_playlists::list).post(family_playlists::create),
-        )
-        .route(
-            "/api/family-playlists/{id}",
-            get(family_playlists::detail)
-                .put(family_playlists::update)
-                .delete(family_playlists::delete),
-        )
-        .route(
-            "/api/family-playlists/{id}/videos",
-            post(family_playlists::add_video),
-        )
-        .route(
-            "/api/family-playlists/{id}/videos/reorder",
-            put(family_playlists::reorder),
-        )
-        .route(
-            "/api/family-playlists/{id}/videos/{video_id}",
-            delete_route(family_playlists::remove_video),
-        );
 
     // -----------------------------------------------------------------
     // Video proxy + playback. Open to both parents and children.
@@ -319,8 +274,8 @@ pub fn router(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn(require_child));
 
     // -----------------------------------------------------------------
-    // Child-only APIs: channels, subscriptions, playlists, likes,
-    // sleep timer, and "my settings" read-only view.
+    // Child-only APIs: channels, subscriptions, likes, sleep timer,
+    // and "my settings" read-only view.
     // -----------------------------------------------------------------
     let child_only = Router::new()
         // Channels
@@ -337,27 +292,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/subscriptions/{channel_id}",
             delete_route(subscriptions::unsubscribe),
-        )
-        // Playlists
-        .route(
-            "/api/playlists",
-            get(playlists::list).post(playlists::create),
-        )
-        .route("/api/playlists/library", post(playlists::add_library))
-        .route(
-            "/api/playlists/{id}",
-            get(playlists::detail)
-                .put(playlists::update)
-                .delete(playlists::delete),
-        )
-        .route("/api/playlists/{id}/videos", post(playlists::add_video))
-        .route(
-            "/api/playlists/{id}/videos/reorder",
-            put(playlists::reorder_videos),
-        )
-        .route(
-            "/api/playlists/{id}/videos/{video_id}",
-            delete_route(playlists::remove_video),
         )
         // Likes
         .route("/api/likes", get(likes::list))
@@ -421,14 +355,10 @@ pub fn router(state: AppState) -> Router {
         .route("/parent/family", get(pages::parent_family))
         .route("/parent/system", get(pages::parent_system))
         .route("/parent/activity", get(pages::parent_activity))
-        .route("/parent/playlists", get(pages::parent_playlists))
-        .route("/parent/playlist/{id}", get(pages::parent_playlist))
         .route("/parent/preview/{kind}/{id}", get(pages::parent_preview))
         .route("/child/home", get(pages::child_home))
         .route("/child/channels", get(pages::child_channels))
         .route("/child/channel/{channel_id}", get(pages::child_channel))
-        .route("/child/playlists", get(pages::child_playlists))
-        .route("/child/playlist/{id}", get(pages::child_playlist))
         .route("/child/hidden", get(pages::child_hidden))
         .route("/child/downloads", get(pages::child_downloads))
         .route("/child/search", get(pages::child_search));
@@ -477,7 +407,6 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes)
         .merge(setup_routes)
         .merge(parent_only)
-        .merge(family_playlist_routes)
         .merge(video_routes)
         .merge(child_routes)
         .merge(child_only)

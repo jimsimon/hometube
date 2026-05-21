@@ -1,7 +1,7 @@
 //! Mirror of `parent_only.rs` for the child-only sub-router.
 //!
 //! Routes scoped through `require_child` (feed, heartbeat, search,
-//! channels, subscriptions, playlists, likes, sleep timer,
+//! channels, subscriptions, likes, sleep timer,
 //! downloads) all reject parent sessions with 403.
 
 mod common;
@@ -18,7 +18,6 @@ const CHILD_GET_ENDPOINTS: &[&str] = &[
     "/api/feed/watch-again",
     "/api/feed/new-videos",
     "/api/subscriptions",
-    "/api/playlists",
     "/api/likes",
     "/api/timer",
     "/api/downloads",

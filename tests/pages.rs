@@ -19,13 +19,11 @@ const PARENT_ONLY_PAGES: &[&str] = &[
     "/parent/family",
     "/parent/system",
     "/parent/activity",
-    "/parent/playlists",
 ];
 
 const CHILD_ONLY_PAGES: &[&str] = &[
     "/child/home",
     "/child/channels",
-    "/child/playlists",
     "/child/downloads",
     "/child/search",
 ];

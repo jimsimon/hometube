@@ -187,7 +187,7 @@ footer[slot="footer"] {
   line-height: 1.6;
 }
 
-/* Responsive grid for video/channel/playlist cards. */
+/* Responsive grid for video/channel cards. */
 .card-grid {
   display: grid;
   gap: var(--wa-space-m);

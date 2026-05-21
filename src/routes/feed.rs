@@ -15,9 +15,9 @@
 //!   a child with many recent rows of one kind may see fewer than N
 //!   items in the other.
 //! - `GET /api/feed/new-videos` — fresh uploads from each allowlisted
-//!   channel + each allowlisted playlist, deduped + sorted.
+//!   channel, deduped + sorted.
 //! - `GET /api/feed/up-next` — the next videos to play after the one
-//!   currently on screen, given a `from=playlist:ID|channel:ID|video:ID`
+//!   currently on screen, given a `from=channel:ID|video:ID`
 //!   context. Drops blocked + access-denied items.
 
 use std::collections::HashSet;
@@ -32,9 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 use crate::middleware::auth::CurrentAccount;
-use crate::services::access::{
-    can_child_view, child_allowlisted_channel_ids, child_allowlisted_playlist_ids,
-};
+use crate::services::access::{can_child_view, child_allowlisted_channel_ids};
 use crate::services::feed_cache;
 use crate::state::AppState;
 
@@ -157,7 +155,7 @@ where
         let channel_id = row
             .channel_id()
             .or_else(|| legacy_map.get(row.video_id()).map(String::as_str));
-        if can_child_view(db, child_id, row.video_id(), channel_id, &[])
+        if can_child_view(db, child_id, row.video_id(), channel_id)
             .await
             .unwrap_or(false)
         {
@@ -243,7 +241,7 @@ pub async fn watch_again(
 /// `watch_history` rows that were written before the `channel_id`
 /// column existed (migration 014). Reads from `feed_source_items`,
 /// which the feed refresher keeps populated for every allowlisted
-/// channel + playlist. Returns an empty map when there are no legacy
+/// channel. Returns an empty map when there are no legacy
 /// rows to resolve, so the caller never pays for the round-trip on a
 /// freshly-migrated DB.
 async fn lookup_channel_ids_for_videos(
@@ -270,8 +268,7 @@ async fn lookup_channel_ids_for_videos(
     }
     let rows = q.fetch_all(db).await?;
     // A single video_id can have rows under multiple `(kind, source_id)`
-    // pairs (e.g. surfaced via both a channel feed and a playlist).
-    // First match wins; we don't try to pick a "best" one because
+    // pairs. First match wins; we don't try to pick a "best" one because
     // `can_child_view` only needs *some* channel_id that hits the
     // allowlist.
     let mut map = std::collections::HashMap::with_capacity(rows.len());
@@ -319,7 +316,7 @@ pub struct NewVideoItem {
     pub channel_title: Option<String>,
     pub thumbnail_url: Option<String>,
     pub published_at: Option<String>,
-    pub source_kind: String, // "channel" or "playlist"
+    pub source_kind: String, // "channel"
     pub source_id: String,
 }
 
@@ -542,8 +539,7 @@ pub async fn admin_list_sources(
 /// climbs past ~70%.
 #[derive(Debug, Serialize)]
 pub struct RefresherCapacity {
-    /// Number of allowlisted-channel + allowlisted-playlist rows we
-    /// currently track.
+    /// Number of allowlisted-channel rows we currently track.
     pub total_sources: i64,
     /// Sources whose `next_poll_at` is in the past *right now*. A
     /// healthy refresher keeps this near zero; a persistent non-zero
@@ -637,8 +633,6 @@ const UP_NEXT_DEFAULT_LIMIT: usize = 10;
 pub struct UpNextQuery {
     /// Source context. Recognised values:
     ///
-    /// - `playlist:<id>` — videos from a `child_playlists` row (own or
-    ///   library) ordered by `position`.
     /// - `channel:<id>` — channel uploads, drawn from the discovery sidecar.
     /// - `video:<id>` — fall back to "more from the same channel" or
     ///   the new-videos feed if no channel context is available.
@@ -672,34 +666,20 @@ pub async fn up_next(
     // Parse `from`.
     let (kind, id) = parse_from(q.from.as_deref());
 
-    // Only treat as a playlist context when *both* the kind and id
-    // parsed cleanly. `from=playlist` (no id) falls through to the
-    // new-videos pool and must still get the watched-filter applied.
-    let is_playlist_ctx = matches!((kind, id), (Some("playlist"), Some(_)));
     let raw: Vec<UpNextItem> = match (kind, id) {
-        (Some("playlist"), Some(playlist_id)) => {
-            up_next_from_playlist(&state, current.id, playlist_id, q.current_video.as_deref())
-                .await?
-        }
         (Some("channel"), Some(channel_id)) => {
             up_next_from_channel(&state, current.id, channel_id).await?
         }
         _ => up_next_from_new_videos(&state, current.id, limit).await?,
     };
 
-    // For non-playlist contexts, exclude videos the child has already
-    // watched so the queue actually rotates instead of resurfacing the
-    // same items. Playlist contexts preserve order: the user explicitly
-    // opened that list and may want to re-watch in sequence.
-    let watched: HashSet<String> = if is_playlist_ctx {
-        HashSet::new()
-    } else {
-        child_watched_video_ids(&state.db, current.id)
-            .await
-            .unwrap_or_default()
-    };
+    // Exclude videos the child has already watched so the queue
+    // actually rotates instead of resurfacing the same items.
+    let watched: HashSet<String> = child_watched_video_ids(&state.db, current.id)
+        .await
+        .unwrap_or_default();
 
-    // Drop the current video, watched items (non-playlist), and
+    // Drop the current video, watched items, and
     // access-control failures.
     let mut out = Vec::with_capacity(limit);
     for item in raw {
@@ -714,7 +694,6 @@ pub async fn up_next(
             current.id,
             &item.video_id,
             item.channel_id.as_deref(),
-            &[],
         )
         .await
         .unwrap_or(false)
@@ -774,62 +753,6 @@ fn parse_from(from: Option<&str>) -> (Option<&str>, Option<&str>) {
     let kind = iter.next();
     let id = iter.next();
     (kind, id)
-}
-
-async fn up_next_from_playlist(
-    state: &AppState,
-    child_id: i64,
-    playlist_id: &str,
-    current_video: Option<&str>,
-) -> AppResult<Vec<UpNextItem>> {
-    // Match either by primary-key id or by youtube_playlist_id.
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM child_playlists \
-         WHERE child_account_id = ? AND is_deleted = 0 \
-           AND (CAST(id AS TEXT) = ? OR youtube_playlist_id = ?)",
-    )
-    .bind(child_id)
-    .bind(playlist_id)
-    .bind(playlist_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((local_id,)) = row else {
-        return Ok(Vec::new());
-    };
-
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT video_id, video_title, video_thumbnail_url, channel_title \
-         FROM child_playlist_videos WHERE playlist_id = ? ORDER BY position",
-    )
-    .bind(local_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let items: Vec<UpNextItem> = rows
-        .into_iter()
-        .map(|(video_id, title, thumb, ch)| UpNextItem {
-            video_id,
-            title,
-            channel_id: None,
-            channel_title: ch,
-            thumbnail_url: thumb,
-        })
-        .collect();
-
-    // Treat `current_video` as a cursor: return items after it, wrapping
-    // around so the queue still has something if the current item is at
-    // the end of the list. When there's no current video, return the
-    // full list in order.
-    let Some(current) = current_video else {
-        return Ok(items);
-    };
-    let Some(idx) = items.iter().position(|it| it.video_id == current) else {
-        return Ok(items);
-    };
-    let mut out = Vec::with_capacity(items.len().saturating_sub(1));
-    out.extend(items.iter().skip(idx + 1).cloned());
-    out.extend(items.iter().take(idx).cloned());
-    Ok(out)
 }
 
 async fn up_next_from_channel(
@@ -901,7 +824,6 @@ async fn up_next_from_new_videos(
     // so we can interleave (round-robin) instead of front-loading any
     // single channel's uploads.
     let channels = child_allowlisted_channel_ids(&state.db, child_id).await?;
-    let playlists = child_allowlisted_playlist_ids(&state.db, child_id).await?;
 
     let mut buckets: Vec<Vec<UpNextItem>> = Vec::new();
     for channel_id in &channels {
@@ -923,33 +845,6 @@ async fn up_next_from_new_videos(
                 video_id: r.video_id,
                 title: r.title,
                 channel_id: r.channel_id.or_else(|| Some(channel_id.clone())),
-                channel_title: r.channel_title,
-                thumbnail_url: r.thumbnail_url,
-            })
-            .collect();
-        if !bucket.is_empty() {
-            buckets.push(bucket);
-        }
-    }
-    for playlist_id in &playlists {
-        let rows: Vec<UpNextRow> = sqlx::query_as(
-            "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-               FROM feed_source_items \
-              WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
-              LIMIT 5",
-        )
-        .bind(feed_cache::KIND_PLAYLIST)
-        .bind(playlist_id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-        let bucket: Vec<UpNextItem> = rows
-            .into_iter()
-            .map(|r| UpNextItem {
-                video_id: r.video_id,
-                title: r.title,
-                channel_id: r.channel_id,
                 channel_title: r.channel_title,
                 thumbnail_url: r.thumbnail_url,
             })

@@ -38,8 +38,7 @@ fn mock_channel_response(channel_id: &str, title: &str) -> serde_json::Value {
             "high": {"url": "http://thumb.test/h.jpg", "width": 800, "height": 800}
         },
         "subscriber_count": 10000,
-        "video_count": 100,
-        "uploads_playlist_id": "UU_uploads"
+        "video_count": 100
     })
 }
 
@@ -58,21 +57,6 @@ fn mock_video_response(video_id: &str, title: &str) -> serde_json::Value {
         "published_at": "2024-01-01T00:00:00Z",
         "duration": "PT5M30S",
         "view_count": 1000
-    })
-}
-
-/// Mock sidecar playlist response.
-fn mock_playlist_response(playlist_id: &str, title: &str) -> serde_json::Value {
-    json!({
-        "id": playlist_id,
-        "title": title,
-        "description": "A test playlist",
-        "channel_id": "UCtest",
-        "channel_title": "Test Channel",
-        "thumbnails": {
-            "default": {"url": "http://thumb.test/d.jpg"}
-        },
-        "item_count": 10
     })
 }
 
@@ -104,13 +88,13 @@ fn mock_search_response() -> serde_json::Value {
     })
 }
 
-/// Mock sidecar channel-videos / playlist-items response.
+/// Mock sidecar channel-videos response.
 fn mock_video_items_response() -> serde_json::Value {
     json!({
         "items": [
             {
                 "video_id": "pl-vid-1",
-                "title": "Video in Playlist",
+                "title": "Channel Video",
                 "channel_id": "UCowner",
                 "channel_title": "Owner Channel",
                 "thumbnails": {"default": {"url": "http://t/pl.jpg"}},
@@ -174,31 +158,6 @@ async fn add_video_to_allowlist_with_mocked_discovery() {
     let body: serde_json::Value = res.json();
     assert_eq!(body["video_id"], "vid-mocked");
     assert_eq!(body["video_title"], "Mocked Video");
-}
-
-#[tokio::test]
-async fn add_playlist_to_allowlist_with_mocked_discovery() {
-    let (app, _auth, mock_server) = boot_with_mock_discovery(AccountType::Parent).await;
-    let child_id = app.child_id.unwrap();
-
-    Mock::given(method("GET"))
-        .and(path("/playlists/PLmocked"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(mock_playlist_response("PLmocked", "Mocked Playlist")),
-        )
-        .mount(&mock_server)
-        .await;
-
-    let res = app
-        .server
-        .post(&format!("/api/children/{child_id}/allowlist/playlists"))
-        .json(&json!({ "playlist_id": "PLmocked" }))
-        .await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    assert_eq!(body["playlist_id"], "PLmocked");
-    assert_eq!(body["playlist_title"], "Mocked Playlist");
 }
 
 // ===========================================================================
@@ -569,63 +528,6 @@ async fn preview_channel_with_mocked_discovery() {
     assert_eq!(body["title"], "Preview Channel");
 }
 
-#[tokio::test]
-async fn preview_playlist_with_mocked_discovery() {
-    let (app, _auth, mock_server) = boot_with_mock_discovery(AccountType::Parent).await;
-
-    Mock::given(method("GET"))
-        .and(path("/playlists/PLprev"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(mock_playlist_response("PLprev", "Preview Playlist")),
-        )
-        .mount(&mock_server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path_regex("/playlist-items/PLprev.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(mock_video_items_response()))
-        .mount(&mock_server)
-        .await;
-
-    let res = app.server.get("/api/preview/playlist/PLprev").await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-    let body: serde_json::Value = res.json();
-    assert_eq!(body["id"], "PLprev");
-}
-
-// ===========================================================================
-// Search with playlist type
-// ===========================================================================
-
-#[tokio::test]
-async fn parent_search_playlist_type() {
-    let (app, _auth, mock_server) = boot_with_mock_discovery(AccountType::Parent).await;
-
-    Mock::given(method("GET"))
-        .and(path_regex("/search.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{
-                "kind": "playlist",
-                "id": "PLsrch",
-                "title": "Found Playlist",
-                "description": "desc",
-                "channel_id": "UCx",
-                "channel_title": "Ch",
-                "thumbnails": {},
-                "published_at": "2024-01-01T00:00:00Z"
-            }]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let res = app
-        .server
-        .get("/api/parent/search?q=playlists&type=playlist")
-        .await;
-    assert_eq!(res.status_code(), StatusCode::OK);
-}
-
 // ===========================================================================
 // Discovery sidecar error (non-200 status)
 // ===========================================================================
@@ -658,23 +560,6 @@ async fn preview_channel_not_found_is_404() {
         .await;
 
     let res = app.server.get("/api/preview/channel/UCmissing").await;
-    let status = res.status_code().as_u16();
-    assert!(status >= 400);
-}
-
-#[tokio::test]
-async fn preview_playlist_not_found_is_404() {
-    let (app, _auth, mock_server) = boot_with_mock_discovery(AccountType::Parent).await;
-
-    Mock::given(method("GET"))
-        .and(path("/playlists/PLmissing"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({"error": "playlist not found"})),
-        )
-        .mount(&mock_server)
-        .await;
-
-    let res = app.server.get("/api/preview/playlist/PLmissing").await;
     let status = res.status_code().as_u16();
     assert!(status >= 400);
 }

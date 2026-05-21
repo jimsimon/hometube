@@ -1,10 +1,10 @@
 //! Allowlist management routes (parent only).
 //!
-//! Three flavours: channels, playlists, and individual videos. Each
-//! follows the same shape:
+//! Two flavours: channels and individual videos. Each follows the same
+//! shape:
 //!
 //! - `GET    /api/children/:id/allowlist/{kind}`
-//! - `POST   /api/children/:id/allowlist/{kind}`           (body: `{ channel_id|playlist_id|video_id }`)
+//! - `POST   /api/children/:id/allowlist/{kind}`           (body: `{ channel_id|video_id }`)
 //! - `DELETE /api/children/:id/allowlist/{kind}/:itemId`
 //!
 //! The `:id` path parameter must refer to a *child* account; parent IDs
@@ -142,88 +142,6 @@ pub async fn delete_channel(
             .await?;
     }
     tx.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// Playlists
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct AllowlistedPlaylist {
-    pub id: i64,
-    pub playlist_id: String,
-    pub playlist_title: String,
-    pub playlist_thumbnail_url: Option<String>,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddPlaylistBody {
-    pub playlist_id: String,
-}
-
-/// `GET /api/children/:id/allowlist/playlists`.
-pub async fn list_playlists(
-    State(state): State<AppState>,
-    Path(child_id): Path<i64>,
-) -> AppResult<Json<Vec<AllowlistedPlaylist>>> {
-    require_child_id(&state, child_id).await?;
-    let rows: Vec<AllowlistedPlaylist> = sqlx::query_as(
-        "SELECT id, playlist_id, playlist_title, playlist_thumbnail_url, created_at \
-         FROM allowlisted_playlists WHERE child_account_id = ? ORDER BY created_at DESC",
-    )
-    .bind(child_id)
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(rows))
-}
-
-/// `POST /api/children/:id/allowlist/playlists`.
-pub async fn add_playlist(
-    State(state): State<AppState>,
-    current: CurrentAccount,
-    Path(child_id): Path<i64>,
-    Json(body): Json<AddPlaylistBody>,
-) -> AppResult<Json<AllowlistedPlaylist>> {
-    require_child_id(&state, child_id).await?;
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_playlist(&body.playlist_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("playlist not found on YouTube".into()))?;
-    let thumb = preferred_thumbnail(&info.thumbnails);
-
-    let row: AllowlistedPlaylist = sqlx::query_as(
-        "INSERT INTO allowlisted_playlists \
-            (child_account_id, playlist_id, playlist_title, playlist_thumbnail_url, added_by) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(child_account_id, playlist_id) DO UPDATE SET \
-            playlist_title = excluded.playlist_title, \
-            playlist_thumbnail_url = excluded.playlist_thumbnail_url \
-         RETURNING id, playlist_id, playlist_title, playlist_thumbnail_url, created_at",
-    )
-    .bind(child_id)
-    .bind(&info.id)
-    .bind(&info.title)
-    .bind(thumb)
-    .bind(current.id)
-    .fetch_one(&state.db)
-    .await?;
-    Ok(Json(row))
-}
-
-/// `DELETE /api/children/:id/allowlist/playlists/:playlistId`.
-pub async fn delete_playlist(
-    State(state): State<AppState>,
-    Path((child_id, playlist_id)): Path<(i64, String)>,
-) -> AppResult<StatusCode> {
-    require_child_id(&state, child_id).await?;
-    sqlx::query("DELETE FROM allowlisted_playlists WHERE child_account_id = ? AND playlist_id = ?")
-        .bind(child_id)
-        .bind(playlist_id)
-        .execute(&state.db)
-        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

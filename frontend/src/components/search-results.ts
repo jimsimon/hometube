@@ -1,9 +1,9 @@
 /**
- * <hometube-search-results q="..." type="all|channel|playlist|video">
+ * <hometube-search-results q="..." type="all|channel|video">
  *
  * Lit component that fetches `/api/search` and renders mixed-bucket
- * results using the existing `<hometube-channel-card>`,
- * `<hometube-playlist-card>`, and `<hometube-video-card>` components.
+ * results using the existing `<hometube-channel-card>` and
+ * `<hometube-video-card>` components.
  *
  * Behaviour:
  *   - On connect (and whenever the `q` / `type` attributes change) it
@@ -23,31 +23,21 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
 import type {
   ChildSearchChannelHit,
-  ChildSearchPlaylistHit,
-  ChildSearchPlaylistSource,
   ChildSearchResponse,
   ChildSearchVideoHit,
 } from "../types/index.js";
 
 import "./search-bar.js";
 import "./channel-card.js";
-import "./playlist-card.js";
 import "./video-card.js";
 import "./loading-spinner.js";
-
-const PLAYLIST_BADGE_LABELS: Record<ChildSearchPlaylistSource, string> = {
-  allowlist: "Allowed",
-  own: "My playlist",
-  family: "Family",
-};
 
 @customElement("hometube-search-results")
 export class SearchResults extends LitElement {
   @property({ type: String }) q = "";
-  @property({ type: String }) type: "all" | "channel" | "playlist" | "video" = "all";
+  @property({ type: String }) type: "all" | "channel" | "video" = "all";
 
   @state() private channels: ChildSearchChannelHit[] = [];
-  @state() private playlists: ChildSearchPlaylistHit[] = [];
   @state() private videos: ChildSearchVideoHit[] = [];
   @state() private loading = false;
   @state() private error = "";
@@ -103,32 +93,6 @@ export class SearchResults extends LitElement {
       font: inherit;
       cursor: pointer;
     }
-    .playlist-result {
-      position: relative;
-      display: block;
-    }
-    .badge {
-      position: absolute;
-      top: 0.5rem;
-      left: 0.5rem;
-      padding: 0.125rem 0.5rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      border-radius: 999px;
-      background: var(--wa-color-surface-default, #fff);
-      color: var(--wa-color-text-normal);
-      border: 1px solid var(--wa-color-surface-border, #ccc);
-      pointer-events: none;
-      z-index: 1;
-    }
-    .badge.family {
-      background: var(--wa-color-brand-quiet, #eef);
-      border-color: var(--wa-color-brand-on-quiet, #88a);
-    }
-    .badge.own {
-      background: var(--wa-color-success-quiet, #efe);
-      border-color: var(--wa-color-success-on-quiet, #8a8);
-    }
     .external-link {
       display: block;
       padding: 0.75rem;
@@ -175,7 +139,6 @@ export class SearchResults extends LitElement {
         // and reset `loading` immediately for visual consistency.
         this.searchToken++;
         this.channels = [];
-        this.playlists = [];
         this.videos = [];
         this.nextPageToken = null;
         this.error = "";
@@ -191,7 +154,6 @@ export class SearchResults extends LitElement {
     this.error = "";
     if (!append) {
       this.channels = [];
-      this.playlists = [];
       this.videos = [];
       this.nextPageToken = null;
     }
@@ -207,11 +169,9 @@ export class SearchResults extends LitElement {
       if (token !== this.searchToken) return;
       if (append) {
         this.channels = [...this.channels, ...res.results.channels];
-        this.playlists = [...this.playlists, ...res.results.playlists];
         this.videos = [...this.videos, ...res.results.videos];
       } else {
         this.channels = res.results.channels;
-        this.playlists = res.results.playlists;
         this.videos = res.results.videos;
       }
       this.nextPageToken = res.next_page_token;
@@ -244,7 +204,7 @@ export class SearchResults extends LitElement {
     event.preventDefault();
     // Validate the kind against the known union — otherwise a stray
     // string would flow straight into the `/api/search?type=...` URL.
-    const allowedKinds: ReadonlyArray<typeof this.type> = ["all", "channel", "playlist", "video"];
+    const allowedKinds: ReadonlyArray<typeof this.type> = ["all", "channel", "video"];
     const nextType: typeof this.type = allowedKinds.includes(detail.kind as typeof this.type)
       ? (detail.kind as typeof this.type)
       : "all";
@@ -271,8 +231,7 @@ export class SearchResults extends LitElement {
   };
 
   override render() {
-    const hasResults =
-      this.channels.length > 0 || this.playlists.length > 0 || this.videos.length > 0;
+    const hasResults = this.channels.length > 0 || this.videos.length > 0;
     const empty = !this.loading && !this.error && !hasResults;
 
     return html`
@@ -289,7 +248,7 @@ export class SearchResults extends LitElement {
           ? "Searching…"
           : this.error
             ? `Error: ${this.error}`
-            : `Found ${this.channels.length} channels, ${this.playlists.length} playlists, ${this.videos.length} videos.`}
+            : `Found ${this.channels.length} channels, ${this.videos.length} videos.`}
       </div>
 
       ${this.loading && !hasResults
@@ -312,42 +271,6 @@ export class SearchResults extends LitElement {
                   .thumbnailUrl=${c.channel_thumbnail_url}
                 ></hometube-channel-card>`,
               )}
-            </div>
-          `
-        : nothing}
-      ${this.playlists.length > 0
-        ? html`
-            <h2>Playlists</h2>
-            <div class="grid">
-              ${this.playlists.map((p) => {
-                const badge = html`<span
-                  class="badge ${p.source}"
-                  aria-label="Playlist source: ${PLAYLIST_BADGE_LABELS[p.source]}"
-                  >${PLAYLIST_BADGE_LABELS[p.source]}</span
-                >`;
-                // Family playlists encode their id as `family:N`; the
-                // child playlist deep-link is on the local id only.
-                const isLocal = p.source !== "family" && !/^[A-Z]/.test(p.playlist_id);
-                if (isLocal) {
-                  return html`<div class="playlist-result">
-                    ${badge}
-                    <hometube-playlist-card
-                      playlist-id=${Number(p.playlist_id) || 0}
-                      title=${p.playlist_title}
-                      .thumbnailUrl=${p.playlist_thumbnail_url}
-                      ?is-own=${p.source === "own"}
-                    ></hometube-playlist-card>
-                  </div>`;
-                }
-                return html`<div class="playlist-result">
-                  ${badge}
-                  <hometube-playlist-card
-                    playlist-id=${p.playlist_id}
-                    title=${p.playlist_title}
-                    .thumbnailUrl=${p.playlist_thumbnail_url}
-                  ></hometube-playlist-card>
-                </div>`;
-              })}
             </div>
           `
         : nothing}

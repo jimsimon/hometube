@@ -1,8 +1,8 @@
 // HomeTube Discovery Sidecar
 //
 // A lightweight HTTP service wrapping youtubei.js to provide YouTube
-// content discovery (search, channel/playlist/video metadata) without
-// using the official YouTube Data API v3.
+// content discovery (search, channel/video metadata) without using
+// the official YouTube Data API v3.
 //
 // Endpoints return JSON matching HomeTube's internal Rust types so the
 // backend can deserialize responses directly.
@@ -76,7 +76,7 @@ function secondsToISO8601(seconds) {
 // Route handlers
 // ---------------------------------------------------------------------------
 
-/** GET /search?q=...&type=channel|playlist|video&maxResults=N */
+/** GET /search?q=...&type=channel|video&maxResults=N */
 async function handleSearch(url) {
   const q = url.searchParams.get("q");
   if (!q) return jsonError(400, "q parameter required");
@@ -92,8 +92,8 @@ async function handleSearch(url) {
 
   const items = [];
 
-  // results may have .videos, .channels, .playlists depending on type
-  // but we iterate results.results which has all mixed
+  // results may have .videos or .channels depending on type, but we
+  // iterate results.results which has all mixed.
   if (results.results) {
     for (const item of results.results) {
       if (items.length >= maxResults) break;
@@ -124,20 +124,6 @@ async function handleSearch(url) {
           channel_id: item.id,
           channel_title: textToString(item.author?.name || item.title),
           thumbnails: mapThumbnails(item.author?.thumbnails || item.thumbnails),
-          published_at: null,
-        });
-      } else if (
-        type === "playlist" &&
-        item.is(YTNodes.Playlist)
-      ) {
-        items.push({
-          kind: "playlist",
-          id: item.id,
-          title: textToString(item.title),
-          description: "",
-          channel_id: item.author?.id || null,
-          channel_title: item.author?.name || null,
-          thumbnails: mapThumbnails(item.thumbnails),
           published_at: null,
         });
       }
@@ -184,11 +170,6 @@ async function handleGetChannel(channelId) {
     description = channel.metadata.description || "";
   }
 
-  // Build uploads playlist ID (UC... -> UU...)
-  const uploadsPlaylistId = channelId.startsWith("UC")
-    ? "UU" + channelId.slice(2)
-    : null;
-
   return jsonOk({
     id: channelId,
     title,
@@ -196,61 +177,6 @@ async function handleGetChannel(channelId) {
     thumbnails: mapThumbnails(thumbnails),
     subscriber_count: subscriberCount,
     video_count: videoCount,
-    uploads_playlist_id: uploadsPlaylistId,
-  });
-}
-
-/** GET /playlists/:id */
-async function handleGetPlaylist(playlistId) {
-  const client = await getClient();
-  const playlist = await client.getPlaylist(playlistId);
-
-  if (!playlist) return jsonError(404, "playlist not found");
-
-  const info = playlist.info;
-  const header = playlist.header;
-
-  let title = "";
-  let description = "";
-  let channelId = null;
-  let channelTitle = null;
-  let thumbnails = [];
-  let itemCount = null;
-
-  if (header) {
-    if (header.is(YTNodes.PlaylistHeader)) {
-      title = textToString(header.title);
-      const statsTexts = header.stats?.map((s) => textToString(s)) || [];
-      // First stat is usually "N videos"
-      if (statsTexts.length > 0) {
-        itemCount = parseCount(statsTexts[0]);
-      }
-      channelTitle = header.author?.name || null;
-      channelId = header.author?.id || null;
-    }
-  }
-
-  // Fallback to info
-  if (!title && info) {
-    title = info.title || "";
-    description = info.description || "";
-    channelTitle = info.author?.name || null;
-    channelId = info.author?.id || null;
-  }
-
-  // Get thumbnails from first video if available
-  if (playlist.items?.length > 0) {
-    thumbnails = playlist.items[0].thumbnails || [];
-  }
-
-  return jsonOk({
-    id: playlistId,
-    title,
-    description,
-    channel_id: channelId,
-    channel_title: channelTitle,
-    thumbnails: mapThumbnails(thumbnails),
-    item_count: itemCount,
   });
 }
 
@@ -361,66 +287,6 @@ async function handleChannelVideos(channelId, url) {
   });
 }
 
-/** GET /playlist-items/:playlistId?maxResults=N
- *
- * Fetches ALL items from the playlist by looping through youtubei.js
- * continuations internally. The Rust consumer (`populate_playlist_videos`)
- * used to paginate via `next_page_token`, but youtubei.js continuation
- * objects are stateful and can't be serialized across HTTP requests.
- * Instead we gather everything server-side and return it in one response.
- *
- * The `maxResults` parameter caps the returned items (default 50, max 500).
- */
-async function handlePlaylistItems(playlistId, url) {
-  const maxResults = Math.min(
-    parseInt(url.searchParams.get("maxResults") || "50", 10),
-    500
-  );
-
-  const client = await getClient();
-  let page = await client.getPlaylist(playlistId);
-  if (!page) return jsonError(404, "playlist not found");
-
-  const items = [];
-
-  // Loop through all continuation pages to gather every item.
-  while (page) {
-    for (const item of page.items || []) {
-      if (items.length >= maxResults) break;
-
-      const videoId = item.id || item.video_id;
-      if (!videoId) continue;
-
-      items.push({
-        video_id: videoId,
-        title: textToString(item.title),
-        channel_id: item.author?.id || null,
-        channel_title: item.author?.name || null,
-        thumbnails: mapThumbnails(item.thumbnails),
-        published_at: null,
-        position: item.index != null ? parseInt(textToString(item.index), 10) || null : null,
-      });
-    }
-
-    if (items.length >= maxResults) break;
-
-    if (page.has_continuation) {
-      try {
-        page = await page.getContinuation();
-      } catch {
-        break;
-      }
-    } else {
-      break;
-    }
-  }
-
-  return jsonOk({
-    items,
-    next_page_token: null,
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
@@ -475,12 +341,6 @@ async function handleRequest(req) {
       return await handleGetChannel(decodeURIComponent(channelMatch[1]));
     }
 
-    // /playlists/:id
-    const playlistMatch = path.match(/^\/playlists\/([^/]+)$/);
-    if (playlistMatch) {
-      return await handleGetPlaylist(decodeURIComponent(playlistMatch[1]));
-    }
-
     // /videos/:id
     const videoMatch = path.match(/^\/videos\/([^/]+)$/);
     if (videoMatch) {
@@ -492,15 +352,6 @@ async function handleRequest(req) {
     if (channelVideosMatch) {
       return await handleChannelVideos(
         decodeURIComponent(channelVideosMatch[1]),
-        url
-      );
-    }
-
-    // /playlist-items/:playlistId
-    const playlistItemsMatch = path.match(/^\/playlist-items\/([^/]+)$/);
-    if (playlistItemsMatch) {
-      return await handlePlaylistItems(
-        decodeURIComponent(playlistItemsMatch[1]),
         url
       );
     }

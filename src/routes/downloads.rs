@@ -142,7 +142,6 @@ pub async fn create(
             current.id,
             &body.video_id,
             result.channel_id.as_deref(),
-            &[],
         )
         .await?
     {
@@ -279,7 +278,6 @@ pub async fn stream(
             current.id,
             &video_id,
             result.channel_id.as_deref(),
-            &[],
         )
         .await?
     {

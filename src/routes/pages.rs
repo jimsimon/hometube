@@ -253,7 +253,7 @@ pub async fn parent_system(current: Option<CurrentAccount>) -> AppResult<Respons
 #[template(path = "pages/parent/preview.html")]
 struct ParentPreviewTemplate {
     display_name: String,
-    /// `"video"`, `"channel"`, or `"playlist"`.
+    /// `"video"` or `"channel"`.
     kind: String,
     resource_id: String,
 }
@@ -267,7 +267,7 @@ pub async fn parent_preview(
 ) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Parent) => {
-            if !matches!(kind.as_str(), "video" | "channel" | "playlist") {
+            if !matches!(kind.as_str(), "video" | "channel") {
                 return Ok(Redirect::to("/parent/home").into_response());
             }
             let tpl = ParentPreviewTemplate {
@@ -296,55 +296,6 @@ pub async fn parent_activity(current: Option<CurrentAccount>) -> AppResult<Respo
         Some(c) if matches!(c.account_type, AccountType::Parent) => {
             let tpl = ParentActivityTemplate {
                 display_name: c.display_name,
-            };
-            Ok(Html(tpl.render()?).into_response())
-        }
-        Some(c) if matches!(c.account_type, AccountType::Child) => {
-            Ok(Redirect::to("/child/home").into_response())
-        }
-        _ => Ok(Redirect::to("/").into_response()),
-    }
-}
-
-#[derive(Template)]
-#[template(path = "pages/parent/playlists.html")]
-struct ParentPlaylistsTemplate {
-    display_name: String,
-}
-
-/// `GET /parent/playlists` — family playlist manager (Phase 18).
-pub async fn parent_playlists(current: Option<CurrentAccount>) -> AppResult<Response> {
-    match current {
-        Some(c) if matches!(c.account_type, AccountType::Parent) => {
-            let tpl = ParentPlaylistsTemplate {
-                display_name: c.display_name,
-            };
-            Ok(Html(tpl.render()?).into_response())
-        }
-        Some(c) if matches!(c.account_type, AccountType::Child) => {
-            Ok(Redirect::to("/child/home").into_response())
-        }
-        _ => Ok(Redirect::to("/").into_response()),
-    }
-}
-
-#[derive(Template)]
-#[template(path = "pages/parent/playlist.html")]
-struct ParentPlaylistTemplate {
-    display_name: String,
-    playlist_id: i64,
-}
-
-/// `GET /parent/playlist/:id` — single family playlist editor.
-pub async fn parent_playlist(
-    current: Option<CurrentAccount>,
-    Path(playlist_id): Path<i64>,
-) -> AppResult<Response> {
-    match current {
-        Some(c) if matches!(c.account_type, AccountType::Parent) => {
-            let tpl = ParentPlaylistTemplate {
-                display_name: c.display_name,
-                playlist_id,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -626,67 +577,6 @@ pub async fn child_channel(
 }
 
 #[derive(Template)]
-#[template(path = "pages/child/playlists.html")]
-struct ChildPlaylistsTemplate {
-    display_name: String,
-    downloads_enabled: bool,
-}
-
-/// `GET /child/playlists`.
-pub async fn child_playlists(
-    State(state): State<AppState>,
-    current: Option<CurrentAccount>,
-) -> AppResult<Response> {
-    require_child(&state, current, |c, ctx| {
-        let tpl = ChildPlaylistsTemplate {
-            display_name: c.display_name,
-            downloads_enabled: ctx.downloads_enabled,
-        };
-        Ok(Html(tpl.render()?).into_response())
-    })
-    .await
-}
-
-#[derive(Template)]
-#[template(path = "pages/child/playlist.html")]
-struct ChildPlaylistTemplate {
-    display_name: String,
-    downloads_enabled: bool,
-    /// Local primary-key id (string-encoded).
-    playlist_id: String,
-    /// `"child"` for child-owned playlists, `"family"` for family
-    /// playlists. Lit-side decides which API to call.
-    playlist_kind: String,
-}
-
-/// `GET /child/playlist/:id`.
-///
-/// `:id` may be a bare integer (child-owned playlist) or `family:<id>`
-/// (family playlist). The shape is forwarded verbatim to the Lit
-/// component.
-pub async fn child_playlist(
-    State(state): State<AppState>,
-    current: Option<CurrentAccount>,
-    Path(playlist_id): Path<String>,
-) -> AppResult<Response> {
-    require_child(&state, current, |c, ctx| {
-        let (playlist_kind, raw_id) = if let Some(rest) = playlist_id.strip_prefix("family:") {
-            ("family".to_string(), rest.to_string())
-        } else {
-            ("child".to_string(), playlist_id.clone())
-        };
-        let tpl = ChildPlaylistTemplate {
-            display_name: c.display_name,
-            downloads_enabled: ctx.downloads_enabled,
-            playlist_id: raw_id,
-            playlist_kind,
-        };
-        Ok(Html(tpl.render()?).into_response())
-    })
-    .await
-}
-
-#[derive(Template)]
 #[template(path = "pages/child/search.html")]
 struct ChildSearchTemplate {
     display_name: String,
@@ -729,8 +619,8 @@ struct ChildVideoTemplate {
     display_name: String,
     downloads_enabled: bool,
     video_id: String,
-    /// Up-next source context, in `playlist:ID` / `channel:ID` /
-    /// `video:ID` shape. May be empty.
+    /// Up-next source context, in `channel:ID` / `video:ID` shape.
+    /// May be empty.
     from: String,
     /// `true` when access control denies playback. The template renders
     /// a friendly "unavailable" page rather than the player.
@@ -785,15 +675,9 @@ pub async fn child_video(
 
     match extract {
         Ok(result) => {
-            let allowed = can_child_view(
-                &state.db,
-                c.id,
-                &video_id,
-                result.channel_id.as_deref(),
-                &[],
-            )
-            .await
-            .unwrap_or(false);
+            let allowed = can_child_view(&state.db, c.id, &video_id, result.channel_id.as_deref())
+                .await
+                .unwrap_or(false);
             let tpl = ChildVideoTemplate {
                 display_name: c.display_name,
                 downloads_enabled,

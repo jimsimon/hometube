@@ -37,17 +37,11 @@ import { debounce } from "../services/debounce.js";
 const DEBOUNCE_MS = 300;
 const MAX_SUGGESTIONS = 5;
 
-type SearchKind = "all" | "channel" | "playlist" | "video";
+type SearchKind = "all" | "channel" | "video";
 
 interface ChannelHit {
   channel_id: string;
   channel_title: string;
-}
-
-interface PlaylistHit {
-  playlist_id: string;
-  playlist_title: string;
-  source: "allowlist" | "own" | "family";
 }
 
 interface VideoHit {
@@ -61,14 +55,13 @@ interface SearchApiResponse {
   kind: string;
   results: {
     channels: ChannelHit[];
-    playlists: PlaylistHit[];
     videos: VideoHit[];
   };
   next_page_token: string | null;
 }
 
 interface Suggestion {
-  kind: "channel" | "playlist" | "video";
+  kind: "channel" | "video";
   href: string;
   title: string;
   subtitle: string | null;
@@ -320,18 +313,6 @@ export class SearchBar extends LitElement {
         subtitle: "Channel",
       });
     }
-    for (const pl of res.results.playlists.slice(0, 2)) {
-      const id = pl.playlist_id;
-      const href = id.startsWith("family:")
-        ? `/child/playlists`
-        : `/child/playlist/${encodeURIComponent(id)}`;
-      out.push({
-        kind: "playlist",
-        href,
-        title: pl.playlist_title,
-        subtitle: "Playlist",
-      });
-    }
     for (const v of res.results.videos.slice(0, MAX_SUGGESTIONS)) {
       out.push({
         kind: "video",
@@ -471,7 +452,6 @@ export class SearchBar extends LitElement {
         >
           <option value="all">All</option>
           <option value="channel">Channels</option>
-          <option value="playlist">Playlists</option>
           <option value="video">Videos</option>
         </select>
       </form>

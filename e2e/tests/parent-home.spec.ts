@@ -27,7 +27,7 @@ test('parent home renders allowlist tabs', async ({ parentPage, request }) => {
   await parentPage.goto('/parent/home');
   await expect(parentPage).toHaveURL(/\/parent\/home/);
 
-  // The allowlist manager renders tab buttons for channels/playlists/videos.
+  // The allowlist manager renders tab buttons for channels/videos.
   // Tabs live inside the component's shadow DOM, so use chained locators
   // to pierce the shadow boundary.
   const tabs = parentPage

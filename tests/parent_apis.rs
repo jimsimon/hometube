@@ -193,7 +193,7 @@ async fn blocked_list_for_non_child_400() {
 async fn allowlist_list_empty_for_fresh_child() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
     let child_id = app.child_id.unwrap();
-    for kind in ["videos", "channels", "playlists"] {
+    for kind in ["videos", "channels"] {
         let res = app
             .server
             .get(&format!("/api/children/{child_id}/allowlist/{kind}"))

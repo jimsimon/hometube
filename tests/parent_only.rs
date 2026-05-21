@@ -3,7 +3,7 @@
 //! The router applies `require_parent` as a `route_layer` over a sub-router
 //! so the gate fires before any handler logic. We hit a representative
 //! sample of routes from each functional area (cron, cache, family,
-//! family-playlists, child usage stats, parent notifications) and assert
+//! child usage stats, parent notifications) and assert
 //! the cross-product of:
 //!
 //! - parent session → 200 (or 200-ish: 200/201/204)
@@ -16,7 +16,6 @@ use axum::http::StatusCode;
 use common::{boot_with_parent_and_child, mint_session_cookie};
 use hometube::middleware::auth::SESSION_COOKIE;
 use hometube::models::account::AccountType;
-use serde_json::json;
 use tower_cookies::cookie::Cookie;
 
 /// Endpoints we expect to behave the same way (gated by `require_parent`).
@@ -79,20 +78,6 @@ async fn anonymous_is_unauthorized_on_parent_only_routes() {
             res.status_code()
         );
     }
-}
-
-#[tokio::test]
-async fn child_post_to_family_playlists_is_403() {
-    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
-    let res = app
-        .server
-        .post("/api/family-playlists")
-        .json(&json!({ "title": "Hi", "description": "" }))
-        .await;
-    // Family-playlists POST is parent-gated inside the handler, not via
-    // the `require_parent` layer (the route is shared with children).
-    // The handler returns 403 for non-parents.
-    assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

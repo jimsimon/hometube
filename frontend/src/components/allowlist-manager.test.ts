@@ -67,23 +67,21 @@ describe("<hometube-allowlist-manager>", () => {
     expect(empty!.textContent).toContain("Pick a child");
   });
 
-  it("renders three tabs when child-id is set", async () => {
+  it("renders two tabs when child-id is set", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
     const tabs = el.shadowRoot!.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(3);
+    expect(tabs.length).toBe(2);
     const labels = Array.from(tabs).map((t) => t.textContent!.trim());
-    expect(labels).toEqual(["Channels", "Playlists", "Videos"]);
+    expect(labels).toEqual(["Channels", "Videos"]);
   });
 
   it("channels tab is selected by default", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -95,7 +93,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("renders a search input without a submit button", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -116,7 +113,6 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/channels": [
         { id: "ch1", channel_id: "UC1", title: "Channel One", thumbnail_url: null },
       ],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     await mount(2);
@@ -130,7 +126,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("switches tabs and updates search placeholder", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -156,7 +151,6 @@ describe("<hometube-allowlist-manager>", () => {
         },
         { id: 2, channel_id: "UC2", channel_title: "Another Channel", channel_thumbnail_url: null },
       ],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -169,7 +163,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("shows empty message when no channels exist", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -182,7 +175,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("performs search and displays results after debounce", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
       "parent/search": {
         items: [
@@ -223,7 +215,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("auto-searches after typing once the debounce elapses", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
@@ -262,7 +253,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("collapses rapid keystrokes into a single debounced request", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
@@ -294,7 +284,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("clearing the search box cancels any pending debounced request", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
       "parent/search": { items: [] },
     });
@@ -325,7 +314,6 @@ describe("<hometube-allowlist-manager>", () => {
   it("does not search with empty query", async () => {
     mockFetch({
       "allowlist/channels": [],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -381,7 +369,6 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/channels": [
         { id: 1, channel_id: "UC1", channel_title: "Ch1", channel_thumbnail_url: null },
       ],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);
@@ -398,7 +385,6 @@ describe("<hometube-allowlist-manager>", () => {
       "allowlist/channels": [
         { id: 1, channel_id: "UC1", channel_title: "Ch1", channel_thumbnail_url: null },
       ],
-      "allowlist/playlists": [],
       "allowlist/videos": [],
     });
     const el = await mount(1);

@@ -489,8 +489,7 @@ async fn fallback_marks_dead_only_after_threshold_not_found() {
 /// Companion to the previous test: a first-time NotFound (no prior
 /// errors) should *not* shelve the source — instead it should bump
 /// `consecutive_errors` and reschedule with the normal backoff. This
-/// protects playlists that flip private/public and channels that
-/// briefly 404 during YouTube-side glitches.
+/// protects channels that briefly 404 during YouTube-side glitches.
 #[tokio::test]
 async fn fallback_first_not_found_backs_off_does_not_shelve() {
     let (app, rss_mock, sidecar_mock) = setup_fallback_test().await;
@@ -628,110 +627,6 @@ async fn fallback_soft_fails_when_sidecar_5xxs() {
     assert!(
         err.contains("500"),
         "last_error should surface the upstream status; got: {err}"
-    );
-}
-
-/// Regression test for the playlist + rate-capped case.
-///
-/// Earlier versions of `poll_one`'s playlist branch shelved the
-/// source for a year whenever `fallback_caps_permit` returned false.
-/// That conflated transient throttling (per-source min interval not
-/// yet elapsed; aggregate hourly cap saturated) with the genuine
-/// no-transport case (sidecar disabled / client construction failed).
-/// The fix is to reschedule the normal interval when caps deny — the
-/// playlist should be picked up again on the next eligible tick.
-#[tokio::test]
-async fn playlist_rate_capped_reschedules_normally_not_shelved() {
-    let (app, _rss_mock, sidecar_mock) = setup_fallback_test().await;
-
-    // Seed a playlist source. Pre-set `last_sidecar_fallback_at` to
-    // "just now" so the per-source min interval (60s in the test
-    // setup) denies a fallback this tick. Pre-seed
-    // `consecutive_errors = 2` so we can prove the rate-cap path
-    // doesn't clobber an existing failure history (this is the
-    // distinction between `record_poll_deferred` and the older
-    // `record_poll_skipped` path).
-    feed_cache::upsert_source(&app.pool, "playlist", "PLcapped")
-        .await
-        .unwrap();
-    let now = unix_now();
-    sqlx::query(
-        "UPDATE feed_sources \
-            SET last_sidecar_fallback_at = ?, \
-                consecutive_errors = 2, \
-                next_poll_at = 0 \
-          WHERE kind = 'playlist' AND source_id = 'PLcapped'",
-    )
-    .bind(now)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    // The sidecar should *not* be called this tick. If it were, the
-    // test would still pass (the mock returns whatever) — but we
-    // assert below that next_poll_at is within the normal interval
-    // window, not a year out.
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/playlist-items/PLcapped.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_page_token": null})),
-        )
-        .mount(&sidecar_mock)
-        .await;
-
-    let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
-
-    // Wait for `record_poll_deferred` to land. We can't watch
-    // `next_poll_at` here: `claim_due_sources` pushes it forward to
-    // the lease deadline *before* the deferred-write runs, so a
-    // raw "next_poll_at > 0" check races with the lease and the
-    // test ends up reading the row mid-process on slow CI. Waiting
-    // for the specific `last_error` text the deferred path writes
-    // is the right oracle.
-    let pool = app.pool.clone();
-    wait_until("playlist row processed via deferred path", move || {
-        let pool = pool.clone();
-        Box::pin(async move {
-            let err: Option<String> = sqlx::query_scalar(
-                "SELECT last_error FROM feed_sources \
-                 WHERE kind='playlist' AND source_id='PLcapped'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(None);
-            err.as_deref().is_some_and(|s| s.contains("rate-capped"))
-        })
-    })
-    .await;
-    handle.abort();
-
-    // The rescheduled next_poll_at must be within the normal channel
-    // interval window, NOT pushed a year out. With KEY_CHANNEL_INTERVAL_S
-    // = 60 in the test harness and ±15% jitter, the upper bound is
-    // ~70s. We use a generous 30 day ceiling to firmly reject the
-    // 365-day shelve.
-    let (next, err, errs): (i64, Option<String>, i64) = sqlx::query_as(
-        "SELECT next_poll_at, last_error, consecutive_errors FROM feed_sources \
-         WHERE kind='playlist' AND source_id='PLcapped'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
-    assert!(
-        next < unix_now() + (30 * 24 * 60 * 60),
-        "rate-capped playlist must reschedule normally, not shelve; \
-         got next_poll_at={next} (~{} days ahead)",
-        (next - unix_now()) / 86_400
-    );
-    assert!(
-        err.as_deref().is_some_and(|s| s.contains("rate-capped")),
-        "diagnostic message should identify the rate-cap path; got {err:?}"
-    );
-    assert_eq!(
-        errs, 2,
-        "rate-capped path must preserve prior consecutive_errors; \
-         this is the distinction between record_poll_deferred and \
-         record_poll_skipped"
     );
 }
 

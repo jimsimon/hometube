@@ -31,14 +31,6 @@ export interface AllowlistedChannel {
   created_at: number;
 }
 
-export interface AllowlistedPlaylist {
-  id: number;
-  playlist_id: string;
-  playlist_title: string;
-  playlist_thumbnail_url: string | null;
-  created_at: number;
-}
-
 export interface AllowlistedVideo {
   id: number;
   video_id: string;
@@ -85,7 +77,7 @@ export interface ChildSettings {
 }
 
 export interface SearchItem {
-  kind: "channel" | "playlist" | "video";
+  kind: "channel" | "video";
   id: string;
   title: string;
   description: string;
@@ -113,24 +105,6 @@ export interface ChildSearchChannelHit {
   channel_thumbnail_url: string | null;
 }
 
-/**
- * Origin of a playlist hit in child search results. Used by
- * `<hometube-search-results>` to render the
- * appropriate badge:
- *
- * - `allowlist` — playlist the parent allowlisted directly
- * - `own` — playlist the child created in HomeTube
- * - `family` — family playlist the parent created and shared
- */
-export type ChildSearchPlaylistSource = "allowlist" | "own" | "family";
-
-export interface ChildSearchPlaylistHit {
-  playlist_id: string;
-  playlist_title: string;
-  playlist_thumbnail_url: string | null;
-  source: ChildSearchPlaylistSource;
-}
-
 export interface ChildSearchVideoHit {
   video_id: string;
   title: string;
@@ -141,13 +115,12 @@ export interface ChildSearchVideoHit {
 
 export interface ChildSearchResults {
   channels: ChildSearchChannelHit[];
-  playlists: ChildSearchPlaylistHit[];
   videos: ChildSearchVideoHit[];
 }
 
 export interface ChildSearchResponse {
   q: string;
-  kind: "all" | "channel" | "playlist" | "video" | string;
+  kind: "all" | "channel" | "video" | string;
   results: ChildSearchResults;
   next_page_token: string | null;
 }
@@ -178,7 +151,7 @@ export interface NewVideoItem {
   channel_title: string | null;
   thumbnail_url: string | null;
   published_at: string | null;
-  source_kind: "channel" | "playlist";
+  source_kind: "channel";
   source_id: string;
 }
 
@@ -233,10 +206,9 @@ export interface ChannelInfo {
   thumbnails: Record<string, { url: string; width?: number; height?: number }>;
   subscriber_count: number | null;
   video_count: number | null;
-  uploads_playlist_id: string | null;
 }
 
-export interface PlaylistItem {
+export interface ChannelVideoItem {
   video_id: string;
   title: string;
   channel_id: string | null;
@@ -247,7 +219,7 @@ export interface PlaylistItem {
 }
 
 export interface ChannelVideosPage {
-  items: PlaylistItem[];
+  items: ChannelVideoItem[];
   next_page_token: string | null;
 }
 
@@ -260,39 +232,6 @@ export interface SubscriptionRow {
   visible: boolean;
 }
 
-export interface PlaylistSummary {
-  id: number;
-  youtube_playlist_id: string | null;
-  title: string;
-  description: string | null;
-  is_own: boolean;
-  video_count: number;
-  created_at: number;
-  updated_at: number;
-  /**
-   * `true` when this playlist is reachable through the child's
-   * allowlist. Always true for `is_own=true`. For YouTube library
-   * imports the flag is computed by joining against
-   * `allowlisted_playlists` server-side; child UIs should hide rows
-   * where `visible === false`.
-   */
-  visible: boolean;
-}
-
-export interface PlaylistVideo {
-  id: number;
-  video_id: string;
-  video_title: string;
-  video_thumbnail_url: string | null;
-  channel_title: string | null;
-  position: number;
-  added_at: number;
-}
-
-export interface PlaylistDetail extends PlaylistSummary {
-  videos: PlaylistVideo[];
-}
-
 export interface LikeRow {
   id: number;
   video_id: string;
@@ -302,7 +241,7 @@ export interface LikeRow {
   /**
    * `true` when the liked video is reachable through the child's
    * allowlist (direct video allowlist; `video_likes` doesn't carry
-   * channel/playlist metadata). Likes for videos the parent hasn't
+   * channel metadata). Likes for videos the parent hasn't
    * allowlisted come back with `visible: false` so the child UI can
    * drop them.
    */
@@ -393,50 +332,8 @@ export interface ChannelPreview {
   thumbnails: Record<string, { url: string; width?: number; height?: number }>;
   subscriber_count: number | null;
   video_count: number | null;
-  uploads_playlist_id: string | null;
-  videos: PlaylistItem[];
+  videos: ChannelVideoItem[];
   next_page_token: string | null;
-}
-
-export interface PlaylistPreview {
-  id: string;
-  title: string;
-  description: string;
-  thumbnails: Record<string, { url: string; width?: number; height?: number }>;
-  channel_id: string | null;
-  channel_title: string | null;
-  item_count: number | null;
-  videos: PlaylistItem[];
-  next_page_token: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Phase 18 — family playlists
-// ---------------------------------------------------------------------------
-
-export interface FamilyPlaylistSummary {
-  id: number;
-  created_by: number;
-  title: string;
-  description: string | null;
-  created_at: number;
-  updated_at: number;
-  video_count: number;
-}
-
-export interface FamilyPlaylistVideo {
-  id: number;
-  video_id: string;
-  video_title: string;
-  video_thumbnail_url: string | null;
-  channel_title: string | null;
-  position: number;
-  added_at: number;
-}
-
-export interface FamilyPlaylistDetail extends FamilyPlaylistSummary {
-  videos: FamilyPlaylistVideo[];
-  child_ids: number[];
 }
 
 // ---------------------------------------------------------------------------
