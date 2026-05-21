@@ -491,10 +491,11 @@ async fn child_can_read_own_settings() {
     let res = app.server.get("/api/children/me/settings").await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
-    // Defaults established by `ensure_settings_row`. The handler
-    // serialises the boolean as `true`/`false`, not the underlying
-    // SQLite 1/0 integer.
-    assert!(body["downloads_enabled"].as_bool().unwrap_or(false));
+    // Defaults established by `ensure_settings_row` per migration 012:
+    // both downloads and chromecast default OFF; parents opt in. The
+    // handler serialises booleans as `true`/`false`, not SQLite 1/0.
+    assert_eq!(body["downloads_enabled"].as_bool(), Some(false));
+    assert_eq!(body["chromecast_enabled"].as_bool(), Some(false));
 }
 
 #[tokio::test]

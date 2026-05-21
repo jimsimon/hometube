@@ -35,6 +35,10 @@ pub struct ChildSettings {
     pub playback_speed_locked: i64,
     pub autoplay_enabled: i64,
     pub autoplay_max_consecutive: Option<i64>,
+    /// Whether the player should load the Chromecast SDK and surface a
+    /// cast button. Gated per-child so parents can opt children in
+    /// individually; defaults OFF (see migration 011).
+    pub chromecast_enabled: i64,
 }
 
 impl Serialize for ChildSettings {
@@ -43,13 +47,14 @@ impl Serialize for ChildSettings {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("ChildSettings", 6)?;
+        let mut s = serializer.serialize_struct("ChildSettings", 7)?;
         s.serialize_field("child_account_id", &self.child_account_id)?;
         s.serialize_field("downloads_enabled", &(self.downloads_enabled != 0))?;
         s.serialize_field("max_quality", &self.max_quality)?;
         s.serialize_field("playback_speed_locked", &(self.playback_speed_locked != 0))?;
         s.serialize_field("autoplay_enabled", &(self.autoplay_enabled != 0))?;
         s.serialize_field("autoplay_max_consecutive", &self.autoplay_max_consecutive)?;
+        s.serialize_field("chromecast_enabled", &(self.chromecast_enabled != 0))?;
         s.end()
     }
 }
@@ -66,6 +71,8 @@ pub struct UpdateSettingsBody {
     pub autoplay_enabled: Option<bool>,
     #[serde(default)]
     pub autoplay_max_consecutive: Option<Option<i64>>,
+    #[serde(default)]
+    pub chromecast_enabled: Option<bool>,
 }
 
 /// `GET /api/children/:id/settings`.
@@ -77,7 +84,7 @@ pub async fn get_settings(
     ensure_settings_row(&state, child_id).await?;
     let row: ChildSettings = sqlx::query_as(
         "SELECT child_account_id, downloads_enabled, max_quality, playback_speed_locked, \
-                autoplay_enabled, autoplay_max_consecutive \
+                autoplay_enabled, autoplay_max_consecutive, chromecast_enabled \
          FROM child_settings WHERE child_account_id = ?",
     )
     .bind(child_id)
@@ -100,7 +107,7 @@ pub async fn get_my_settings(
     ensure_settings_row(&state, current.id).await?;
     let row: ChildSettings = sqlx::query_as(
         "SELECT child_account_id, downloads_enabled, max_quality, playback_speed_locked, \
-                autoplay_enabled, autoplay_max_consecutive \
+                autoplay_enabled, autoplay_max_consecutive, chromecast_enabled \
          FROM child_settings WHERE child_account_id = ?",
     )
     .bind(current.id)
@@ -171,6 +178,16 @@ pub async fn update_settings(
              WHERE child_account_id = ?",
         )
         .bind(v)
+        .bind(child_id)
+        .execute(&state.db)
+        .await?;
+    }
+    if let Some(v) = body.chromecast_enabled {
+        sqlx::query(
+            "UPDATE child_settings SET chromecast_enabled = ?, updated_at = unixepoch() \
+             WHERE child_account_id = ?",
+        )
+        .bind(v as i64)
         .bind(child_id)
         .execute(&state.db)
         .await?;

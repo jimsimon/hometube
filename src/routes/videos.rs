@@ -72,6 +72,12 @@ pub struct StreamResponse {
     /// generate an HMAC signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_proxy_url: Option<String>,
+    /// Short-lived signed manifest URL safe to hand to a Chromecast
+    /// receiver (no cookie auth required). Present only when the
+    /// requesting child has `chromecast_enabled = 1`; absent (and the
+    /// frontend therefore skips the Cast SDK entirely) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cast_manifest_url: Option<String>,
     /// `true` when the video uses spherical/equirectangular projection
     /// (360° video). Detected from yt-dlp's `format_note` containing
     /// `"equi"` or `"hequ"` on video-only formats.
@@ -161,11 +167,34 @@ pub async fn get_stream(
         };
 
     // Pick the best audio-only format and generate a pre-signed proxy URL.
-    let audio_proxy_url = {
-        let secret = dash::ensure_proxy_secret(&state.db).await?;
-        best_audio_format(&formats)
-            .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let audio_proxy_url = best_audio_format(&formats)
+        .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id));
+
+    // Generate a Chromecast manifest URL when the requester is allowed
+    // to cast. Children must have `chromecast_enabled = 1`; parents
+    // are always allowed (they cast from preview/admin flows). The
+    // token binds to the requester's account id so a leaked URL only
+    // unlocks playback for that specific account *and* only while the
+    // child's per-video allowlist still applies — `get_stream_manifest`
+    // re-runs the access check at request time using the bound id.
+    let should_mint_cast = match current.account_type {
+        AccountType::Child => {
+            let enabled: i64 = sqlx::query_scalar(
+                "SELECT chromecast_enabled FROM child_settings WHERE child_account_id = ?",
+            )
+            .bind(current.id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0);
+            enabled != 0
+        }
+        AccountType::Parent => true,
     };
+    let cast_manifest_url = should_mint_cast.then(|| {
+        let exp = chrono::Utc::now().timestamp() + 6 * 3600;
+        dash::build_cast_manifest_url(&secret, &video_id, current.id, exp)
+    });
 
     // Detect spherical/360° videos. yt-dlp marks equirectangular
     // formats with "equi" or "hequ" in `format_note`. Check any
@@ -186,6 +215,7 @@ pub async fn get_stream(
         manifest_type,
         formats,
         audio_proxy_url,
+        cast_manifest_url,
         is_spherical,
     }))
 }
@@ -194,20 +224,109 @@ pub async fn get_stream(
 // /api/videos/:videoId/stream/manifest.mpd
 // ---------------------------------------------------------------------------
 
+/// Optional cast-token query string for `get_stream_manifest`.
+///
+/// When a Chromecast receiver fetches the manifest it can't send a
+/// session cookie. Instead the local player passes a short-lived signed
+/// URL minted by `build_cast_manifest_url`. All three fields must be
+/// present together — partial signatures fail validation.
+#[derive(Debug, Deserialize, Default)]
+pub struct ManifestQuery {
+    pub cast_token: Option<String>,
+    pub cast_uid: Option<String>,
+    pub cast_exp: Option<String>,
+}
+
 /// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
 /// DASH manifest body directly. The player fetches this URL to bootstrap
 /// playback; we cannot reuse the JSON `/stream` endpoint because that
 /// embeds the manifest text inside a JSON envelope.
+///
+/// Auth: either a session cookie OR a valid `cast_token` + `cast_uid` +
+/// `cast_exp` query triple. The cast-token path exists so Chromecast
+/// receivers (which can't send cookies) can fetch the manifest. When
+/// authenticated via cast token, we re-run the per-video allowlist
+/// check against the bound child id so a token issued before a parent
+/// revoked the kid's access stops working immediately.
 pub async fn get_stream_manifest(
     State(state): State<AppState>,
-    current: CurrentAccount,
+    current: Option<CurrentAccount>,
     Path(video_id): Path<String>,
+    Query(q): Query<ManifestQuery>,
 ) -> AppResult<Response> {
+    // Authenticate via cast token when no session cookie is present.
+    // A valid signature alone only proves "the server minted this for
+    // this child for this video at some point" — we still re-run the
+    // per-video allowlist check below using the bound child id, so
+    // a token outlives neither its 6h expiry nor a parent's
+    // revocation of access.
+    let cast_authed_child: Option<i64> = match (
+        q.cast_token.as_deref(),
+        q.cast_uid.as_deref(),
+        q.cast_exp.as_deref(),
+    ) {
+        (Some(token), Some(uid), Some(exp)) => {
+            let secret = dash::ensure_proxy_secret(&state.db).await?;
+            dash::verify_cast_token(
+                &secret,
+                &video_id,
+                uid,
+                exp,
+                token,
+                chrono::Utc::now().timestamp(),
+            )
+        }
+        _ => None,
+    };
+    if current.is_none() && cast_authed_child.is_none() {
+        return Err(AppError::Unauthorized);
+    }
+
     let cache = video_cache(&state);
     let result = cache
         .get_or_extract(&state.db, &state.config, &video_id)
         .await?;
-    enforce_access(&state.db, &current, &video_id, &result).await?;
+    if let Some(c) = current.as_ref() {
+        enforce_access(&state.db, c, &video_id, &result).await?;
+    } else if let Some(child_id) = cast_authed_child {
+        // Re-run the same allowlist logic the cookie path uses, but
+        // build a synthetic `CurrentAccount` from the token-bound id.
+        // We look up the live account so a deleted/blocked child can't
+        // keep using their old token.
+        let account = crate::models::account::find_by_id(&state.db, child_id)
+            .await?
+            .ok_or(AppError::Forbidden)?;
+        let synthetic = CurrentAccount {
+            id: account.id,
+            display_name: account.display_name.clone(),
+            account_type: account.typed(),
+            session_id: String::new(),
+        };
+        // Re-check the per-child `chromecast_enabled` setting at
+        // request time, not just at token mint time. Without this,
+        // a token minted while cast was enabled would keep working
+        // for up to 6 hours after a parent disables cast — which
+        // defeats the point of the per-child gate.
+        //
+        // Parents also get cast tokens minted (see `get_stream`),
+        // but skip this check because they have no `child_settings`
+        // row and aren't subject to the parental gate — the parent
+        // account itself *is* the gate. The match guard is therefore
+        // load-bearing: removing it would 403 every parent cast.
+        if matches!(synthetic.account_type, AccountType::Child) {
+            let enabled: i64 = sqlx::query_scalar(
+                "SELECT chromecast_enabled FROM child_settings WHERE child_account_id = ?",
+            )
+            .bind(synthetic.id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0);
+            if enabled == 0 {
+                return Err(AppError::Forbidden);
+            }
+        }
+        enforce_access(&state.db, &synthetic, &video_id, &result).await?;
+    }
 
     let body = fetch_and_rewrite_manifest(&state, &video_id, &result)
         .await?

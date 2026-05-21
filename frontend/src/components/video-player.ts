@@ -70,6 +70,7 @@ interface ShakaPlayer {
   setTextVisibility(visible: boolean): void;
   isTextVisible(): boolean;
 }
+
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
   destroy(): void;
@@ -105,6 +106,77 @@ import "./sleep-timer.js";
 import "./like-button.js";
 import "./subscribe-button.js";
 import "./error-banner.js";
+
+/**
+ * Google's Default Media Receiver — a generic Cast app that plays any
+ * MediaInformation with a public URL. Lets us cast without registering
+ * a custom receiver (which costs $5 and requires hosting an HTML
+ * receiver page). The tradeoff: the TV shows a generic splash and
+ * we can't customize the on-screen controls — fine for kid use.
+ */
+const CAST_RECEIVER_APP_ID = "CC1AD845";
+
+/**
+ * URL of the Google Cast sender SDK. Loaded once per page, lazily,
+ * only for kids whose `chromecast_enabled` setting is on. Loading the
+ * SDK reaches out to gstatic.com and starts polling for nearby Cast
+ * devices, so we deliberately avoid it for kids who can't cast.
+ */
+const CAST_SDK_URL = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js";
+
+/**
+ * Module-level singleton for the SDK-load promise. Subsequent callers
+ * (e.g. navigation between videos) re-await the same promise instead
+ * of injecting duplicate script tags. Resolves once the SDK signals
+ * readiness via `__onGCastApiAvailable`.
+ */
+let castSdkLoadPromise: Promise<void> | null = null;
+
+/**
+ * Inject the Cast sender SDK if not already loaded. Idempotent.
+ *
+ * The SDK fires `window.__onGCastApiAvailable(isAvailable)` once it's
+ * ready; we resolve the returned promise from inside that callback so
+ * Shaka's `castReceiverAppId` config picks up the now-available SDK
+ * when the UI initializes.
+ *
+ * Failure modes (script blocked, offline, etc.) resolve the promise
+ * anyway — Shaka tolerates a missing SDK by simply not showing the
+ * cast button, which is the right degradation for a kid's tablet on
+ * a flaky network.
+ */
+function loadCastSdk(): Promise<void> {
+  if (castSdkLoadPromise) return castSdkLoadPromise;
+  castSdkLoadPromise = new Promise<void>((resolve) => {
+    if (typeof document === "undefined") {
+      resolve();
+      return;
+    }
+    // If the SDK is already on the page (e.g. another HomeTube tab
+    // injected it), skip the second injection. The `cast` global
+    // appears synchronously once the script has executed.
+    type CastGlobal = { framework?: unknown };
+    const w = window as unknown as {
+      __onGCastApiAvailable?: (available: boolean) => void;
+      cast?: CastGlobal;
+    };
+    if (w.cast && w.cast.framework) {
+      resolve();
+      return;
+    }
+    w.__onGCastApiAvailable = (_available: boolean): void => {
+      // Resolve regardless of `available` — Shaka itself handles
+      // the unavailable case by hiding the cast button.
+      resolve();
+    };
+    const script = document.createElement("script");
+    script.src = CAST_SDK_URL;
+    script.async = true;
+    script.onerror = (): void => resolve(); // Treat load failure as "no cast".
+    document.head.appendChild(script);
+  });
+  return castSdkLoadPromise;
+}
 
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
@@ -649,32 +721,72 @@ export class VideoPlayer extends LitElement {
       },
     );
 
-    // Default audio language to English. Shaka picks any AdaptationSet
-    // whose `lang` attribute starts with "en" (e.g. "en", "en-US",
-    // "en-GB"). Users can switch via the language button in the
-    // overflow menu when multiple languages are present.
+    // Audio + codec preference, expressed as a single `preferredAudio`
+    // array. Shaka v5.1 replaced the flat `preferredAudioLanguage` /
+    // `preferredAudioCodecs` knobs with `preferredAudio`, an *ordered*
+    // list of preference objects (language, role, codec, channelCount,
+    // label, …). Shaka tries each entry in order and stops at the
+    // first non-empty match.
     //
-    // Shaka v5.1 replaced the flat `preferredAudioLanguage` with
-    // `preferredAudio`, an *array* of preference objects (each may
-    // specify language, role, channelCount, label, etc).
-    player.configure("preferredAudio", [{ language: "en" }]);
+    // IMPORTANT: do NOT mix the deprecated `preferredAudioCodecs` knob
+    // with `preferredAudio`. Shaka's deprecation shim synthesizes a
+    // fresh `preferredAudio` array from the codec list with empty
+    // `language` fields, clobbering any language preference set in a
+    // prior `configure()` call.
+    //
+    // Preference order (kid-targeted: locale-first, original-language
+    // fallback):
+    //   1. Full BCP-47 locale + opus  → e.g. fr-FR opus dub
+    //   2. Full BCP-47 locale + mp4a  → same locale, codec fallback
+    //   3. Primary subtag + opus      → e.g. fr opus dub when only
+    //                                   "fr" exists (YouTube AI dubs
+    //                                   typically carry the primary
+    //                                   subtag, not the region)
+    //   4. Primary subtag + mp4a      → same, mp4a fallback
+    //   5. Any opus                   → no localized dub: codec-only
+    //                                   entry matches all opus tracks,
+    //                                   then Shaka's internal `primary`
+    //                                   filter narrows to Role=main
+    //                                   (original language) emitted by
+    //                                   dash.rs
+    //   6. Any mp4a                   → same, mp4a fallback
+    //
+    // Opus is listed before mp4a within each tier because it's
+    // ~30% more bandwidth-efficient at equivalent quality and YouTube
+    // serves it for every language. Shaka does prefix-match `en` →
+    // `en-US`, so steps 3/4 also help when the manifest happens to
+    // carry the region-qualified tag but the user's locale doesn't.
+    const browserLocale = (typeof navigator !== "undefined" ? navigator.language : "en") || "en";
+    const primarySubtag = browserLocale.split("-", 1)[0];
+    const localeEntries =
+      primarySubtag !== browserLocale
+        ? [
+            { language: browserLocale, codec: "opus" },
+            { language: browserLocale, codec: "mp4a" },
+            { language: primarySubtag, codec: "opus" },
+            { language: primarySubtag, codec: "mp4a" },
+          ]
+        : [
+            { language: browserLocale, codec: "opus" },
+            { language: browserLocale, codec: "mp4a" },
+          ];
+    player.configure("preferredAudio", [...localeEntries, { codec: "opus" }, { codec: "mp4a" }]);
 
-    // Codec preference: VP9 + opus first, AVC1 + mp4a as fallback.
-    // The synthesized DASH manifest emits both ladders as separate
-    // AdaptationSets whenever YouTube provides them. We prefer VP9
-    // because:
-    //   - it reaches 4K (AVC1 caps at 1080p on YouTube),
-    //   - it's ~30–50% more bandwidth-efficient at equal quality,
-    //   - modern tablets (the typical HomeTube client) have hardware
-    //     VP9 decode.
-    // AVC1 is kept as a fallback so videos without a VP9 encode
-    // (e.g. long-form uploads where YouTube hasn't backfilled VP9)
-    // still play instead of degrading to audio-only.
+    // Video codec preference: VP9 first, AVC1 as fallback. VP9
+    // reaches 4K on YouTube (AVC1 caps at 1080p), is ~30–50% more
+    // bandwidth-efficient, and modern tablets (the typical HomeTube
+    // client) have hardware VP9 decode. AVC1 is kept as a fallback
+    // for uploads where YouTube hasn't backfilled VP9.
     //
-    // Setting this explicitly insulates us from shaka's internal
-    // default heuristic, which has shifted between versions.
-    player.configure("preferredVideoCodecs", ["vp09", "vp9", "avc1", "avc3"]);
-    player.configure("preferredAudioCodecs", ["opus", "mp4a"]);
+    // Expressed via `preferredVideo` (not the deprecated
+    // `preferredVideoCodecs`) for the same shim-clobbering reason as
+    // audio above.
+    player.configure("preferredVideo", [
+      { codec: "vp09" },
+      { codec: "vp9" },
+      { codec: "avc1" },
+      { codec: "avc3" },
+    ]);
 
     // Apply quality cap if set.
     if (this.settings?.max_quality) {
@@ -682,6 +794,27 @@ export class VideoPlayer extends LitElement {
       if (maxHeight) {
         player.configure("abr.restrictions.maxHeight", maxHeight);
       }
+    }
+
+    // Chromecast enablement is the *intersection* of a parent's
+    // per-child setting (cosmetic UI gate) and the presence of a
+    // server-minted `cast_manifest_url` (the real enforcement — see
+    // backend `get_stream`, which only mints the URL for children
+    // with `chromecast_enabled = 1`). Both must be true; either one
+    // alone leaves cast disabled. This also covers the case of a
+    // tampered local settings copy — the kid can flip the UI flag,
+    // but without `cast_manifest_url` from the server, the receiver
+    // has nothing to fetch.
+    const castEnabled = !!(this.settings?.chromecast_enabled && this.stream?.cast_manifest_url);
+
+    // Lazy-load the Cast sender SDK *only* when this child is allowed
+    // to cast. The SDK reaches out to gstatic.com and starts polling
+    // for nearby devices, so we don't want it on the page at all for
+    // kids whose parents have cast disabled. The load is parallel to
+    // player setup — it just has to be done before the UI overlay
+    // initialises so Shaka can attach its CastProxy to the SDK.
+    if (castEnabled) {
+      await loadCastSdk();
     }
 
     // Create UI overlay (controls, quality menu, language menu, etc.).
@@ -698,8 +831,8 @@ export class VideoPlayer extends LitElement {
     // overflow_menu icon becomes the "settings gear" and hosts quality,
     // language, and playback-speed pickers.
     const overflowButtons = this.settings?.playback_speed_locked
-      ? ["quality", "language", "captions"]
-      : ["quality", "language", "captions", "playback_rate"];
+      ? ["quality", "language", "captions", "statistics"]
+      : ["quality", "language", "captions", "playback_rate", "statistics"];
     // Only surface the PiP button when the browser actually supports
     // Picture-in-Picture. Otherwise Shaka leaves an inert slot in the
     // control bar on iOS Safari (PWA mode) and Firefox Android, which
@@ -719,10 +852,23 @@ export class VideoPlayer extends LitElement {
         "captions",
         "overflow_menu",
         ...(supportsPip ? ["picture_in_picture"] : []),
-        "cast",
+        // Cast button only when this child is allowed to cast.
+        // Without the SDK loaded, the button would render as an inert
+        // slot, so we omit it entirely.
+        ...(castEnabled ? ["cast"] : []),
         "fullscreen",
       ],
       overflowMenuButtons: overflowButtons,
+      // Receiver app ID. Only meaningful when castEnabled — Shaka
+      // ignores it otherwise. We use Google's Default Media Receiver
+      // (no custom receiver to host) — sufficient for DASH playback,
+      // limited TV-side UI customisation.
+      ...(castEnabled
+        ? {
+            castReceiverAppId: CAST_RECEIVER_APP_ID,
+            castAndroidReceiverCompatible: true,
+          }
+        : {}),
       // Tint the scrubber YouTube-red. `played` is the filled portion,
       // `buffered` is the ahead-of-playhead loaded region; the default
       // base track color is fine, so we leave it unset.
@@ -768,7 +914,35 @@ export class VideoPlayer extends LitElement {
         await player.load(audioUrl, undefined, "audio/webm");
       }
     } else {
-      const manifestUrl = `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
+      // When casting is enabled, load the server-minted cast manifest
+      // URL even for local playback. Shaka's CastProxy serialises the
+      // player's currently-loaded URL to the receiver synchronously at
+      // cast-connect time — *before* any caststatuschanged event fires
+      // on the sender — so a deferred URL swap on `caststatuschanged`
+      // would race the initial state sync (receiver fetches the
+      // cookie-only URL, 401s, then a subsequent mirrored load() with
+      // the cast URL recovers). Eager loading avoids the race at the
+      // cost of having the token in the local request stream.
+      //
+      // The token-in-network-logs concern is bounded by layered
+      // server-side defenses applied at every cast-token request:
+      //   - HMAC binds to (video_id, child_id, exp); a leaked URL only
+      //     unlocks that one kid's access to that one video.
+      //   - The manifest handler re-runs `enforce_access` against the
+      //     bound child id, so a parent's allowlist revocation kills
+      //     the token immediately (not at 6h expiry).
+      //   - The handler re-checks `chromecast_enabled` on the bound
+      //     child, so disabling cast in parent settings also kills
+      //     outstanding tokens immediately.
+      //   - 6h expiry, HTTPS-only, not in browser history or referer.
+      // Combined: a kid copying the URL from DevTools to share with a
+      // sibling gets nothing (child binding); using it from another
+      // browser after their session expires gets 6h max, subject to
+      // parent revocation at any moment.
+      const manifestUrl =
+        castEnabled && this.stream?.cast_manifest_url
+          ? this.stream.cast_manifest_url
+          : `/api/videos/${encodeURIComponent(this.videoId)}/stream/manifest.mpd`;
       // Explicitly specify the MIME type so shaka doesn't have to guess
       // from the URL or Content-Type header (which may be text/xml or
       // application/octet-stream depending on the server config).

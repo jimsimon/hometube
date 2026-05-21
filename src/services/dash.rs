@@ -109,6 +109,96 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Build a signed manifest URL for Chromecast playback.
+///
+/// The Chromecast Default Media Receiver fetches the manifest directly
+/// without any session cookies, so we can't gate the manifest endpoint
+/// behind cookie auth alone when casting. Instead we mint a short-lived
+/// signed URL: an HMAC over `(video_id, cast_uid, cast_exp)` where
+/// `cast_uid` is the child account the token was minted for and
+/// `cast_exp` is a Unix timestamp. The manifest handler accepts the URL
+/// if either (a) a normal session cookie is present, or (b) the token
+/// verifies AND the bound child still passes the per-video allowlist
+/// check.
+///
+/// The returned URL is **relative** (no scheme/host). The local player
+/// resolves it against `document.baseURI` for its own fetch, and when
+/// Shaka's CastProxy serialises the player state to send to the
+/// receiver, it origin-resolves the relative URL against the page
+/// origin before transmitting — so the receiver gets an absolute URL
+/// it can hit directly. Generating an absolute URL server-side would
+/// require knowing the public origin (Host header, X-Forwarded-Host
+/// behind a proxy, etc.), which is fragile across deployments;
+/// delegating to the browser's resolution machinery is more robust.
+///
+/// Binding to the child id (not just the video id) means a token can't
+/// be reused across accounts and survives a per-child allowlist
+/// revocation — if a parent removes a video from the kid's allowlist,
+/// any outstanding cast token for that kid stops working immediately
+/// because the access check re-runs at request time.
+///
+/// Six-hour expiry mirrors YouTube's own segment URL TTL — long enough
+/// for a kid to finish a long video without re-pairing, short enough
+/// that a leaked URL stops working before the kid's bedtime.
+pub fn build_cast_manifest_url(
+    secret: &[u8],
+    video_id: &str,
+    child_id: i64,
+    expires_at: i64,
+) -> String {
+    let exp = expires_at.to_string();
+    let uid = child_id.to_string();
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", video_id.to_string()),
+        ("cast_uid", uid.clone()),
+        ("cast_exp", exp.clone()),
+    ];
+    let sig = sign_query(secret, &params);
+    format!(
+        "/api/videos/{}/stream/manifest.mpd?cast_uid={}&cast_exp={}&cast_token={}",
+        youtube::percent_encode(video_id),
+        youtube::percent_encode(&uid),
+        youtube::percent_encode(&exp),
+        sig
+    )
+}
+
+/// Verify a `cast_token` query string against the current time, and
+/// return the bound `child_account_id` on success.
+///
+/// Returns `Some(child_id)` iff the signature is valid for the given
+/// `(video_id, cast_uid, cast_exp)` tuple AND `cast_exp` is still in
+/// the future. The caller is expected to use the returned id to
+/// re-run the per-child allowlist check — a valid signature only
+/// proves "the server minted this for this child for this video";
+/// whether the child *currently* has access is a separate concern
+/// that may have changed (parent revoked allowlist, child blocked
+/// the video, etc.) since the token was minted.
+pub fn verify_cast_token(
+    secret: &[u8],
+    video_id: &str,
+    cast_uid: &str,
+    cast_exp: &str,
+    cast_token: &str,
+    now_unix: i64,
+) -> Option<i64> {
+    let exp: i64 = cast_exp.parse().ok()?;
+    if exp <= now_unix {
+        return None;
+    }
+    let child_id: i64 = cast_uid.parse().ok()?;
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", video_id.to_string()),
+        ("cast_uid", cast_uid.to_string()),
+        ("cast_exp", cast_exp.to_string()),
+    ];
+    if verify_query(secret, &params, cast_token) {
+        Some(child_id)
+    } else {
+        None
+    }
+}
+
 /// Build a signed proxy URL for streaming an entire format file via
 /// byte-range requests. Used by the synthetic DASH manifest where each
 /// `<Representation>` points at a `<BaseURL>` through our proxy.
@@ -712,16 +802,34 @@ fn trim_video_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> 
 /// `139`/`140` for mp4a) and DRC (`*-drc-*`) variants down to a
 /// single track.
 ///
-/// One format per language. First-seen wins — this must match the
-/// probe order used by `fixup_webm_cues_offsets` (which also takes
-/// the first non-DRC non-dub format per itag) so the segment ranges
-/// are correct for the format the manifest emits.
+/// Highest bitrate per language wins. `abr` (audio bitrate, kbps) is
+/// the primary signal, falling back to `tbr` (total bitrate) when
+/// `abr` is missing. Picking the top tier gives users the best opus
+/// (~135 kbps itag 251) or mp4a (~129 kbps itag 140) track YouTube
+/// ships, instead of the lowest-bandwidth variant that would win a
+/// naive first-seen pass (yt-dlp lists formats in ascending bitrate
+/// order). Audio bandwidth is a rounding error next to video, so
+/// always serving the best tier is essentially free.
+///
+/// We deliberately emit a single Representation per language rather
+/// than exposing all tiers for Shaka's audio ABR. Audio ABR almost
+/// never fires (no adaptive benefit) and a single Representation
+/// keeps the manifest compact and the per-language AdaptationSet
+/// unambiguous for language switching.
 fn trim_audio_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> {
+    let bitrate = |f: &Format| f.abr.or(f.tbr).unwrap_or(0.0);
     let mut by_lang: std::collections::BTreeMap<String, &Format> =
         std::collections::BTreeMap::new();
     for f in candidates {
         let lang = f.language.clone().unwrap_or_default();
-        by_lang.entry(lang).or_insert(*f);
+        by_lang
+            .entry(lang)
+            .and_modify(|existing| {
+                if bitrate(f) > bitrate(existing) {
+                    *existing = *f;
+                }
+            })
+            .or_insert(*f);
     }
     by_lang.into_values().collect()
 }
@@ -774,6 +882,66 @@ fn escape_xml(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cast_token_round_trip() {
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        let now = 1_700_000_000;
+        let exp = now + 3600;
+        // Extract the cast_token from the URL so we exercise the same
+        // parse path the manifest handler uses.
+        let url = build_cast_manifest_url(secret, "abc123", 42, exp);
+        let token = url
+            .rsplit("cast_token=")
+            .next()
+            .expect("url has cast_token");
+        assert_eq!(
+            verify_cast_token(secret, "abc123", "42", &exp.to_string(), token, now),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn cast_token_rejects_expired() {
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        // Token minted in the past; the verify call uses a `now` that's
+        // already past `exp`. Without this check, a leaked URL would
+        // remain valid indefinitely — replay is the main attack we're
+        // guarding against.
+        let exp = 1_000;
+        let url = build_cast_manifest_url(secret, "abc123", 7, exp);
+        let token = url.rsplit("cast_token=").next().unwrap();
+        let now = 2_000;
+        assert!(verify_cast_token(secret, "abc123", "7", &exp.to_string(), token, now).is_none());
+    }
+
+    #[test]
+    fn cast_token_rejects_video_mismatch() {
+        // A token signed for video A must not validate against
+        // video B even if the same exp/secret are reused. This
+        // prevents one signed URL from unlocking arbitrary videos.
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        let exp = 1_700_000_000_i64;
+        let url = build_cast_manifest_url(secret, "video-a", 5, exp);
+        let token = url.rsplit("cast_token=").next().unwrap();
+        assert!(
+            verify_cast_token(secret, "video-b", "5", &exp.to_string(), token, exp - 100).is_none()
+        );
+    }
+
+    #[test]
+    fn cast_token_rejects_child_mismatch() {
+        // A token minted for child A must not validate when claimed by
+        // child B — prevents one kid sharing their cast URL to grant
+        // another kid (with stricter limits) access to the same video.
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        let exp = 1_700_000_000_i64;
+        let url = build_cast_manifest_url(secret, "vid", 5, exp);
+        let token = url.rsplit("cast_token=").next().unwrap();
+        assert!(
+            verify_cast_token(secret, "vid", "99", &exp.to_string(), token, exp - 100).is_none()
+        );
+    }
 
     #[test]
     fn round_trip_signature() {
