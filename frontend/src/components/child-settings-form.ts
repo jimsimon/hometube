@@ -107,6 +107,7 @@ export class ChildSettingsForm extends LitElement {
         playback_speed_locked: this.settings.playback_speed_locked,
         autoplay_enabled: this.settings.autoplay_enabled,
         autoplay_max_consecutive: this.settings.autoplay_max_consecutive,
+        chromecast_enabled: this.settings.chromecast_enabled,
       });
       this.message = "Saved.";
     } catch (err) {
@@ -167,6 +168,17 @@ export class ChildSettingsForm extends LitElement {
             .checked=${s.playback_speed_locked}
             @change=${(e: Event) =>
               this.updateField("playback_speed_locked", (e.target as HTMLInputElement).checked)}
+          />
+        </label>
+
+        <label class="row" for="chromecast-enabled">
+          Allow Chromecast
+          <input
+            id="chromecast-enabled"
+            type="checkbox"
+            .checked=${s.chromecast_enabled}
+            @change=${(e: Event) =>
+              this.updateField("chromecast_enabled", (e.target as HTMLInputElement).checked)}
           />
         </label>
 

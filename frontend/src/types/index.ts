@@ -74,6 +74,14 @@ export interface ChildSettings {
   playback_speed_locked: boolean;
   autoplay_enabled: boolean;
   autoplay_max_consecutive: number | null;
+  /**
+   * When true, the player loads the Chromecast SDK and surfaces a
+   * cast button. The setting is the *cosmetic* gate; the real
+   * enforcement is server-side — the backend only mints a
+   * `cast_manifest_url` (in `StreamResponse`) when this is true, so a
+   * tampered UI can't smuggle a kid past the parental control.
+   */
+  chromecast_enabled: boolean;
 }
 
 export interface UsageLimit {
@@ -199,6 +207,15 @@ export interface StreamResponse {
   }>;
   /** Pre-signed proxy URL for audio-only playback. */
   audio_proxy_url?: string | null;
+  /**
+   * Short-lived signed manifest URL safe to hand to a Chromecast
+   * receiver (no cookie auth required). Present only when the
+   * requesting child has `chromecast_enabled = true`; absent otherwise.
+   * Used to swap the player's loaded URL just before casting so the
+   * receiver fetches a self-contained URL it can authenticate via
+   * HMAC signature rather than cookies.
+   */
+  cast_manifest_url?: string | null;
   /** True when the video uses spherical/equirectangular projection (360°). */
   is_spherical?: boolean;
 }

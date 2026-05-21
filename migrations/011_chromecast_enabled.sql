@@ -1,0 +1,11 @@
+-- Per-child Chromecast permission. Defaults to OFF for two reasons:
+--   1. Parents opt children in deliberately (the Cast SDK reaches out
+--      to gstatic.com, and casting routes media through Google's
+--      infrastructure — a privacy consideration parents may want to
+--      weigh per child).
+--   2. The child's tablet must be on the same LAN as the Cast device,
+--      and the backend must be reachable from that LAN; not every
+--      HomeTube install meets those constraints. Defaulting OFF keeps
+--      the player UI free of a non-functional cast button on those
+--      installs.
+ALTER TABLE child_settings ADD COLUMN chromecast_enabled INTEGER NOT NULL DEFAULT 0;

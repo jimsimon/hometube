@@ -118,7 +118,11 @@ async fn child_settings_get_returns_defaults() {
         .await;
     assert!(res.status_code().is_success());
     let body: serde_json::Value = res.json();
-    assert!(body["downloads_enabled"].as_bool().unwrap_or(false));
+    // Migration 012 flipped the downloads default to OFF — new
+    // children opt in via the parent settings form, matching the
+    // chromecast posture.
+    assert_eq!(body["downloads_enabled"].as_bool(), Some(false));
+    assert_eq!(body["chromecast_enabled"].as_bool(), Some(false));
 }
 
 #[tokio::test]
@@ -133,6 +137,7 @@ async fn child_settings_put_persists_changes() {
             "max_quality": "720p",
             "playback_speed_locked": true,
             "autoplay_enabled": true,
+            "chromecast_enabled": true,
         }))
         .await;
     assert!(res.status_code().is_success());
@@ -140,6 +145,21 @@ async fn child_settings_put_persists_changes() {
     assert_eq!(body["downloads_enabled"].as_bool(), Some(false));
     assert_eq!(body["max_quality"], "720p");
     assert_eq!(body["playback_speed_locked"].as_bool(), Some(true));
+    assert_eq!(body["chromecast_enabled"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn child_settings_chromecast_defaults_off() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+    let res = app
+        .server
+        .get(&format!("/api/children/{child_id}/settings"))
+        .await;
+    assert!(res.status_code().is_success());
+    let body: serde_json::Value = res.json();
+    // Migration 011 default — parents must explicitly opt children in.
+    assert_eq!(body["chromecast_enabled"].as_bool(), Some(false));
 }
 
 #[tokio::test]

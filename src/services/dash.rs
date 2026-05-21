@@ -109,6 +109,61 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Build a signed manifest URL for Chromecast playback.
+///
+/// The Chromecast Default Media Receiver fetches the manifest directly
+/// without any session cookies, so we can't gate the manifest endpoint
+/// behind cookie auth alone when casting. Instead we mint a short-lived
+/// signed URL: an HMAC over `(video_id, cast_exp)` where `cast_exp` is
+/// a Unix timestamp. The manifest handler accepts the URL if either
+/// (a) a normal session cookie is present, or (b) `cast_token` verifies
+/// and `cast_exp` is in the future.
+///
+/// Six-hour expiry mirrors YouTube's own segment URL TTL — long enough
+/// for a kid to finish a long video without re-pairing, short enough
+/// that a leaked URL stops working before the kid's bedtime.
+pub fn build_cast_manifest_url(secret: &[u8], video_id: &str, expires_at: i64) -> String {
+    let exp = expires_at.to_string();
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", video_id.to_string()),
+        ("cast_exp", exp.clone()),
+    ];
+    let sig = sign_query(secret, &params);
+    format!(
+        "/api/videos/{}/stream/manifest.mpd?cast_exp={}&cast_token={}",
+        youtube::percent_encode(video_id),
+        youtube::percent_encode(&exp),
+        sig
+    )
+}
+
+/// Verify a `cast_token` query string against the current time.
+///
+/// Returns `true` iff the signature is valid for the given
+/// `(video_id, cast_exp)` tuple AND `cast_exp` is still in the future.
+/// The combined check guards against both forgery (no token) and
+/// replay (expired token).
+pub fn verify_cast_token(
+    secret: &[u8],
+    video_id: &str,
+    cast_exp: &str,
+    cast_token: &str,
+    now_unix: i64,
+) -> bool {
+    let exp: i64 = match cast_exp.parse() {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if exp <= now_unix {
+        return false;
+    }
+    let params: Vec<(&str, String)> = vec![
+        ("video_id", video_id.to_string()),
+        ("cast_exp", cast_exp.to_string()),
+    ];
+    verify_query(secret, &params, cast_token)
+}
+
 /// Build a signed proxy URL for streaming an entire format file via
 /// byte-range requests. Used by the synthetic DASH manifest where each
 /// `<Representation>` points at a `<BaseURL>` through our proxy.
@@ -712,16 +767,34 @@ fn trim_video_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> 
 /// `139`/`140` for mp4a) and DRC (`*-drc-*`) variants down to a
 /// single track.
 ///
-/// One format per language. First-seen wins — this must match the
-/// probe order used by `fixup_webm_cues_offsets` (which also takes
-/// the first non-DRC non-dub format per itag) so the segment ranges
-/// are correct for the format the manifest emits.
+/// Highest bitrate per language wins. `abr` (audio bitrate, kbps) is
+/// the primary signal, falling back to `tbr` (total bitrate) when
+/// `abr` is missing. Picking the top tier gives users the best opus
+/// (~135 kbps itag 251) or mp4a (~129 kbps itag 140) track YouTube
+/// ships, instead of the lowest-bandwidth variant that would win a
+/// naive first-seen pass (yt-dlp lists formats in ascending bitrate
+/// order). Audio bandwidth is a rounding error next to video, so
+/// always serving the best tier is essentially free.
+///
+/// We deliberately emit a single Representation per language rather
+/// than exposing all tiers for Shaka's audio ABR. Audio ABR almost
+/// never fires (no adaptive benefit) and a single Representation
+/// keeps the manifest compact and the per-language AdaptationSet
+/// unambiguous for language switching.
 fn trim_audio_representations<'a>(candidates: &[&'a Format]) -> Vec<&'a Format> {
+    let bitrate = |f: &Format| f.abr.or(f.tbr).unwrap_or(0.0);
     let mut by_lang: std::collections::BTreeMap<String, &Format> =
         std::collections::BTreeMap::new();
     for f in candidates {
         let lang = f.language.clone().unwrap_or_default();
-        by_lang.entry(lang).or_insert(*f);
+        by_lang
+            .entry(lang)
+            .and_modify(|existing| {
+                if bitrate(f) > bitrate(existing) {
+                    *existing = *f;
+                }
+            })
+            .or_insert(*f);
     }
     by_lang.into_values().collect()
 }
@@ -774,6 +847,60 @@ fn escape_xml(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cast_token_round_trip() {
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        let now = 1_700_000_000;
+        let exp = now + 3600;
+        // Extract the cast_exp/cast_token pair from the URL so we
+        // exercise the same parse path the manifest handler uses.
+        let url = build_cast_manifest_url(secret, "abc123", exp);
+        let exp_str = exp.to_string();
+        let token = url
+            .rsplit("cast_token=")
+            .next()
+            .expect("url has cast_token");
+        assert!(verify_cast_token(secret, "abc123", &exp_str, token, now));
+    }
+
+    #[test]
+    fn cast_token_rejects_expired() {
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        // Token minted in the past; the verify call uses a `now` that's
+        // already past `exp`. Without this check, a leaked URL would
+        // remain valid indefinitely — replay is the main attack we're
+        // guarding against.
+        let exp = 1_000;
+        let url = build_cast_manifest_url(secret, "abc123", exp);
+        let token = url.rsplit("cast_token=").next().unwrap();
+        let now = 2_000;
+        assert!(!verify_cast_token(
+            secret,
+            "abc123",
+            &exp.to_string(),
+            token,
+            now
+        ));
+    }
+
+    #[test]
+    fn cast_token_rejects_video_mismatch() {
+        // A token signed for video A must not validate against
+        // video B even if the same exp/secret are reused. This
+        // prevents one signed URL from unlocking arbitrary videos.
+        let secret = b"test-secret-with-some-bytes-aaaa";
+        let exp = 1_700_000_000_i64;
+        let url = build_cast_manifest_url(secret, "video-a", exp);
+        let token = url.rsplit("cast_token=").next().unwrap();
+        assert!(!verify_cast_token(
+            secret,
+            "video-b",
+            &exp.to_string(),
+            token,
+            exp - 100
+        ));
+    }
 
     #[test]
     fn round_trip_signature() {

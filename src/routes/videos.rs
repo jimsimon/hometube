@@ -72,6 +72,12 @@ pub struct StreamResponse {
     /// generate an HMAC signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_proxy_url: Option<String>,
+    /// Short-lived signed manifest URL safe to hand to a Chromecast
+    /// receiver (no cookie auth required). Present only when the
+    /// requesting child has `chromecast_enabled = 1`; absent (and the
+    /// frontend therefore skips the Cast SDK entirely) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cast_manifest_url: Option<String>,
     /// `true` when the video uses spherical/equirectangular projection
     /// (360° video). Detected from yt-dlp's `format_note` containing
     /// `"equi"` or `"hequ"` on video-only formats.
@@ -161,10 +167,33 @@ pub async fn get_stream(
         };
 
     // Pick the best audio-only format and generate a pre-signed proxy URL.
-    let audio_proxy_url = {
-        let secret = dash::ensure_proxy_secret(&state.db).await?;
-        best_audio_format(&formats)
-            .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id))
+    let secret = dash::ensure_proxy_secret(&state.db).await?;
+    let audio_proxy_url = best_audio_format(&formats)
+        .map(|f| dash::build_format_proxy_url(&secret, &video_id, &f.format_id));
+
+    // Generate a Chromecast manifest URL if the requesting child has
+    // chromecast_enabled. Parents always get one (they can cast their
+    // own preview/admin flows). The URL embeds a 6-hour expiry; if the
+    // child watches longer than that, they'd need to refresh the page
+    // to re-mint, which is a deliberate tradeoff (see
+    // `build_cast_manifest_url`).
+    let cast_manifest_url = if matches!(current.account_type, AccountType::Child) {
+        let enabled: i64 = sqlx::query_scalar(
+            "SELECT chromecast_enabled FROM child_settings WHERE child_account_id = ?",
+        )
+        .bind(current.id)
+        .fetch_optional(&state.db)
+        .await?
+        .unwrap_or(0);
+        if enabled != 0 {
+            let exp = chrono::Utc::now().timestamp() + 6 * 3600;
+            Some(dash::build_cast_manifest_url(&secret, &video_id, exp))
+        } else {
+            None
+        }
+    } else {
+        let exp = chrono::Utc::now().timestamp() + 6 * 3600;
+        Some(dash::build_cast_manifest_url(&secret, &video_id, exp))
     };
 
     // Detect spherical/360° videos. yt-dlp marks equirectangular
@@ -186,6 +215,7 @@ pub async fn get_stream(
         manifest_type,
         formats,
         audio_proxy_url,
+        cast_manifest_url,
         is_spherical,
     }))
 }
@@ -194,20 +224,54 @@ pub async fn get_stream(
 // /api/videos/:videoId/stream/manifest.mpd
 // ---------------------------------------------------------------------------
 
+/// Optional cast-token query string for `get_stream_manifest`.
+///
+/// When a Chromecast receiver fetches the manifest it can't send a
+/// session cookie. Instead the local player passes a short-lived signed
+/// URL minted by `build_cast_manifest_url`. Both fields are present
+/// together or neither — partial signatures fail validation.
+#[derive(Debug, Deserialize, Default)]
+pub struct ManifestQuery {
+    pub cast_token: Option<String>,
+    pub cast_exp: Option<String>,
+}
+
 /// `GET /api/videos/:videoId/stream/manifest.mpd` — return the rewritten
 /// DASH manifest body directly. The player fetches this URL to bootstrap
 /// playback; we cannot reuse the JSON `/stream` endpoint because that
 /// embeds the manifest text inside a JSON envelope.
+///
+/// Auth: either a session cookie OR a valid `cast_token` + `cast_exp`
+/// query pair. The cast-token path exists so Chromecast receivers
+/// (which can't send cookies) can fetch the manifest.
 pub async fn get_stream_manifest(
     State(state): State<AppState>,
-    current: CurrentAccount,
+    current: Option<CurrentAccount>,
     Path(video_id): Path<String>,
+    Query(q): Query<ManifestQuery>,
 ) -> AppResult<Response> {
+    // Authenticate via cast token when no session cookie is present.
+    // The session path also runs the per-video allowlist check below;
+    // cast-token requests are scoped to the specific video_id baked
+    // into the signature, so the token itself is the access grant.
+    let authed_via_cast = match (q.cast_token.as_deref(), q.cast_exp.as_deref()) {
+        (Some(token), Some(exp)) => {
+            let secret = dash::ensure_proxy_secret(&state.db).await?;
+            dash::verify_cast_token(&secret, &video_id, exp, token, chrono::Utc::now().timestamp())
+        }
+        _ => false,
+    };
+    if current.is_none() && !authed_via_cast {
+        return Err(AppError::Unauthorized);
+    }
+
     let cache = video_cache(&state);
     let result = cache
         .get_or_extract(&state.db, &state.config, &video_id)
         .await?;
-    enforce_access(&state.db, &current, &video_id, &result).await?;
+    if let Some(c) = current.as_ref() {
+        enforce_access(&state.db, c, &video_id, &result).await?;
+    }
 
     let body = fetch_and_rewrite_manifest(&state, &video_id, &result)
         .await?

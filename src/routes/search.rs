@@ -433,46 +433,92 @@ async fn search_videos(
     offset: i64,
 ) -> AppResult<Vec<ChildVideoHit>> {
     // We search local cached metadata first to keep the request fast.
-    // Three local sources:
-    //   - allowlisted_videos (direct)
-    //   - watch_history (videos already proven viewable)
-    //   - child_playlist_videos (videos in playlists)
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT video_id, video_title, channel_title, video_thumbnail_url FROM ( \
-            SELECT video_id, video_title, channel_title, video_thumbnail_url \
-              FROM allowlisted_videos WHERE child_account_id = ? \
-            UNION \
-            SELECT video_id, video_title, channel_title, video_thumbnail_url \
-              FROM watch_history WHERE child_account_id = ? \
-            UNION \
-            SELECT cpv.video_id, cpv.video_title, cpv.channel_title, cpv.video_thumbnail_url \
-              FROM child_playlist_videos cpv \
-              INNER JOIN child_playlists cp ON cp.id = cpv.playlist_id \
-              WHERE cp.child_account_id = ? AND cp.is_deleted = 0 \
-         ) \
-         WHERE video_title LIKE ? ESCAPE '\\' \
-         ORDER BY video_title \
-         LIMIT ? OFFSET ?",
-    )
-    .bind(child_id)
-    .bind(child_id)
-    .bind(child_id)
-    .bind(pattern)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    // Five local sources, UNION'd in priority order (SQLite's UNION
+    // dedupes by all columns, so videos appearing in multiple buckets
+    // collapse into one row):
+    //
+    //   1. allowlisted_videos       — direct per-video allowlist
+    //   2. watch_history            — videos already proven viewable
+    //   3. child_playlist_videos    — videos in the kid's playlists
+    //   4. feed_source_items via    — videos surfaced through an
+    //      allowlisted_channels       allowlisted channel's recent uploads
+    //   5. feed_source_items via    — videos surfaced through an
+    //      allowlisted_playlists      allowlisted playlist's contents
+    //
+    // (4) and (5) are necessary because a child whose access derives
+    // *only* from a channel/playlist allowlist would otherwise be
+    // unable to search for those videos at all — they'd be able to
+    // watch a video from the channel feed view, but not find it again
+    // via search. The `feed_source_items` table caches roughly the
+    // last 20 videos per allowlisted source (see migration 009), so
+    // search reaches recent uploads from allowlisted channels. Older
+    // videos still aren't searchable; expanding the cache window is a
+    // separate concern.
+    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT video_id, video_title, channel_id, channel_title, video_thumbnail_url FROM ( \
+                SELECT video_id, video_title, \
+                       NULL AS channel_id, \
+                       channel_title, video_thumbnail_url \
+                  FROM allowlisted_videos WHERE child_account_id = ? \
+                UNION \
+                SELECT video_id, video_title, \
+                       NULL AS channel_id, \
+                       channel_title, video_thumbnail_url \
+                  FROM watch_history WHERE child_account_id = ? \
+                UNION \
+                SELECT cpv.video_id, cpv.video_title, \
+                       NULL AS channel_id, \
+                       cpv.channel_title, cpv.video_thumbnail_url \
+                  FROM child_playlist_videos cpv \
+                  INNER JOIN child_playlists cp ON cp.id = cpv.playlist_id \
+                  WHERE cp.child_account_id = ? AND cp.is_deleted = 0 \
+                UNION \
+                SELECT fsi.video_id, fsi.title AS video_title, \
+                       fsi.channel_id, fsi.channel_title, \
+                       fsi.thumbnail_url AS video_thumbnail_url \
+                  FROM feed_source_items fsi \
+                  INNER JOIN allowlisted_channels ac \
+                    ON ac.channel_id = fsi.source_id AND fsi.kind = 'channel' \
+                  WHERE ac.child_account_id = ? \
+                UNION \
+                SELECT fsi.video_id, fsi.title AS video_title, \
+                       fsi.channel_id, fsi.channel_title, \
+                       fsi.thumbnail_url AS video_thumbnail_url \
+                  FROM feed_source_items fsi \
+                  INNER JOIN allowlisted_playlists ap \
+                    ON ap.playlist_id = fsi.source_id AND fsi.kind = 'playlist' \
+                  WHERE ap.child_account_id = ? \
+             ) \
+             WHERE video_title LIKE ? ESCAPE '\\' \
+             ORDER BY video_title \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(child_id)
+        .bind(child_id)
+        .bind(child_id)
+        .bind(child_id)
+        .bind(child_id)
+        .bind(pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     Ok(rows
         .into_iter()
-        .map(|(video_id, title, ch_title, thumb)| ChildVideoHit {
-            video_id,
-            title,
-            channel_id: None,
-            channel_title: ch_title,
-            thumbnail_url: thumb,
-        })
+        .map(
+            |(video_id, title, channel_id, ch_title, thumb)| ChildVideoHit {
+                video_id,
+                title,
+                // Surfaced for `can_child_view`'s channel-allowlist branch
+                // in the layer-B post-filter (see `child_search`).
+                channel_id,
+                channel_title: ch_title,
+                thumbnail_url: thumb,
+            },
+        )
         .collect())
 }
 
