@@ -8,8 +8,12 @@
 //!   control to drop videos the parent has since revoked.
 //! - `GET /api/feed/watch-again` — finished items from `watch_history`
 //!   (rows that HAVE reached [`is_effectively_finished`]), ordered by
-//!   most recently watched, also access-filtered. Disjoint partition
-//!   with `continue-watching`: every row lands in exactly one feed.
+//!   most recently watched, also access-filtered. Within each feed's
+//!   recency window (the top `LIMIT` rows by `last_watched_at`), the
+//!   in-progress/finished partition is disjoint — but the two feeds
+//!   each fetch their own top-N independently before partitioning, so
+//!   a child with many recent rows of one kind may see fewer than N
+//!   items in the other.
 //! - `GET /api/feed/new-videos` — fresh uploads from each allowlisted
 //!   channel + each allowlisted playlist, deduped + sorted.
 //! - `GET /api/feed/up-next` — the next videos to play after the one
@@ -120,9 +124,12 @@ where
     T: WatchHistoryRow,
     F: Fn(&T) -> bool,
 {
+    // Build the legacy-lookup set from rows that both (a) pass the
+    // per-feed predicate and (b) are missing a stored channel_id. No
+    // point asking feed_source_items about rows we'll drop anyway.
     let legacy_ids: Vec<&str> = rows
         .iter()
-        .filter(|r| r.channel_id().is_none())
+        .filter(|r| keep(r) && r.channel_id().is_none())
         .map(|r| r.video_id())
         .collect();
     let legacy_map = match lookup_channel_ids_for_videos(db, &legacy_ids).await {
@@ -184,8 +191,6 @@ impl WatchHistoryRow for WatchAgainItem {
     }
 }
 
-
-
 #[derive(Debug, Serialize, sqlx::FromRow, Clone)]
 pub struct WatchAgainItem {
     pub video_id: String,
@@ -208,8 +213,9 @@ pub struct WatchAgainItem {
 /// `GET /api/feed/watch-again`.
 ///
 /// Returns videos the child has finished (see [`is_effectively_finished`]),
-/// ordered by most recently watched. Disjoint partition of
-/// `continue-watching`: a row is in exactly one of the two feeds.
+/// ordered by most recently watched. Within the recency window, this
+/// is the disjoint complement of `continue-watching` — see the module
+/// docstring for the caveat about each feed sampling its own top-N.
 pub async fn watch_again(
     State(state): State<AppState>,
     current: CurrentAccount,
