@@ -724,7 +724,7 @@ async fn up_next_from_channel(
         "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
            FROM feed_source_items \
           WHERE kind = ? AND source_id = ? \
-          ORDER BY COALESCE(published_at, 0) DESC \
+          ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
           LIMIT 25",
     )
     .bind(feed_cache::KIND_CHANNEL)
@@ -789,7 +789,7 @@ async fn up_next_from_new_videos(
             "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
                FROM feed_source_items \
               WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, 0) DESC \
+              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
               LIMIT 5",
         )
         .bind(feed_cache::KIND_CHANNEL)
@@ -816,7 +816,7 @@ async fn up_next_from_new_videos(
             "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
                FROM feed_source_items \
               WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, 0) DESC \
+              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
               LIMIT 5",
         )
         .bind(feed_cache::KIND_PLAYLIST)
