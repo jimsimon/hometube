@@ -360,6 +360,7 @@ pub fn router(state: AppState) -> Router {
         .route("/child/channels", get(pages::child_channels))
         .route("/child/channel/{channel_id}", get(pages::child_channel))
         .route("/child/hidden", get(pages::child_hidden))
+        .route("/child/liked", get(pages::child_liked))
         .route("/child/downloads", get(pages::child_downloads))
         .route("/child/search", get(pages::child_search));
 

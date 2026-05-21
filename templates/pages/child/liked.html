@@ -1,0 +1,27 @@
+{% extends "base-child.html" %}
+
+{% block title %}Liked Videos — HomeTube{% endblock %}
+
+{% block content %}
+<section class="page-content" aria-label="Liked videos" style="max-width: 56rem;">
+  <header class="page-header">
+    <h1>Liked videos</h1>
+    <p class="subtitle">Videos you've liked. Tap one to watch it again.</p>
+  </header>
+
+  <hometube-liked-page></hometube-liked-page>
+
+  <noscript>
+    {% if videos.is_empty() %}
+    <p>You haven't liked any videos yet.</p>
+    {% else %}
+    {% include "partials/video-grid.html" %}
+    {% endif %}
+  </noscript>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script type="module" src="/assets/components/liked-page.js"></script>
+<script type="module" src="/assets/components/video-card.js"></script>
+{% endblock %}
