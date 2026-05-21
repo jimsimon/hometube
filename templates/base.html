@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}HomeTube{% endblock %}</title>
 
+    <link rel="icon" type="image/svg+xml" href="/assets/logo.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/logo-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/logo-180.png" />
+    <meta name="theme-color" content="#1565C0" />
+
     <!-- Web Awesome stylesheet (theme tokens, base styles). -->
     <link
       rel="stylesheet"
@@ -43,7 +48,10 @@
     <wa-page mobile-breakpoint="768" {% block page_attrs %}disable-navigation-toggle{% endblock %}>
       <header slot="header">
         {% block nav_toggle %}{% endblock %}
-        <a href="/" class="brand">HomeTube</a>
+        <a href="/" class="brand">
+          <img src="/assets/logo.svg" alt="" class="brand-logo" width="32" height="32" />
+          <span class="brand-name">HomeTube</span>
+        </a>
         {% block header_actions %}
         <div class="header-actions">
           <hometube-theme-toggle></hometube-theme-toggle>

@@ -488,6 +488,10 @@ pub fn router(state: AppState) -> Router {
             "/offline.html",
             ServeFile::new(static_root.join("offline.html")),
         )
+        .route_service(
+            "/favicon.ico",
+            ServeFile::new(static_root.join("favicon.ico")),
+        )
         .merge(auth_routes)
         .merge(setup_routes)
         .merge(parent_only)

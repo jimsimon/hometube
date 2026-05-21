@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 200" width="220" height="200">
+  <title>HomeTube — Retro TV House</title>
+  <defs>
+    <linearGradient id="tv" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFB74D"/>
+      <stop offset="100%" stop-color="#F57C00"/>
+    </linearGradient>
+  </defs>
+  <!-- Antennae like a roof peak -->
+  <line x1="110" y1="36" x2="78" y2="10" stroke="#37474F" stroke-width="5" stroke-linecap="round"/>
+  <line x1="110" y1="36" x2="142" y2="10" stroke="#37474F" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="78" cy="10" r="6" fill="#FFCA28"/>
+  <circle cx="142" cy="10" r="6" fill="#FFCA28"/>
+  <!-- TV body -->
+  <rect x="24" y="40" width="172" height="132" rx="18" fill="url(#tv)" stroke="#5D4037" stroke-width="4"/>
+  <!-- Screen -->
+  <rect x="44" y="60" width="132" height="92" rx="10" fill="#FFF8F0"/>
+  <!-- Play -->
+  <path d="M96 88 L96 124 L128 106 Z" fill="#E53935"/>
+  <!-- Feet -->
+  <rect x="50" y="172" width="14" height="14" rx="3" fill="#5D4037"/>
+  <rect x="156" y="172" width="14" height="14" rx="3" fill="#5D4037"/>
+  <!-- Dials -->
+  <circle cx="186" cy="78" r="4" fill="#5D4037"/>
+  <circle cx="186" cy="94" r="4" fill="#5D4037"/>
+</svg>

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>HomeTube — House + Circular Play (Blue)</title>
+  <defs>
+    <linearGradient id="g1a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#42A5F5"/>
+      <stop offset="100%" stop-color="#1565C0"/>
+    </linearGradient>
+    <linearGradient id="roof1a" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#64B5F6"/>
+      <stop offset="100%" stop-color="#1E88E5"/>
+    </linearGradient>
+  </defs>
+  <!-- Roof -->
+  <path d="M100 22 L182 92 L162 92 L162 96 L38 96 L38 92 L18 92 Z" fill="url(#roof1a)"/>
+  <!-- House body -->
+  <rect x="38" y="92" width="124" height="92" rx="14" fill="url(#g1a)"/>
+  <!-- Inner screen -->
+  <rect x="50" y="104" width="100" height="68" rx="8" fill="#FFF8F0"/>
+  <!-- Circular play (different shape from YT's rounded-rect mark) -->
+  <circle cx="100" cy="138" r="22" fill="#1565C0"/>
+  <path d="M94 128 L94 148 L112 138 Z" fill="#FFF8F0"/>
+  <!-- Chimney -->
+  <rect x="138" y="42" width="16" height="26" fill="#64B5F6"/>
+</svg>

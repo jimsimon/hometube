@@ -54,8 +54,39 @@ export default defineConfig({
         start_url: '/',
         display: 'standalone',
         background_color: '#ffffff',
-        theme_color: '#2563eb',
-        icons: [],
+        theme_color: '#1565C0',
+        icons: [
+          {
+            src: '/assets/logo.svg',
+            sizes: 'any',
+            type: 'image/svg+xml',
+            purpose: 'any',
+          },
+          {
+            src: '/assets/logo-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: '/assets/logo-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: '/assets/logo-maskable-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+          {
+            src: '/assets/logo-maskable-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+        ],
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html}'],
@@ -64,9 +95,17 @@ export default defineConfig({
         // some references are dangling.
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
       },
-      // We don't ship icons in this repo yet, so disable the manifest
-      // emission to keep the build clean for the askama frontend.
-      includeAssets: [],
+      includeAssets: [
+        'logo.svg',
+        'logo-maskable.svg',
+        'logo-32.png',
+        'logo-180.png',
+        'logo-192.png',
+        'logo-512.png',
+        'logo-maskable-192.png',
+        'logo-maskable-512.png',
+        'favicon.ico',
+      ],
     }),
   ],
   build: {

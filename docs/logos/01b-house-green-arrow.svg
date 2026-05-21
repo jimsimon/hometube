@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>HomeTube — House + Rounded Arrow (Green)</title>
+  <defs>
+    <linearGradient id="g1b" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#66BB6A"/>
+      <stop offset="100%" stop-color="#2E7D32"/>
+    </linearGradient>
+  </defs>
+  <!-- Roof with overhang -->
+  <path d="M100 20 L186 90 L168 90 L168 102 L32 102 L32 90 L14 90 Z" fill="#8D6E63"/>
+  <!-- House body -->
+  <rect x="40" y="100" width="120" height="84" rx="10" fill="url(#g1b)"/>
+  <!-- Door arch (window-shaped, very house-y) -->
+  <path d="M58 116 L142 116 Q150 116 150 124 L150 172 L50 172 L50 124 Q50 116 58 116 Z" fill="#FFF8F0"/>
+  <!-- Rounded-corner play arrow (softened triangle) -->
+  <path d="M86 130
+           Q84 128 84 132
+           L84 156
+           Q84 160 88 158
+           L118 146
+           Q122 144 118 142
+           Z" fill="#2E7D32"/>
+  <!-- Small windows in roof -->
+  <circle cx="100" cy="78" r="6" fill="#FFCA28"/>
+</svg>
