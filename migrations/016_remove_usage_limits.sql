@@ -2,8 +2,9 @@
 --
 -- Drops the `usage_limits` table and rebuilds `parent_notifications` so its
 -- CHECK constraint no longer lists `time_limit_approaching` /
--- `time_limit_reached`. Existing rows of those types are deleted first so the
--- rebuild does not violate the new CHECK.
+-- `time_limit_reached`. Any existing rows of those types are filtered out by
+-- the `INSERT ... SELECT WHERE notification_type NOT IN (...)` copy step so
+-- the rebuilt table never violates the new CHECK.
 --
 -- `usage_log` is retained: heartbeat/activity tracking still uses it.
 

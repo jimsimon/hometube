@@ -61,8 +61,6 @@ const TYPE_LABELS: Record<string, string> = {
   ytdlp_failure: "yt-dlp failures",
   new_search_term: "New search term",
   system_update: "System updates",
-  sync_error: "Sync errors",
-  token_expired: "Auth token expired",
 };
 
 @customElement("hometube-notification-forwarder-settings")
