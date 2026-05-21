@@ -48,11 +48,14 @@ pub struct LikeRow {
     pub channel_id: Option<String>,
     pub channel_title: Option<String>,
     pub liked_at: i64,
-    /// `true` when the liked video is reachable through the child's
-    /// allowlist. Matches `can_child_view` for the video-allowlist and
-    /// channel-allowlist paths (the latter via the `channel_id`
-    /// captured at like-time). Playlist-allowlist matches are not
-    /// considered — `video_likes` doesn't track playlist membership.
+    /// `true` when the child can currently play the liked video.
+    /// Matches the SQL-expressible portion of `can_child_view`: the
+    /// video must be allowlisted (directly or via the captured
+    /// `channel_id`) AND not blocked AND not in this child's hidden
+    /// list. Playlist-allowlist matches are not considered —
+    /// `video_likes` doesn't track playlist membership; a like that is
+    /// reachable purely via an allowlisted playlist returns
+    /// `visible: false`.
     pub visible: bool,
 }
 
@@ -67,21 +70,32 @@ type LikeRowTuple = (
     i64,
 );
 
-/// Shared SELECT projection used by `list` and `like`. Computes
-/// `visible` from a direct-video allowlist match OR an allowlisted
-/// channel match against the per-like `channel_id`. Concatenated at
-/// compile time with each handler's WHERE clause to avoid per-request
-/// `String` allocations.
+// Both queries below share the same SELECT + JOINs; `concat!` requires
+// string literals, so the projection is repeated inline rather than
+// hoisted into a `const`. `visible` mirrors the SQL-expressible portion
+// of [`crate::services::access::can_child_view`]: a like is visible iff
+// it is in `allowlisted_videos` OR its captured `channel_id` is in
+// `allowlisted_channels`, AND it is not blocked, AND it is not in this
+// child's `hidden_videos`. Playlist-allowlist matches are not
+// considered (`video_likes` doesn't track playlist membership) — same
+// caveat documented on [`LikeRow::visible`].
+
 const LIKE_LIST_SQL: &str = concat!(
     "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
             l.channel_id, l.channel_title, l.liked_at, \
-            CASE WHEN a.id IS NOT NULL OR c.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
+            CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
+                  AND b.id IS NULL AND h.id IS NULL \
+                 THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
        ON c.child_account_id = l.child_account_id \
-      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id",
+      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+     LEFT JOIN blocked_videos b \
+       ON b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
+     LEFT JOIN hidden_videos h \
+       ON h.child_account_id = l.child_account_id AND h.video_id = l.video_id",
     " WHERE l.child_account_id = ? AND l.is_deleted = 0 \
        ORDER BY visible DESC, l.liked_at DESC",
 );
@@ -89,13 +103,19 @@ const LIKE_LIST_SQL: &str = concat!(
 const LIKE_ONE_SQL: &str = concat!(
     "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
             l.channel_id, l.channel_title, l.liked_at, \
-            CASE WHEN a.id IS NOT NULL OR c.id IS NOT NULL THEN 1 ELSE 0 END AS visible \
+            CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
+                  AND b.id IS NULL AND h.id IS NULL \
+                 THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
        ON c.child_account_id = l.child_account_id \
-      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id",
+      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+     LEFT JOIN blocked_videos b \
+       ON b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
+     LEFT JOIN hidden_videos h \
+       ON h.child_account_id = l.child_account_id AND h.video_id = l.video_id",
     " WHERE l.child_account_id = ? AND l.video_id = ?",
 );
 
