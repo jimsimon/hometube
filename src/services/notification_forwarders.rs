@@ -327,15 +327,7 @@ fn check_url(url: &str) -> AppResult<()> {
 
 /// Notification-type strings accepted in `enabled_types`. Mirrors the
 /// `parent_notifications.notification_type` CHECK constraint.
-pub const KNOWN_TYPES: &[&str] = &[
-    "time_limit_approaching",
-    "time_limit_reached",
-    "ytdlp_failure",
-    "sync_error",
-    "token_expired",
-    "new_search_term",
-    "system_update",
-];
+pub const KNOWN_TYPES: &[&str] = &["ytdlp_failure", "new_search_term", "system_update"];
 
 /// Top-level entry point used by the in-app notification dispatcher.
 ///
@@ -415,8 +407,7 @@ fn ntfy_priority_for(kind: &str, default: Option<u8>) -> u8 {
         return p;
     }
     match kind {
-        "ytdlp_failure" | "time_limit_reached" | "sync_error" | "token_expired" => 4,
-        "time_limit_approaching" => 3,
+        "ytdlp_failure" => 4,
         "new_search_term" => 2,
         _ => 3,
     }
@@ -427,8 +418,7 @@ fn gotify_priority_for(kind: &str, default: Option<u8>) -> u8 {
         return p;
     }
     match kind {
-        "ytdlp_failure" | "time_limit_reached" | "sync_error" | "token_expired" => 8,
-        "time_limit_approaching" => 5,
+        "ytdlp_failure" => 8,
         "new_search_term" => 3,
         _ => 5,
     }
@@ -523,8 +513,7 @@ async fn send_apprise(
     };
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
     let apprise_type = match msg.kind {
-        "ytdlp_failure" | "sync_error" | "token_expired" | "time_limit_reached" => "failure",
-        "time_limit_approaching" => "warning",
+        "ytdlp_failure" => "failure",
         "system_update" => "info",
         _ => "info",
     };

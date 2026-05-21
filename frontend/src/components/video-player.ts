@@ -9,8 +9,7 @@
  *     `/api/videos/:id/stream`. The backend exposes the synthesized
  *     manifest at `/api/videos/:id/stream/manifest.mpd`.
  *   - Sends a heartbeat every 30s while playing to
- *     `/api/usage/heartbeat`; dispatches `hometube:usage-limit` on a
- *     403.
+ *     `/api/usage/heartbeat` so watch time is recorded server-side.
  *   - Dispatches `hometube:current-time` on every `timeupdate` and
  *     `hometube:video-ended` on `ended`.
  *   - Hosts the sleep-timer / like / subscribe / download controls
@@ -91,14 +90,7 @@ import {
   getStorageEstimate,
   saveVideoToOpfs,
 } from "../services/offline.js";
-import type {
-  CaptionTrack,
-  ChildSettings,
-  HeartbeatResponse,
-  StreamResponse,
-  UsageLimitResponse,
-  VideoMetadata,
-} from "../types/index.js";
+import type { CaptionTrack, ChildSettings, StreamResponse, VideoMetadata } from "../types/index.js";
 
 import "./sleep-timer.js";
 import "./like-button.js";
@@ -347,8 +339,6 @@ export class VideoPlayer extends LitElement {
   /** True when the audio-only toggle is engaged. */
   @property({ type: Boolean, reflect: true, attribute: "data-audio-only" })
   audioOnly = false;
-  /** Most-recent `remaining_seconds` from the heartbeat response. */
-  @state() private remainingSeconds: number | null = null;
   /** True while a download is in progress. */
   @state() private downloading = false;
   /** Set when a download succeeds — collapses to a "downloaded" badge. */
@@ -359,6 +349,10 @@ export class VideoPlayer extends LitElement {
 
   private heartbeatTimer: number | null = null;
   private lastHeartbeatAt = 0;
+  /** True while the current heartbeat-failure streak has already been
+   *  warned about. Resets to false on the next successful heartbeat so
+   *  a fresh failure streak produces exactly one console.warn. */
+  private heartbeatErrorLogged = false;
   /**
    * True once at least one regular 30s heartbeat has been sent for this
    * video. Used to gate the unload beacon: we only flush remaining
@@ -487,20 +481,6 @@ export class VideoPlayer extends LitElement {
         color: black;
         font: inherit;
         cursor: pointer;
-      }
-      .countdown {
-        margin: 0.5rem 0;
-        padding: 0.5rem 0.75rem;
-        border-radius: 0.375rem;
-        background: var(--wa-color-warning-quiet, rgba(217, 119, 6, 0.15));
-        color: var(--wa-color-warning-on-quiet, #92400e);
-        font-size: 0.9rem;
-      }
-      .countdown.urgent {
-        background: var(--wa-color-danger-quiet, rgba(185, 28, 28, 0.15));
-        color: var(--wa-color-danger-on-quiet, #991b1b);
-        font-weight: 600;
-        font-size: 1rem;
       }
       .audio-toggle,
       .download-button {
@@ -1311,44 +1291,22 @@ export class VideoPlayer extends LitElement {
     if (!payload) return;
     this.lastHeartbeatAt = now;
     try {
-      const res = await api.post<HeartbeatResponse>("/api/usage/heartbeat", payload);
-      this.remainingSeconds = res.remaining_seconds;
+      await api.post<void>("/api/usage/heartbeat", payload);
       // Mark that a real heartbeat has landed — gates sendProgress
       // and the unload beacon so quick previews don't write to
       // watch_history.
       this.heartbeatSent = true;
-      if (res.limit_exceeded) {
-        this.handleUsageLimit({
-          reason: res.reason ?? "limit_exceeded",
-          remaining_seconds: res.remaining_seconds ?? 0,
-          allowed_window: res.allowed_window ?? null,
-        });
-      }
+      this.heartbeatErrorLogged = false;
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) {
-        const body = (err.body as UsageLimitResponse | null) ?? {
-          reason: "limit_exceeded" as const,
-          remaining_seconds: 0,
-        };
-        this.handleUsageLimit(body);
+      // Heartbeat failures are non-fatal; the next tick will retry.
+      // Log once per failure-streak so dev tooling surfaces
+      // auth/server/network errors without spamming the console
+      // every 30s when the server is unreachable.
+      if (!this.heartbeatErrorLogged) {
+        console.warn("heartbeat failed", err);
+        this.heartbeatErrorLogged = true;
       }
     }
-  }
-
-  private handleUsageLimit(detail: UsageLimitResponse): void {
-    try {
-      this.videoEl?.pause();
-    } catch {
-      // ignore
-    }
-    this.stopHeartbeat();
-    this.dispatchEvent(
-      new CustomEvent("hometube:usage-limit", {
-        detail,
-        bubbles: true,
-        composed: true,
-      }),
-    );
   }
 
   /** "Download for offline" handler — uses the Cache API. */
@@ -1440,7 +1398,6 @@ export class VideoPlayer extends LitElement {
             `
           : nothing}
       </div>
-      ${this.renderCountdown()}
       ${this.metadata
         ? html`<div class="meta">
             <h1>${this.metadata.title ?? "Untitled"}</h1>
@@ -1491,23 +1448,6 @@ export class VideoPlayer extends LitElement {
           </div>`
         : null}
     `;
-  }
-
-  /** Render the countdown indicator. Hidden until under 30 minutes. */
-  private renderCountdown() {
-    const remaining = this.remainingSeconds;
-    if (remaining == null || remaining > 30 * 60) return nothing;
-    const minutes = Math.max(0, Math.ceil(remaining / 60));
-    let cls = "countdown";
-    let text = `${minutes} minute${minutes === 1 ? "" : "s"} left for today.`;
-    if (remaining <= 60) {
-      cls = "countdown urgent";
-      text = "Less than a minute left — wrapping up soon!";
-    } else if (remaining <= 5 * 60) {
-      cls = "countdown urgent";
-      text = `${minutes} minute${minutes === 1 ? "" : "s"} left — almost done!`;
-    }
-    return html`<div class="${cls}" role="status" aria-live="polite">${text}</div>`;
   }
 }
 

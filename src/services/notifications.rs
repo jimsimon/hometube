@@ -25,8 +25,6 @@ use tokio::sync::Mutex;
 use crate::error::AppResult;
 
 /// Recognised values for `parent_notifications.notification_type`.
-pub const TYPE_TIME_LIMIT_APPROACHING: &str = "time_limit_approaching";
-pub const TYPE_TIME_LIMIT_REACHED: &str = "time_limit_reached";
 pub const TYPE_YTDLP_FAILURE: &str = "ytdlp_failure";
 pub const TYPE_NEW_SEARCH_TERM: &str = "new_search_term";
 pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
