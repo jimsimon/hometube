@@ -30,7 +30,6 @@ const ROUTES: RouteCase[] = [
   { name: 'child home', path: '/child/home', needsAuth: 'child' },
   { name: 'child channels', path: '/child/channels', needsAuth: 'child' },
   { name: 'child playlists', path: '/child/playlists', needsAuth: 'child' },
-  { name: 'child bookmarks', path: '/child/bookmarks', needsAuth: 'child' },
 ];
 
 for (const route of ROUTES) {

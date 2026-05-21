@@ -25,8 +25,6 @@ feature-complete for self-hosting, and the remaining work is hardening
 - **No ads, no comments, no algorithmic recommendations** by design
 - **Family playlists** — parents can curate lists of videos and share
   them with one or more children
-- **Bookmarks** — children can save timestamps inside videos and jump
-  back to them from a dedicated page
 - **Sleep timer + wind-down overlay** — fades out audio and pauses
   playback at expiry
 - **Captions + audio-only mode** — server-side WebVTT conversion via
