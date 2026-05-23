@@ -731,13 +731,95 @@ Phase 1 (this plan):
 - Startup reconcile + allowlist + subscription route wiring (per "Eligibility lifecycle").
 - Admin routes for state / settings / run-now / unshelve; repoint `/api/admin/feed-sources` `item_count` at `channel_videos`.
 - Default `channel_backfill.enabled=true`; backfilling kicks off the next time the app restarts on existing installs (reconcile populates state).
+- **Parent UI for channel backfill settings + per-channel state** — new Lit component `frontend/src/components/channel-backfill-settings.ts` (twin of `feed-refresher-settings.ts`), mounted in `templates/pages/parent/system.html`. Per-row "Run now" / "Unshelve" buttons + tunables editor. Vitest covering GET/PUT round-trips and action wiring. See "Parent UI: channel backfill settings + per-channel state" section below.
+- **Adaptive InnerTube sidecar fallback cadence** — replace fixed 1h-per-source min interval in `feed_refresher.rs` with a recency-bucketed lookup against `channel_videos`. 1h (active) / 6h (30-90d dormant) / 24h (>90d dormant). Five new tunables in `app_config` exposed via the existing feed-refresher settings route. No new schema. See "Adaptive InnerTube sidecar fallback cadence" section below.
+- **Thumbnail prefetching to a new on-disk cache** — net-new `src/services/thumbnail_store.rs` (parallel to `segment_store.rs`), migration 022 (`thumbnail_cache` table + `app_config` size cap), proxy route at `src/routes/videos.rs:903-932` updated to read disk-first, backfill loop tail-call enqueues prefetch for newly-observed videos, cache cleanup folded into existing `cache_cleanup` cron, parent cache-manager UI extended to surface the second cache. Largest of the three promoted items. See "Thumbnail prefetching — net-new on-disk thumbnail cache" section below.
+- Migration 022: create `thumbnail_cache` table (parallel to `segment_cache`). Add `thumbnail_cache.max_bytes` to `app_config`.
 
-Phase 2 (follow-up, not in this plan):
-- Parent UI page exposing per-channel backfill state + "run now" buttons.
-- "Browse all videos from this channel" child UI consuming `/api/channels/:id/videos-archive`.
-- **Adaptive InnerTube sidecar fallback cadence.** RSS itself has no anti-bot exposure so its cadence is left alone, but the sidecar fallback (which is the anti-bot-sensitive freshness path) currently uses a fixed `SIDECAR_FALLBACK_MIN_INTERVAL_S=3600` per source. Scale this per-channel based on observed publishing recency: channels with new uploads in the last 30 days keep 1h; channels dormant 30–90 days move to 6h; >90 days dormant move to 24h. The newest video a dormant channel could be hiding has been hidden for months already, so a multi-hour gap on the riskier transport costs the family nothing and meaningfully reduces sidecar load. Implementation: compute `max(published_at) FROM channel_videos WHERE channel_id=?` lazily when classifying RSS failure outcomes; pick the per-source interval based on the recency bucket.
-- Optional `/shorts` and `/streams` tabs in backfill.
-- Optional thumbnail prefetching into the existing on-disk cache.
+### Parent UI: channel backfill settings + per-channel state
+
+The existing parent system page (`templates/pages/parent/system.html:35-38`) already hosts `<hometube-feed-refresher-settings>` — a parallel component for the existing freshness refresher with tunables editor + diagnostics. The channel backfill subsystem gets its own twin:
+
+**New Lit component**: `frontend/src/components/channel-backfill-settings.ts`
+
+Modelled on `frontend/src/components/feed-refresher-settings.ts`. Composition:
+
+- **Settings editor section** — reads from `GET /api/admin/channel-backfill/settings`, writes to `PUT /api/admin/channel-backfill/settings`. Exposes the tunables: `enabled`, `min_gap_between_channels_s`, `re_backfill_interval_s`, `subprocess_timeout_s`, `ytdlp_sleep_*` flags, `max_consecutive_errors_before_shelve`, `notify_on_shelve`.
+- **Per-channel state table** — reads from `GET /api/admin/channel-backfill/state`. Columns: channel title, status (with colour-coded pill), last completed at, last error (truncated), consecutive errors, videos observed/new/removed (last run), next due at. Per-row action buttons:
+  - **"Run now"** → `POST /api/admin/channel-backfill/run-now/:channelId`. Sets `backfill_next_at=0`; loop picks up within `idle_tick`. Confirmation toast on success.
+  - **"Unshelve"** → `POST /api/admin/channel-backfill/unshelve/:channelId`. Only visible when `backfill_status='shelved'`. Resets `backfill_status='pending'`, `backfill_consecutive_errors=0`, `backfill_next_at=0`.
+- **Capacity / health summary** at the top — total channels, complete count, pending count, shelved count, average days-since-last-completed. Pulled from the same `/api/admin/channel-backfill/state` payload (computed server-side or client-side aggregate).
+
+**Mount in `templates/pages/parent/system.html`**: insert a new `<div class="page-section">` between the existing "New-videos refresher" and "Notifications" sections, and add the `<script type="module" src="/assets/components/channel-backfill-settings.js">` import block.
+
+**Tests**: new `frontend/src/components/channel-backfill-settings.test.ts` modelled on `feed-refresher-settings.test.ts` — vitest with mocked admin endpoints, asserting GET/PUT round-trips and per-row action wiring.
+
+### Adaptive InnerTube sidecar fallback cadence
+
+RSS itself has no anti-bot exposure so its cadence is left alone. But the sidecar fallback (the anti-bot-sensitive freshness path) currently uses a fixed `SIDECAR_FALLBACK_MIN_INTERVAL_S=3600` per source regardless of how active the channel is. Scale this per-channel based on observed publishing recency:
+
+| Channel activity | Per-source min interval |
+|---|---|
+| Most recent upload ≤ 30 days ago | 1 h (unchanged from today) |
+| Most recent upload 30–90 days ago | 6 h |
+| Most recent upload > 90 days ago (or no uploads ever observed) | 24 h |
+
+A channel dormant for 90+ days has already gone weeks without anything new — a 24h gap on the riskier transport costs the family essentially nothing in freshness and meaningfully reduces sidecar load for the long tail of allowlisted-but-dormant channels (e.g. defunct kids' shows, completed series).
+
+**Implementation** in `src/services/feed_refresher.rs`:
+
+- Add a helper `effective_sidecar_min_interval(pool, channel_id) -> i64` that queries:
+  ```sql
+  SELECT MAX(published_at) FROM channel_videos
+  WHERE channel_id = ? AND is_deleted = 0
+  ```
+  and buckets the result against `now` into the three tiers. NULL (no rows) is treated as ">90 days" (24h).
+- Replace the current call site that reads `SIDECAR_FALLBACK_MIN_INTERVAL_S` (line ~109) with a call to the helper, gated on the existing `last_sidecar_fallback_at` check.
+- The aggregate cap `SIDECAR_FALLBACK_MAX_PER_HOUR=120` stays unchanged; it's a separate dimension.
+
+**New tunables** in `app_config` (live-reloaded like the existing ones, range-validated per the precedent at `RANGE_…` consts in feed_refresher.rs):
+
+| Key | Default | Range |
+|---|---|---|
+| `feed_refresher.sidecar_fallback_active_interval_s` | `3600` | 60..=86400 |
+| `feed_refresher.sidecar_fallback_dormant_interval_s` | `21600` | 60..=86400 |
+| `feed_refresher.sidecar_fallback_archived_interval_s` | `86400` | 60..=604800 |
+| `feed_refresher.sidecar_dormant_threshold_days` | `30` | 1..=365 |
+| `feed_refresher.sidecar_archived_threshold_days` | `90` | 1..=3650 |
+
+Surfaced via the existing `GET /PUT /api/admin/feed-refresher/settings` route alongside the current tunables.
+
+**No new column on `channel_sync_state`** — recency is computed on-demand from `channel_videos`. The cost is one indexed query per RSS failure event (which is uncommon by definition — most RSS polls are 304s or 200s). The query hits `idx_channel_videos_channel_published`.
+
+### Thumbnail prefetching — net-new on-disk thumbnail cache
+
+The original Phase 2 phrasing assumed an existing thumbnail cache to prefetch into. There isn't one — `GET /api/proxy/thumbnail/:videoId` (`src/routes/videos.rs:903-932`) reverse-proxies every request to `i.ytimg.com/vi/<id>/...` with no caching layer. The "on-disk cache" called out in the README refers to DASH video segments only (`src/services/segment_store.rs`).
+
+To prefetch thumbnails meaningfully we need to add a parallel cache. Scope:
+
+**New module**: `src/services/thumbnail_store.rs`, modelled on `src/services/segment_store.rs`. Provides:
+
+- `get(video_id) -> Option<Vec<u8>>` — read cached bytes if present.
+- `put(video_id, bytes)` — write to disk, update DB index.
+- LRU eviction with the parent-tunable size cap pattern already used for segments.
+
+**New migration `022_thumbnail_cache.sql`**: a `thumbnail_cache` table parallel to the existing `segment_cache` schema (`migrations/006_segment_cache_total_bytes.sql`, `migrations/007_cache_evictions.sql` model) — columns `(video_id PRIMARY KEY, byte_size, fetched_at, last_accessed_at)`. Plus an `app_config` entry for the size cap (e.g. `thumbnail_cache.max_bytes`, default 500 MB).
+
+**Route update**: `GET /api/proxy/thumbnail/:videoId` (`src/routes/videos.rs:903-932`) reads `thumbnail_store::get` first; on miss, fetches from `i.ytimg.com`, stores, and serves.
+
+**Prefetch trigger**: piggyback on the backfill loop. After `run_backfill_for` finishes its upsert pass, enqueue an async prefetch task for any video rows where `first_seen_at == last_seen_at` (i.e. newly observed this pass). Prefetcher fetches `https://i.ytimg.com/vi/<video_id>/hqdefault.jpg` (with `mqdefault.jpg` fallback on 404) at a slow rate — e.g. 1 image/sec — and writes through `thumbnail_store::put`. Bounded by an in-process semaphore (e.g. 2 concurrent fetches). Failures are silent — the proxy route still works on cache miss.
+
+**Cache cleanup** is folded into the existing `cache_cleanup` cron job (`src/services/cron.rs:48`) — same LRU eviction policy already used for `segment_cache`. Add a parallel `thumbnail_cache_cleanup` call in the same cron handler.
+
+**Admin surface** in the existing parent cache-manager UI (`frontend/src/components/cache-manager.ts`): add a second cache section showing thumbnail cache size + max + eviction count, mirroring the segment cache display. The component already follows this pattern for segment cache.
+
+**Effective behavior**: after a channel is backfilled, its thumbnails trickle into the local disk cache over the following minutes. Subsequent child renders of the channel page or New Videos feed serve thumbnails from disk with no YouTube hit. Cold-start (never-backfilled-yet channel) still hits YouTube on demand.
+
+**Scope honesty**: this is the largest of the three promoted items — net-new schema, new module, new background task, route change, UI change. It's still well-bounded (clear precedent in the segment cache implementation), but if Phase 1 needs to ship sooner, this is the cleanest item to break out into a follow-up plan.
+
+Items removed from Phase 2 in this revision:
+- "Browse all videos from this channel" child UI — already covered by the Phase 1 repoint of `src/routes/channels.rs::list_videos` to read from `channel_videos` with full pagination. The existing child channel page (`templates/pages/child/channel.html`) is the consumer; no new UI needed.
+- "Optional `/shorts` and `/streams` tabs in backfill" — HomeTube doesn't support shorts or live streams as content types, so backfilling them would yield rows that the rest of the system can't render or play.
 
 ## Resolved decisions
 
