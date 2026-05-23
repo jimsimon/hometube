@@ -901,12 +901,38 @@ fn parse_content_range_start(header: &str) -> Option<u64> {
 }
 
 /// `GET /api/proxy/thumbnail/:videoId` — stream the highest-resolution
-/// thumbnail through the server. No HMAC is required; thumbnails are
+/// thumbnail through the server, served from the on-disk
+/// `thumbnail_cache` when available. Cache hits bump
+/// `last_accessed_at` for LRU. On miss we fetch from YouTube, populate
+/// the cache, and serve the bytes. No HMAC is required; thumbnails are
 /// inherently public.
 pub async fn get_thumbnail(
     State(state): State<AppState>,
     Path(video_id): Path<String>,
 ) -> AppResult<Response> {
+    // 1. Cache hit fast-path. Read the file directly and serve.
+    if let Some(path) = crate::services::thumbnail_store::get(&state.db, &video_id).await {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let mut response = Response::new(Body::from(bytes));
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    "image/jpeg".parse().unwrap(),
+                );
+                return Ok(response);
+            }
+            Err(err) => {
+                // File disappeared between the `get` stat and the
+                // read. Fall through to the upstream fetch.
+                tracing::debug!(%video_id, %err, "thumbnail cache read failed; falling back to upstream");
+            }
+        }
+    }
+
+    // 2. Cache miss: resolve the thumbnail URL via the metadata cache
+    //    (this part of the path is unchanged from the pre-cache
+    //    implementation), fetch from YouTube, populate the cache, and
+    //    serve.
     let cache = video_cache(&state);
     let result = cache
         .get_or_extract(&state.db, &state.config, &video_id)
@@ -921,14 +947,36 @@ pub async fn get_thumbnail(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("image/jpeg")
         .to_string();
-    let stream = res.bytes_stream().map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-    Ok(response)
+
+    // Only populate the cache for successful 2xx responses. Failed
+    // upstream responses are streamed through but not cached.
+    if status.is_success() {
+        let bytes = res.bytes().await.map_err(AppError::Http)?;
+        // Best-effort cache write; failures are logged inside put()
+        // and don't fail the request.
+        let _ = crate::services::thumbnail_store::put(
+            &state.db,
+            &state.config.cache_dir,
+            &video_id,
+            &bytes,
+        )
+        .await;
+        let mut response = Response::new(Body::from(bytes));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        Ok(response)
+    } else {
+        let stream = res.bytes_stream().map_err(std::io::Error::other);
+        let body = Body::from_stream(stream);
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        Ok(response)
+    }
 }
 
 // ---------------------------------------------------------------------------

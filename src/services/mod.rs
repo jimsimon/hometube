@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod segment_ranges;
 pub mod segment_store;
 pub mod setup;
+pub mod thumbnail_store;
 pub mod video_cache;
 pub mod youtube;
 pub mod youtube_rss;
