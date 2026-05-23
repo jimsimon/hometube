@@ -39,6 +39,7 @@ pub mod allowlist;
 pub mod auth;
 pub mod blocked;
 pub mod cache;
+pub mod channel_backfill;
 pub mod channels;
 pub mod child_settings;
 pub mod cron;
@@ -150,6 +151,20 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/admin/feed-refresher/capacity",
             get(feed::admin_get_refresher_capacity),
+        )
+        // Channel backfill (parent-only)
+        .route(
+            "/api/admin/channel-backfill/settings",
+            get(channel_backfill::admin_get_settings)
+                .put(channel_backfill::admin_put_settings),
+        )
+        .route(
+            "/api/admin/channel-backfill/run-now/{channel_id}",
+            post(channel_backfill::admin_run_now),
+        )
+        .route(
+            "/api/admin/channel-backfill/unshelve/{channel_id}",
+            post(channel_backfill::admin_unshelve),
         )
         // Family management (Phase 13)
         .route(

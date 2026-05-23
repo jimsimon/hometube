@@ -105,12 +105,32 @@ pub const DEFAULT_DISPATCH_DELAY_MS: u64 = 2_000;
 /// sidecar starts misbehaving without restarting the process.
 pub const DEFAULT_SIDECAR_FALLBACK_ENABLED: bool = true;
 
-/// Per-source rate cap on sidecar fallbacks, in seconds. The refresher
-/// will not issue a second fallback for the same source until at
-/// least this long has passed since the last one. Prevents a multi-
-/// hour RSS outage from generating N sidecar calls per hour where N
-/// is the source count.
+/// Per-source rate cap on sidecar fallbacks for an *active* channel
+/// (most recent upload within the dormant threshold). The refresher
+/// will not issue a second fallback for the same channel until at
+/// least this long has passed since the last one.
 pub const DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S: u64 = 60 * 60;
+
+/// Per-source rate cap on sidecar fallbacks for a *dormant* channel
+/// (no uploads in the last `sidecar_dormant_threshold_days` but within
+/// `sidecar_archived_threshold_days`). 6 hours by default — a dormant
+/// channel hasn't uploaded recently, so RSS-vs-sidecar freshness
+/// matters less.
+pub const DEFAULT_SIDECAR_FALLBACK_DORMANT_INTERVAL_S: u64 = 6 * 60 * 60;
+
+/// Per-source rate cap on sidecar fallbacks for an *archived* channel
+/// (no uploads in `sidecar_archived_threshold_days`, or no uploads
+/// ever observed). 24 hours by default — the channel has gone weeks+
+/// without anything new, so the riskier transport can wait.
+pub const DEFAULT_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: u64 = 24 * 60 * 60;
+
+/// Days since the most-recent upload before a channel transitions
+/// from "active" to "dormant" (the second-tier interval kicks in).
+pub const DEFAULT_SIDECAR_DORMANT_THRESHOLD_DAYS: u64 = 30;
+
+/// Days since the most-recent upload before a channel transitions
+/// from "dormant" to "archived" (the third-tier interval kicks in).
+pub const DEFAULT_SIDECAR_ARCHIVED_THRESHOLD_DAYS: u64 = 90;
 
 /// Aggregate per-hour cap on sidecar fallbacks across the entire
 /// refresher. `0` means "no aggregate cap" (the per-source cap still
@@ -134,8 +154,19 @@ pub const KEY_BATCH_SIZE: &str = "feed_refresher_batch_size";
 pub const KEY_IDLE_TICK_S: &str = "feed_refresher_idle_tick_s";
 pub const KEY_CHANNEL_INTERVAL_S: &str = "feed_channel_interval_s";
 pub const KEY_SIDECAR_FALLBACK_ENABLED: &str = "feed_refresher_sidecar_fallback_enabled";
+/// Per-source min interval for an *active* channel (≤dormant_threshold_days
+/// since last upload). Backward-compatible with the pre-adaptive setting
+/// — operators who hand-set this still get the active-channel behaviour.
 pub const KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S: &str =
     "feed_refresher_sidecar_fallback_min_interval_s";
+pub const KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S: &str =
+    "feed_refresher_sidecar_fallback_dormant_interval_s";
+pub const KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: &str =
+    "feed_refresher_sidecar_fallback_archived_interval_s";
+pub const KEY_SIDECAR_DORMANT_THRESHOLD_DAYS: &str =
+    "feed_refresher_sidecar_dormant_threshold_days";
+pub const KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS: &str =
+    "feed_refresher_sidecar_archived_threshold_days";
 pub const KEY_SIDECAR_FALLBACK_MAX_PER_HOUR: &str = "feed_refresher_sidecar_fallback_max_per_hour";
 
 /// A snapshot of the live refresher knobs, taken once per outer-loop
@@ -150,8 +181,16 @@ pub struct RefresherConfig {
     pub channel_interval: Duration,
     /// See [`DEFAULT_SIDECAR_FALLBACK_ENABLED`].
     pub sidecar_fallback_enabled: bool,
-    /// See [`DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S`].
+    /// Per-source min interval for an *active* channel.
     pub sidecar_fallback_min_interval: Duration,
+    /// Per-source min interval for a *dormant* channel.
+    pub sidecar_fallback_dormant_interval: Duration,
+    /// Per-source min interval for an *archived* channel.
+    pub sidecar_fallback_archived_interval: Duration,
+    /// Days since last upload before "active" → "dormant".
+    pub sidecar_dormant_threshold_days: u64,
+    /// Days since last upload before "dormant" → "archived".
+    pub sidecar_archived_threshold_days: u64,
     /// See [`DEFAULT_SIDECAR_FALLBACK_MAX_PER_HOUR`]. `0` means "no
     /// aggregate cap".
     pub sidecar_fallback_max_per_hour: u64,
@@ -169,6 +208,14 @@ impl Default for RefresherConfig {
             sidecar_fallback_min_interval: Duration::from_secs(
                 DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S,
             ),
+            sidecar_fallback_dormant_interval: Duration::from_secs(
+                DEFAULT_SIDECAR_FALLBACK_DORMANT_INTERVAL_S,
+            ),
+            sidecar_fallback_archived_interval: Duration::from_secs(
+                DEFAULT_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S,
+            ),
+            sidecar_dormant_threshold_days: DEFAULT_SIDECAR_DORMANT_THRESHOLD_DAYS,
+            sidecar_archived_threshold_days: DEFAULT_SIDECAR_ARCHIVED_THRESHOLD_DAYS,
             sidecar_fallback_max_per_hour: DEFAULT_SIDECAR_FALLBACK_MAX_PER_HOUR,
         }
     }
@@ -187,6 +234,10 @@ pub struct RefresherConfigRaw {
     pub channel_interval_s: Option<String>,
     pub sidecar_fallback_enabled: Option<String>,
     pub sidecar_fallback_min_interval_s: Option<String>,
+    pub sidecar_fallback_dormant_interval_s: Option<String>,
+    pub sidecar_fallback_archived_interval_s: Option<String>,
+    pub sidecar_dormant_threshold_days: Option<String>,
+    pub sidecar_archived_threshold_days: Option<String>,
     pub sidecar_fallback_max_per_hour: Option<String>,
 }
 
@@ -206,7 +257,7 @@ impl RefresherConfig {
         // Single batched query rather than separate SELECTs.
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT key, value FROM app_config \
-             WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)",
+             WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(KEY_DISPATCH_DELAY_MS)
         .bind(KEY_MAX_INFLIGHT)
@@ -215,6 +266,10 @@ impl RefresherConfig {
         .bind(KEY_CHANNEL_INTERVAL_S)
         .bind(KEY_SIDECAR_FALLBACK_ENABLED)
         .bind(KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S)
+        .bind(KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S)
+        .bind(KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S)
+        .bind(KEY_SIDECAR_DORMANT_THRESHOLD_DAYS)
+        .bind(KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS)
         .bind(KEY_SIDECAR_FALLBACK_MAX_PER_HOUR)
         .fetch_all(pool)
         .await
@@ -229,6 +284,18 @@ impl RefresherConfig {
                 KEY_SIDECAR_FALLBACK_ENABLED => raw.sidecar_fallback_enabled = Some(v),
                 KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S => {
                     raw.sidecar_fallback_min_interval_s = Some(v)
+                }
+                KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S => {
+                    raw.sidecar_fallback_dormant_interval_s = Some(v)
+                }
+                KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S => {
+                    raw.sidecar_fallback_archived_interval_s = Some(v)
+                }
+                KEY_SIDECAR_DORMANT_THRESHOLD_DAYS => {
+                    raw.sidecar_dormant_threshold_days = Some(v)
+                }
+                KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS => {
+                    raw.sidecar_archived_threshold_days = Some(v)
                 }
                 KEY_SIDECAR_FALLBACK_MAX_PER_HOUR => raw.sidecar_fallback_max_per_hour = Some(v),
                 _ => {}
@@ -305,6 +372,42 @@ impl RefresherConfig {
             }
         }
         if let Some(v) = raw
+            .sidecar_fallback_dormant_interval_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.contains(&v) {
+                cfg.sidecar_fallback_dormant_interval = Duration::from_secs(v);
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_fallback_archived_interval_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S.contains(&v) {
+                cfg.sidecar_fallback_archived_interval = Duration::from_secs(v);
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_dormant_threshold_days
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+                cfg.sidecar_dormant_threshold_days = v;
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_archived_threshold_days
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+                cfg.sidecar_archived_threshold_days = v;
+            }
+        }
+        if let Some(v) = raw
             .sidecar_fallback_max_per_hour
             .as_deref()
             .and_then(|s| s.parse::<u64>().ok())
@@ -328,8 +431,15 @@ pub const RANGE_IDLE_TICK_S: std::ops::RangeInclusive<u64> = 1..=3600;
 pub const RANGE_CHANNEL_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
 /// Minimum 1 minute (so a stuck-on-error source can't spam the sidecar
 /// every loop), up to 24 hours (effectively "fallback once a day per
-/// source"). Default is 1 hour.
+/// source"). Default for active channels is 1 hour.
 pub const RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
+/// Archived interval extends up to 1 week — a never-publishing channel
+/// can tolerate a longer gap on the riskier transport.
+pub const RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: std::ops::RangeInclusive<u64> =
+    60..=604_800;
+/// Recency bucket threshold (days). 1..3650 covers "1 day" up to
+/// "10 years", which is plenty of headroom.
+pub const RANGE_SIDECAR_THRESHOLD_DAYS: std::ops::RangeInclusive<u64> = 1..=3_650;
 /// `0` means unlimited; otherwise cap at 10 000/hour (well above any
 /// home-server need, but enough headroom for an operator scaling to
 /// thousands of sources who has explicitly raised it).
@@ -577,9 +687,14 @@ async fn poll_one(
             // Try the sidecar fallback before recording a hard
             // failure. Skipped when the kill switch is off, the
             // client failed to construct earlier, or either rate cap
-            // would be exceeded.
+            // would be exceeded. The per-source cap is adaptive: an
+            // archived channel that hasn't published in months tolerates
+            // a longer gap on the riskier transport, so we look up its
+            // most-recent upload to pick the right bucket.
             if let Some(client) = yt {
-                if fallback_caps_permit(source, cfg, fallbacks_this_hour, now) {
+                let effective_interval =
+                    effective_sidecar_min_interval(pool, &source.channel_id, cfg, now).await;
+                if fallback_caps_permit(source, effective_interval, cfg, fallbacks_this_hour, now) {
                     return run_sidecar_fallback(pool, client, source, cfg, now, Some(&rss_msg))
                         .await;
                 }
@@ -596,26 +711,27 @@ async fn poll_one(
 
 /// Both rate caps must permit a fallback before we dispatch one:
 ///
-/// - **Per-source cap**: at least `cfg.sidecar_fallback_min_interval`
-///   must have elapsed since this source's last fallback. Persistent,
-///   read from `DueSource::last_sidecar_fallback_at`. A `None` value
-///   means "never fallen back" → permitted.
+/// - **Per-source cap**: at least `effective_min_interval` seconds must
+///   have elapsed since this source's last fallback. The effective
+///   interval is bucketed by recency — see
+///   [`effective_sidecar_min_interval`].
 /// - **Aggregate cap**: `fallbacks_this_hour` (captured at the start
 ///   of the outer loop tick) must be below
 ///   `cfg.sidecar_fallback_max_per_hour`. A configured value of `0`
 ///   disables this cap (per-source still applies).
 fn fallback_caps_permit(
     source: &DueSource,
+    effective_min_interval_s: i64,
     cfg: RefresherConfig,
     fallbacks_this_hour: u64,
     now: i64,
 ) -> bool {
-    let min_interval = cfg.sidecar_fallback_min_interval.as_secs() as i64;
     if let Some(last) = source.last_sidecar_fallback_at {
-        if now - last < min_interval {
+        if now - last < effective_min_interval_s {
             debug!(
                 channel_id = %source.channel_id,
                 elapsed = now - last,
+                min_interval = effective_min_interval_s,
                 "skip sidecar fallback: per-source cap",
             );
             return false;
@@ -634,6 +750,49 @@ fn fallback_caps_permit(
         return false;
     }
     true
+}
+
+/// Compute the effective per-source min interval for the sidecar
+/// fallback based on the channel's most-recent upload. Channels with
+/// uploads in the last `sidecar_dormant_threshold_days` keep the
+/// "active" interval; channels dormant 30-90 days move to the
+/// "dormant" interval (default 6h); channels archived for >90 days
+/// move to the "archived" interval (default 24h).
+///
+/// One indexed query per RSS-failure event. The most-recent-upload
+/// lookup hits `idx_channel_videos_channel_published`.
+async fn effective_sidecar_min_interval(
+    pool: &SqlitePool,
+    channel_id: &str,
+    cfg: RefresherConfig,
+    now: i64,
+) -> i64 {
+    let max_published: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(published_at) FROM channel_videos \
+          WHERE channel_id = ? AND is_deleted = 0",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    let days_since = max_published
+        .map(|ts| (now - ts).max(0) / 86_400)
+        .unwrap_or(i64::MAX);
+
+    let dormant_days = cfg.sidecar_dormant_threshold_days as i64;
+    let archived_days = cfg.sidecar_archived_threshold_days as i64;
+
+    let bucket = if days_since <= dormant_days {
+        cfg.sidecar_fallback_min_interval
+    } else if days_since <= archived_days {
+        cfg.sidecar_fallback_dormant_interval
+    } else {
+        cfg.sidecar_fallback_archived_interval
+    };
+    bucket.as_secs() as i64
 }
 
 /// Dispatch the sidecar fallback for one channel. Reservation is

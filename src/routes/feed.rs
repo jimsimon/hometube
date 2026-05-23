@@ -329,6 +329,10 @@ pub async fn admin_get_refresher_settings(
         channel_interval_s: cfg.channel_interval.as_secs(),
         sidecar_fallback_enabled: cfg.sidecar_fallback_enabled,
         sidecar_fallback_min_interval_s: cfg.sidecar_fallback_min_interval.as_secs(),
+        sidecar_fallback_dormant_interval_s: cfg.sidecar_fallback_dormant_interval.as_secs(),
+        sidecar_fallback_archived_interval_s: cfg.sidecar_fallback_archived_interval.as_secs(),
+        sidecar_dormant_threshold_days: cfg.sidecar_dormant_threshold_days,
+        sidecar_archived_threshold_days: cfg.sidecar_archived_threshold_days,
         sidecar_fallback_max_per_hour: cfg.sidecar_fallback_max_per_hour,
         raw: RefresherSettingsRaw {
             dispatch_delay_ms: raw.dispatch_delay_ms,
@@ -338,6 +342,10 @@ pub async fn admin_get_refresher_settings(
             channel_interval_s: raw.channel_interval_s,
             sidecar_fallback_enabled: raw.sidecar_fallback_enabled,
             sidecar_fallback_min_interval_s: raw.sidecar_fallback_min_interval_s,
+            sidecar_fallback_dormant_interval_s: raw.sidecar_fallback_dormant_interval_s,
+            sidecar_fallback_archived_interval_s: raw.sidecar_fallback_archived_interval_s,
+            sidecar_dormant_threshold_days: raw.sidecar_dormant_threshold_days,
+            sidecar_archived_threshold_days: raw.sidecar_archived_threshold_days,
             sidecar_fallback_max_per_hour: raw.sidecar_fallback_max_per_hour,
         },
     }))
@@ -353,9 +361,19 @@ pub struct RefresherSettings {
     /// Whether the refresher is allowed to fall back to the
     /// youtubei.js discovery sidecar when an RSS poll fails.
     pub sidecar_fallback_enabled: bool,
-    /// Per-source minimum interval (seconds) between successive
-    /// sidecar fallbacks for the same source.
+    /// Per-source minimum interval (seconds) between sidecar fallbacks
+    /// for an *active* channel (most recent upload within
+    /// `sidecar_dormant_threshold_days`).
     pub sidecar_fallback_min_interval_s: u64,
+    /// Per-source interval for a *dormant* channel (most recent upload
+    /// 30-90d ago by default).
+    pub sidecar_fallback_dormant_interval_s: u64,
+    /// Per-source interval for an *archived* channel (no recent upload).
+    pub sidecar_fallback_archived_interval_s: u64,
+    /// Days since last upload before active → dormant.
+    pub sidecar_dormant_threshold_days: u64,
+    /// Days since last upload before dormant → archived.
+    pub sidecar_archived_threshold_days: u64,
     /// Aggregate per-hour cap on sidecar fallbacks across the whole
     /// refresher. `0` = unlimited (per-source still applies).
     pub sidecar_fallback_max_per_hour: u64,
@@ -375,6 +393,10 @@ pub struct RefresherSettingsRaw {
     pub channel_interval_s: Option<String>,
     pub sidecar_fallback_enabled: Option<String>,
     pub sidecar_fallback_min_interval_s: Option<String>,
+    pub sidecar_fallback_dormant_interval_s: Option<String>,
+    pub sidecar_fallback_archived_interval_s: Option<String>,
+    pub sidecar_dormant_threshold_days: Option<String>,
+    pub sidecar_archived_threshold_days: Option<String>,
     pub sidecar_fallback_max_per_hour: Option<String>,
 }
 
@@ -395,6 +417,14 @@ pub struct UpdateRefresherSettings {
     #[serde(default)]
     pub sidecar_fallback_min_interval_s: Option<u64>,
     #[serde(default)]
+    pub sidecar_fallback_dormant_interval_s: Option<u64>,
+    #[serde(default)]
+    pub sidecar_fallback_archived_interval_s: Option<u64>,
+    #[serde(default)]
+    pub sidecar_dormant_threshold_days: Option<u64>,
+    #[serde(default)]
+    pub sidecar_archived_threshold_days: Option<u64>,
+    #[serde(default)]
     pub sidecar_fallback_max_per_hour: Option<u64>,
 }
 
@@ -412,10 +442,14 @@ pub async fn admin_put_refresher_settings(
     use crate::error::AppError;
     use crate::services::feed_refresher::{
         KEY_BATCH_SIZE, KEY_CHANNEL_INTERVAL_S, KEY_DISPATCH_DELAY_MS, KEY_IDLE_TICK_S,
-        KEY_MAX_INFLIGHT, KEY_SIDECAR_FALLBACK_ENABLED, KEY_SIDECAR_FALLBACK_MAX_PER_HOUR,
-        KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S, RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S,
-        RANGE_DISPATCH_DELAY_MS, RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT,
+        KEY_MAX_INFLIGHT, KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS,
+        KEY_SIDECAR_DORMANT_THRESHOLD_DAYS, KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S,
+        KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S, KEY_SIDECAR_FALLBACK_ENABLED,
+        KEY_SIDECAR_FALLBACK_MAX_PER_HOUR, KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S,
+        RANGE_BATCH_SIZE, RANGE_CHANNEL_INTERVAL_S, RANGE_DISPATCH_DELAY_MS,
+        RANGE_IDLE_TICK_S, RANGE_MAX_INFLIGHT, RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S,
         RANGE_SIDECAR_FALLBACK_MAX_PER_HOUR, RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S,
+        RANGE_SIDECAR_THRESHOLD_DAYS,
     };
     use crate::services::setup::set_config_value;
 
@@ -489,6 +523,66 @@ pub async fn admin_put_refresher_settings(
         set_config_value(
             &state.db,
             KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S,
+            &v.to_string(),
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_fallback_dormant_interval_s {
+        if !RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_fallback_dormant_interval_s must be {}..={}",
+                RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.start(),
+                RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.end()
+            )));
+        }
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S,
+            &v.to_string(),
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_fallback_archived_interval_s {
+        if !RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_fallback_archived_interval_s must be {}..={}",
+                RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S.start(),
+                RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S.end()
+            )));
+        }
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S,
+            &v.to_string(),
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_dormant_threshold_days {
+        if !RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_dormant_threshold_days must be {}..={}",
+                RANGE_SIDECAR_THRESHOLD_DAYS.start(),
+                RANGE_SIDECAR_THRESHOLD_DAYS.end()
+            )));
+        }
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_DORMANT_THRESHOLD_DAYS,
+            &v.to_string(),
+        )
+        .await?;
+    }
+    if let Some(v) = body.sidecar_archived_threshold_days {
+        if !RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "sidecar_archived_threshold_days must be {}..={}",
+                RANGE_SIDECAR_THRESHOLD_DAYS.start(),
+                RANGE_SIDECAR_THRESHOLD_DAYS.end()
+            )));
+        }
+        set_config_value(
+            &state.db,
+            KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS,
             &v.to_string(),
         )
         .await?;
