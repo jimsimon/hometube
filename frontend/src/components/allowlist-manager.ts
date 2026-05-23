@@ -261,7 +261,16 @@ export class AllowlistManager extends LitElement {
     // fallback — it prefers sidecar data when available.
     const payload =
       kind === "channel"
-        ? { channel_id: item.id }
+        ? {
+            channel_id: item.id,
+            // For channel-kind SearchItem results, the channel's own
+            // display name sits in `item.title`, NOT `item.channel_title`
+            // (the latter is populated only for video-kind results,
+            // where it names the *owning* channel of the video).
+            channel_title: item.title,
+            channel_thumbnail_url: pickThumbnail(item.thumbnails),
+            description: item.description,
+          }
         : {
             video_id: item.id,
             title: item.title,

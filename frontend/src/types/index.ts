@@ -204,7 +204,6 @@ export interface ChannelInfo {
   title: string;
   description: string;
   thumbnails: Record<string, { url: string; width?: number; height?: number }>;
-  subscriber_count: number | null;
   video_count: number | null;
 }
 
@@ -346,7 +345,6 @@ export interface ChannelPreview {
   title: string;
   description: string;
   thumbnails: Record<string, { url: string; width?: number; height?: number }>;
-  subscriber_count: number | null;
   video_count: number | null;
   videos: ChannelVideoItem[];
   next_page_token: string | null;

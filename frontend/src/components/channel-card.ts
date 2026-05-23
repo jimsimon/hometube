@@ -1,10 +1,9 @@
 /**
  * <hometube-channel-card>
  *
- * Compact tile for a single channel: thumbnail, title, subscriber
- * count, plus an optional <hometube-subscribe-button>. The whole card
- * is wrapped in an anchor pointing at /child/channel/:id so it's
- * keyboard-accessible.
+ * Compact tile for a single channel: thumbnail + title, plus an
+ * optional <hometube-subscribe-button>. The whole card is wrapped in
+ * an anchor pointing at /child/channel/:id so it's keyboard-accessible.
  */
 
 import { LitElement, html, css } from "lit";
@@ -22,9 +21,6 @@ export class ChannelCard extends LitElement {
 
   @property({ type: String, attribute: "thumbnail-url" })
   thumbnailUrl: string | null = null;
-
-  @property({ type: Number, attribute: "subscriber-count" })
-  subscriberCount: number | null = null;
 
   @property({ type: Boolean, attribute: "show-subscribe" })
   showSubscribe = false;
@@ -81,10 +77,6 @@ export class ChannelCard extends LitElement {
       text-align: center;
       line-height: 1.3;
     }
-    .subs {
-      font-size: 0.85rem;
-      color: var(--wa-color-text-quiet);
-    }
     .hidden-note {
       font-size: 0.8rem;
       color: var(--wa-color-text-quiet);
@@ -92,12 +84,6 @@ export class ChannelCard extends LitElement {
       text-align: center;
     }
   `;
-
-  private formatSubs(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return String(n);
-  }
 
   override render() {
     const href = this.channelId ? `/child/channel/${encodeURIComponent(this.channelId)}` : "#";
@@ -108,9 +94,6 @@ export class ChannelCard extends LitElement {
             ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
             : html`<div class="placeholder" aria-hidden="true"></div>`}
           <div class="title">${this.title || "Channel"}</div>
-          ${this.subscriberCount != null
-            ? html`<div class="subs">${this.formatSubs(this.subscriberCount)} subscribers</div>`
-            : null}
         </a>
         ${this.hidden
           ? html`<p class="hidden-note">Not on your allowlist — ask a parent to add it.</p>`

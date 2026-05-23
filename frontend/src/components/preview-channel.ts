@@ -126,11 +126,6 @@ export class PreviewChannel extends LitElement {
         ${thumb ? html`<img src=${thumb} alt="" />` : nothing}
         <div>
           <h1>${this.data.title}</h1>
-          ${this.data.subscriber_count != null
-            ? html`<div class="description">
-                ${this.data.subscriber_count.toLocaleString()} subscribers
-              </div>`
-            : nothing}
           ${this.data.description
             ? html`<p class="description">${this.data.description}</p>`
             : nothing}
