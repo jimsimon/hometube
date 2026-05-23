@@ -116,6 +116,8 @@ Notes:
 - Thumbnails: RSS supplies a real URL in `<media:thumbnail>`; yt-dlp flat-playlist gives an id we map to `https://i.ytimg.com/vi/<id>/hqdefault.jpg`. Falls back to `mqdefault.jpg` at render time if `hqdefault` 404s.
 - `source` column is informational/diagnostic — useful for "which path last touched this row" admin views; not part of any query predicate.
 
+**Migration ordering note:** all migrations run pre-startup via `db::migrate` (`src/db/mod.rs:30`) before any background loop is spawned, so neither `feed_refresher` nor the new `channel_backfill` loop can observe the schema mid-flight. There's no in-place rename path to worry about — the migration drops `feed_sources` after its data has been INSERTed into `channel_sync_state` in the same transaction. Rollback story: this is a one-way migration; the original `feed_sources` rows are not preserved separately. Pre-deploy DB backup is the recommended fallback per HomeTube's existing deployment doc.
+
 ### `feed_source_items` — **dropped** in this migration
 
 ```sql
@@ -173,7 +175,7 @@ CREATE TABLE channel_sync_state (
     rss_last_error                   TEXT,
     rss_consecutive_errors           INTEGER NOT NULL DEFAULT 0,
     rss_next_poll_at                 INTEGER NOT NULL DEFAULT 0,
-    sidecar_last_fallback_at         INTEGER,
+    last_sidecar_fallback_at         INTEGER,            -- name preserved from feed_sources (15+ existing callers)
 
     -- Backfill tier (yt-dlp --flat-playlist) — new
     backfill_status                  TEXT NOT NULL DEFAULT 'pending'
@@ -204,7 +206,7 @@ INSERT INTO channel_sync_state
     (channel_id, channel_title,
      rss_etag, rss_last_modified, rss_last_polled_at, rss_last_success_at,
      rss_last_error, rss_consecutive_errors, rss_next_poll_at,
-     sidecar_last_fallback_at,
+     last_sidecar_fallback_at,
      backfill_status, backfill_next_at)
 SELECT
     source_id, title,
@@ -248,22 +250,42 @@ There is no soft-shelve state in this design — `shelved` always means "needs e
 
 ### `parent_notifications` CHECK extension — migration `021_…sql`
 
-Migration 003 stripped `sync_error` from the allowed notification types. We need a new one. Per the SQLite convention used elsewhere in this codebase (table rebuild via `_new` + copy + drop, see `migrations/003_remove_sync_columns.sql`):
+Migration 016 (`remove_usage_limits.sql:22-45`) is the canonical recent precedent for this CHECK rebuild pattern. We need to extend the trimmed list to add `channel_backfill_error`. Note: the column is `notification_type` (not `type` — the abbreviated name was a draft slip):
 
 ```sql
--- Rebuild parent_notifications with extended CHECK
+COMMIT;
+PRAGMA foreign_keys = OFF;
+BEGIN;
+
 CREATE TABLE parent_notifications_new (
-    /* …same columns… */
-    type TEXT NOT NULL CHECK (type IN (
-        'ytdlp_failure', 'new_search_term', 'system_update',
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_account_id INTEGER NOT NULL REFERENCES accounts(id),
+    notification_type TEXT NOT NULL CHECK (notification_type IN (
+        'ytdlp_failure',
+        'new_search_term',
+        'system_update',
         'channel_backfill_error'
     )),
-    /* … */
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    metadata TEXT,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-INSERT INTO parent_notifications_new SELECT * FROM parent_notifications;
+INSERT INTO parent_notifications_new (
+    id, parent_account_id, notification_type, title, message,
+    metadata, is_read, created_at
+)
+SELECT
+    id, parent_account_id, notification_type, title, message,
+    metadata, is_read, created_at
+FROM parent_notifications;
 DROP TABLE parent_notifications;
 ALTER TABLE parent_notifications_new RENAME TO parent_notifications;
--- Recreate indexes
+-- Recreate any indexes that were on parent_notifications.
+
+COMMIT;
+PRAGMA foreign_key_check;
 ```
 
 And add `TYPE_CHANNEL_BACKFILL_ERROR = "channel_backfill_error"` in `src/services/notifications.rs:28-30`.
@@ -311,7 +333,7 @@ And add `TYPE_CHANNEL_BACKFILL_ERROR = "channel_backfill_error"` in `src/service
 
 `poll_one` (`src/services/feed_refresher.rs:514-619`) currently calls `feed_cache::replace_source_items` on the RSS `Updated` outcome and the sidecar `Items` outcome. Replace those calls with `upsert_channel_videos_from_rss` / `upsert_channel_videos_from_sidecar`. Everything else in the refresher — RSS polling, ETag/Last-Modified handling, sidecar fallback rate caps, backoff, lease, jitter — is unchanged.
 
-Notable removal: the `SIDECAR_FALLBACK_MAX_ITEMS = 15` truncation (`src/services/feed_refresher.rs:135`) becomes vestigial — there's no per-source cap to protect anymore. Keep it as a sanity ceiling against a runaway sidecar response.
+Notable removal: the `SIDECAR_FALLBACK_MAX_ITEMS = 15` truncation (`src/services/feed_refresher.rs:48`) becomes vestigial — there's no per-source cap to protect anymore. Keep it as a sanity ceiling against a runaway sidecar response.
 
 ### Child channel videos page — repoint to `channel_videos`
 
@@ -321,8 +343,14 @@ Repoint this route at `channel_videos`:
 
 ```rust
 // New body of list_videos (replacing the sidecar call at channels.rs:82-85)
-// Pagination via offset cursor, matching the child_search pattern at search.rs:80-95.
-let cursor = q.page_token.as_deref().and_then(decode_offset_token).unwrap_or(0);
+// Pagination matches the child_search PageCursor pattern at search.rs:80-95
+// (PageCursor { offset: i64 } + decode_page_token / encode_page_token helpers).
+// Those helpers live in src/routes/search.rs today and should be lifted into a
+// shared module (e.g. src/routes/pagination.rs) so this route can reuse them.
+let cursor = q.page_token.as_deref()
+    .and_then(decode_page_token)
+    .map(|c| c.offset)
+    .unwrap_or(0);
 
 let rows: Vec<ChannelVideoItem> = sqlx::query_as(
     "SELECT video_id, title, channel_id, channel_title, thumbnail_url,
@@ -343,7 +371,7 @@ let rows: Vec<ChannelVideoItem> = sqlx::query_as(
 // existing can_child_view filter applies unchanged
 
 let next_page_token = if rows.len() as u32 >= PAGE_SIZE {
-    Some(encode_offset_token(cursor + PAGE_SIZE as i64))
+    Some(encode_page_token(&PageCursor { offset: cursor + PAGE_SIZE as i64 }))
 } else {
     None
 };
@@ -359,7 +387,7 @@ Edge case — freshly-allowlisted channel within the brief window between allowl
 - ~1h post-add (best case, single-channel install): backfill complete → full archive visible.
 - If the user opens the channel page in the first ~30s, they may see 0 videos. This is rare, recoverable (refresh), and the same window also affects the New Videos feed today. Worth noting in the UI: an empty channel page with a "syncing…" state would be a nice frontend follow-up.
 
-`enforce_channel_access` (`src/routes/channels.rs:122-151`) is unchanged.
+`enforce_channel_access` (`src/routes/channels.rs:122-152`) is unchanged.
 
 ### Channel header metadata route — also repointed
 
@@ -467,7 +495,15 @@ Parent search (`GET /api/parent/search`, `src/routes/search.rs:48-57`) is untouc
 
 ### Admin diagnostics surface
 
-`GET /api/admin/feed-sources` (`src/routes/feed.rs:519`) currently reports `item_count` from `feed_source_items`. Repoint it to `COUNT(*) FROM channel_videos WHERE channel_id = ? AND is_deleted = 0`. Add a parallel `archived_count` (`AND is_deleted = 1`) for completeness.
+`GET /api/admin/feed-sources` (`src/routes/feed.rs:519`) returns `Vec<FeedSourceStatus>` (`src/services/feed_cache.rs:46-58`), shaped around the dropped `feed_sources` schema: `kind`, `source_id`, `title`, `last_polled_at`, `last_success_at`, `last_error`, `consecutive_errors`, `next_poll_at`, `item_count`, `last_sidecar_fallback_at`. With the table consolidated into `channel_sync_state`, the response shape needs an explicit redesign.
+
+**Decision:** rename the route to `GET /api/admin/channel-sync-state` and update `FeedSourceStatus` → `ChannelSyncStateStatus`. Drop `kind` (always 'channel') and rename `source_id` → `channel_id`. Map `last_polled_at` → `rss_last_polled_at`, `last_success_at` → `rss_last_success_at`, `last_error` → `rss_last_error`, `consecutive_errors` → `rss_consecutive_errors`, `next_poll_at` → `rss_next_poll_at`. Add `archived_count` (`AND is_deleted = 1`) alongside `item_count` (`AND is_deleted = 0`).
+
+The old URL `/api/admin/feed-sources` is **not** shipped as an alias — the route is parent-only diagnostic surface (`src/routes/feed.rs:519`), not consumed by any non-parent client, and the rename is straightforward to coordinate with the frontend admin page it backs (`frontend/src/components/feed-refresher-settings.ts`).
+
+Item-count query changes:
+- `item_count = COUNT(*) FROM channel_videos WHERE channel_id = ? AND is_deleted = 0`
+- `archived_count = COUNT(*) FROM channel_videos WHERE channel_id = ? AND is_deleted = 1`
 
 ## Code: new module `src/services/channel_backfill.rs`
 
@@ -667,7 +703,7 @@ All admin routes parent-gated, same auth pattern as existing `/api/admin/*` (`sr
 4. **PO token + cookies** through the same `pot-server` and cookie-jar pipeline that already keeps the `/api/proxy/segment` extraction path alive.
 5. **No periodic re-backfill** for 30 days after a complete pass.
 6. **Bot-check signature detection** (sign-in / consent / 429 / 403) classifies failures and triggers exponential backoff with cap 24 h, not retry-immediately.
-7. **Shared cooldown read** with `channel_sync_state.sidecar_last_fallback_at`: if the refresher recently took a sidecar fallback for a given channel, defer that channel's next backfill by an additional hour. This avoids stacking two anti-bot-sensitive operations on the same channel back-to-back.
+7. **Shared cooldown read** with `channel_sync_state.last_sidecar_fallback_at`: if the refresher recently took a sidecar fallback for a given channel, defer that channel's next backfill by an additional hour. This avoids stacking two anti-bot-sensitive operations on the same channel back-to-back.
 8. **Default-on at first ship.** `channel_backfill.enabled = true` by default — see Resolved Decision #1. The kill switch is the `channel_backfill.enabled` tunable in `app_config`; flipping it to `false` halts the loop within `idle_tick` (60s) without restart.
 
 ## Testing
@@ -821,7 +857,13 @@ To prefetch thumbnails meaningfully we need to add a parallel cache. Scope:
 
 **Effective behavior**: after a channel is backfilled, its thumbnails trickle into the local disk cache over the following minutes. Subsequent child renders of the channel page or New Videos feed serve thumbnails from disk with no YouTube hit. Cold-start (never-backfilled-yet channel) still hits YouTube on demand.
 
-**Scope honesty**: this is the largest of the three promoted items — net-new schema, new module, new background task, route change, UI change. It's still well-bounded (clear precedent in the segment cache implementation), but if Phase 1 needs to ship sooner, this is the cleanest item to break out into a follow-up plan.
+**Scope honesty**: this is the largest of the three promoted items — net-new schema (migration 022), new module (`thumbnail_store.rs`), new background prefetch task, route change, cron change, UI change. It's well-bounded (clear precedent in the segment cache implementation), but it's a meaningful second axis of work bolted onto a phase that already adds two migrations, a new background loop, a schema consolidation, and 6+ frontend touchpoints.
+
+**Recommended sub-phasing.** If shipping Phase 1 as a single change feels too large at review time, the cleanest split is:
+- **Phase 1a (core)**: migrations 020/021, `channel_videos` + `channel_sync_state`, the new `channel_backfill` loop, allowlist body-data path, channel browse repoints, search repoint, subscriber_count drop, description render, Parent UI for backfill, adaptive sidecar cadence, `queries.rs` cleanup.
+- **Phase 1b (thumbnail cache)**: migration 022, `thumbnail_store.rs`, proxy route update, prefetch trigger in the backfill loop, `cache_cleanup` cron extension, cache-manager UI update.
+
+Phase 1a delivers all the YouTube-call-reduction wins. Phase 1b adds an optimisation that depends on Phase 1a's backfill loop being in place. Splitting keeps each PR reviewable, isolates migration risk, and lets Phase 1b ship a week or two later without blocking the core.
 
 Items removed from Phase 2 in this revision:
 - "Browse all videos from this channel" child UI — already covered by the Phase 1 repoint of `src/routes/channels.rs::list_videos` to read from `channel_videos` with full pagination. The existing child channel page (`templates/pages/child/channel.html`) is the consumer; no new UI needed.
