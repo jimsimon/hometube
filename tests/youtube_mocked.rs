@@ -217,8 +217,11 @@ async fn parent_search_channel_type() {
 // ===========================================================================
 
 #[tokio::test]
-async fn child_channel_detail_with_mocked_discovery() {
-    let (app, auth, mock_server) = boot_with_mock_discovery(AccountType::Child).await;
+async fn child_channel_detail_served_from_local_state() {
+    // The channel-detail route is now local-only — header metadata
+    // lives in `channel_sync_state` (seeded by the allowlist POST
+    // body-data path) so this endpoint makes zero YouTube calls.
+    let (app, auth, _mock_server) = boot_with_mock_discovery(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
@@ -233,29 +236,36 @@ async fn child_channel_detail_with_mocked_discovery() {
     .await
     .unwrap();
 
-    Mock::given(method("GET"))
-        .and(path("/channels/UCmocked"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(mock_channel_response("UCmocked", "Mocked Channel")),
-        )
-        .mount(&mock_server)
-        .await;
+    // Seed channel_sync_state directly (production wires this up via
+    // `feed_cache::upsert_channel_with_metadata` inside add_channel).
+    sqlx::query(
+        "INSERT INTO channel_sync_state \
+            (channel_id, channel_title, channel_thumbnail_url, description, \
+             backfill_status, backfill_next_at, rss_next_poll_at) \
+         VALUES ('UCmocked', 'Mocked Channel', 'https://t/x.jpg', 'About', \
+                 'pending', 0, 0)",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
 
     let res = app.server.get("/api/channels/UCmocked").await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["id"], "UCmocked");
     assert_eq!(body["title"], "Mocked Channel");
+    assert_eq!(body["description"], "About");
 }
 
 #[tokio::test]
 async fn child_channel_videos_with_mocked_discovery() {
-    let (app, auth, mock_server) = boot_with_mock_discovery(AccountType::Child).await;
+    // The channel-videos route is now local-only — it reads from
+    // `channel_videos` which the freshness refresher + backfill
+    // populate. No sidecar mock needed for this test.
+    let (app, auth, _mock_server) = boot_with_mock_discovery(AccountType::Child).await;
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Allowlist the channel.
     sqlx::query(
         "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
          VALUES (?, 'UCvids', 'Vids Channel', ?)",
@@ -266,14 +276,6 @@ async fn child_channel_videos_with_mocked_discovery() {
     .await
     .unwrap();
 
-    // Mock channel-videos endpoint (sidecar handles the uploads
-    // playlist resolution internally).
-    Mock::given(method("GET"))
-        .and(path_regex("/channel-videos/UCvids.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(mock_video_items_response()))
-        .mount(&mock_server)
-        .await;
-
     // Allowlist the video that will appear.
     sqlx::query(
         "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
@@ -281,6 +283,18 @@ async fn child_channel_videos_with_mocked_discovery() {
     )
     .bind(child_id)
     .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Seed channel_videos directly with one row.
+    sqlx::query(
+        "INSERT INTO channel_videos \
+            (channel_id, video_id, title, channel_title, thumbnail_url, \
+             published_at, first_seen_at, last_seen_at, source) \
+         VALUES ('UCvids', 'pl-vid-1', 'V', 'Vids Channel', 'https://t/x.jpg', \
+                 1700000000, 1, 1, 'rss')",
+    )
     .execute(&app.pool)
     .await
     .unwrap();
@@ -386,12 +400,11 @@ async fn new_videos_feed_with_mocked_discovery() {
     .await
     .unwrap();
 
-    hometube::services::feed_cache::upsert_source(&app.pool, "channel", "UCfeed")
+    hometube::services::feed_cache::upsert_channel(&app.pool, "UCfeed")
         .await
         .unwrap();
-    hometube::services::feed_cache::replace_source_items(
+    hometube::services::feed_cache::upsert_channel_videos_from_rss(
         &app.pool,
-        "channel",
         "UCfeed",
         &[hometube::services::feed_cache::ItemRow {
             video_id: "new-vid-1".into(),
@@ -450,7 +463,7 @@ async fn block_video_with_mocked_discovery_title() {
 
 #[tokio::test]
 async fn up_next_from_channel_with_mocked_discovery() {
-    // Up-next-by-channel now reads from the `feed_source_items` cache
+    // Up-next-by-channel now reads from the `channel_videos` cache
     // populated by the background refresher (avoiding a sidecar
     // round-trip on every request). Seed the cache directly.
     let (app, auth, _mock_server) = boot_with_mock_discovery(AccountType::Child).await;
@@ -467,12 +480,11 @@ async fn up_next_from_channel_with_mocked_discovery() {
     .await
     .unwrap();
 
-    hometube::services::feed_cache::upsert_source(&app.pool, "channel", "UCnext")
+    hometube::services::feed_cache::upsert_channel(&app.pool, "UCnext")
         .await
         .unwrap();
-    hometube::services::feed_cache::replace_source_items(
+    hometube::services::feed_cache::upsert_channel_videos_from_rss(
         &app.pool,
-        "channel",
         "UCnext",
         &[hometube::services::feed_cache::ItemRow {
             video_id: "next-vid".into(),

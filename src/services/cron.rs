@@ -431,11 +431,15 @@ async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
     crate::services::video_cache::cleanup_segment_cache(pool).await
 }
 
-/// Drop `feed_sources` rows whose source is no longer allowlisted by
-/// any child. Items cascade via foreign key.
+/// Drop `channel_sync_state` rows (and cascade `channel_videos`) for
+/// channels no longer allowlisted by any child. Also calls
+/// `channel_backfill::reconcile_with_allowlist` so newly-allowlisted
+/// channels missing a sync_state row get one — this catches anything
+/// the route-level wiring may have missed (e.g. a direct SQL insert).
 async fn run_feed_gc(pool: &SqlitePool) -> AppResult<String> {
     let removed = crate::services::feed_cache::gc_orphan_sources(pool).await?;
-    Ok(format!("removed {removed} orphan feed source(s)"))
+    crate::services::channel_backfill::reconcile_with_allowlist(pool).await?;
+    Ok(format!("removed {removed} orphan channel(s)"))
 }
 
 async fn notify_parents_ytdlp_failure(pool: &SqlitePool, err: &str) -> AppResult<()> {

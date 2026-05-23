@@ -101,7 +101,7 @@ pub async fn continue_watching(
 /// Common pipeline for `continue-watching` and `watch-again`:
 ///
 /// 1. Resolve `channel_id` for legacy NULL-channel rows in a single
-///    batched query against `feed_source_items`.
+///    batched query against `channel_videos`.
 /// 2. Apply `keep` (the per-feed completion predicate).
 /// 3. Per-row access check via `can_child_view`, passing the (possibly
 ///    legacy-resolved) channel_id so channel-allowlisted videos still
@@ -124,7 +124,7 @@ where
 {
     // Build the legacy-lookup set from rows that both (a) pass the
     // per-feed predicate and (b) are missing a stored channel_id. No
-    // point asking feed_source_items about rows we'll drop anyway.
+    // point asking channel_videos about rows we'll drop anyway.
     let legacy_ids: Vec<&str> = rows
         .iter()
         .filter(|r| keep(r) && r.channel_id().is_none())
@@ -141,7 +141,7 @@ where
             // exactly what bit us before.
             tracing::warn!(
                 error = %err,
-                "watch_history feed: feed_source_items lookup failed; legacy NULL-channel rows may be hidden"
+                "watch_history feed: channel_videos lookup failed; legacy NULL-channel rows may be hidden"
             );
             std::collections::HashMap::new()
         }
@@ -239,11 +239,9 @@ pub async fn watch_again(
 
 /// Best-effort batched `video_id → channel_id` lookup for
 /// `watch_history` rows that were written before the `channel_id`
-/// column existed (migration 014). Reads from `feed_source_items`,
-/// which the feed refresher keeps populated for every allowlisted
-/// channel. Returns an empty map when there are no legacy
-/// rows to resolve, so the caller never pays for the round-trip on a
-/// freshly-migrated DB.
+/// column existed (migration 014). Reads from `channel_videos`, the
+/// unified archive populated by RSS + sidecar + yt-dlp backfill.
+/// Returns an empty map when there are no legacy rows to resolve.
 async fn lookup_channel_ids_for_videos(
     db: &sqlx::SqlitePool,
     video_ids: &[&str],
@@ -251,26 +249,18 @@ async fn lookup_channel_ids_for_videos(
     if video_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    // sqlx doesn't support binding a slice to `IN (?)` directly with
-    // SQLite, so build the placeholder list manually. Inputs are
-    // video_ids we just read out of our own DB, so there's nothing to
-    // sanitise — but we still parameterise rather than interpolate.
     let placeholders = std::iter::repeat_n("?", video_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT video_id, channel_id FROM feed_source_items \
-         WHERE channel_id IS NOT NULL AND video_id IN ({placeholders})"
+        "SELECT video_id, channel_id FROM channel_videos \
+         WHERE video_id IN ({placeholders})"
     );
     let mut q = sqlx::query_as::<_, (String, String)>(&sql);
     for id in video_ids {
         q = q.bind(*id);
     }
     let rows = q.fetch_all(db).await?;
-    // A single video_id can have rows under multiple `(kind, source_id)`
-    // pairs. First match wins; we don't try to pick a "best" one because
-    // `can_child_view` only needs *some* channel_id that hits the
-    // allowlist.
     let mut map = std::collections::HashMap::with_capacity(rows.len());
     for (video_id, channel_id) in rows {
         map.entry(video_id).or_insert(channel_id);
@@ -516,15 +506,20 @@ pub async fn admin_put_refresher_settings(
     admin_get_refresher_settings(State(state)).await
 }
 
-/// `GET /api/admin/feed-sources` — parent-only diagnostics.
+/// `GET /api/admin/channel-sync-state` — parent-only diagnostics.
 ///
-/// Returns one row per cached source with its poll bookkeeping
-/// (last_polled_at, last_success_at, last_error, consecutive_errors,
-/// next_poll_at) plus the number of items currently held. Surfaces
-/// poll health without requiring SQLite access.
+/// Returns one row per tracked channel with its RSS poll bookkeeping
+/// (rss_last_polled_at, rss_last_success_at, rss_last_error, …) plus
+/// the backfill tier's bookkeeping (backfill_status, backfill_next_at,
+/// …) plus live/tombstoned video counts. Surfaces freshness +
+/// backfill health together so the operator can correlate issues
+/// across tiers.
+///
+/// (Renamed from `/api/admin/feed-sources` when migration 020
+/// consolidated `feed_sources` into `channel_sync_state`.)
 pub async fn admin_list_sources(
     State(state): State<AppState>,
-) -> AppResult<Json<Vec<feed_cache::FeedSourceStatus>>> {
+) -> AppResult<Json<Vec<feed_cache::ChannelSyncStateStatus>>> {
     let rows = feed_cache::list_source_status(&state.db).await?;
     Ok(Json(rows))
 }
@@ -609,8 +604,9 @@ pub async fn admin_get_refresher_capacity(
 
 /// `GET /api/feed/new-videos`.
 ///
-/// Reads from the `feed_source_items` cache populated by the
-/// [`crate::services::feed_refresher`] background task. The handler
+/// Reads from the `channel_videos` cache populated by the
+/// [`crate::services::feed_refresher`] (RSS + sidecar) and
+/// [`crate::services::channel_backfill`] (yt-dlp) background tasks. The handler
 /// performs no network I/O and no per-item access-control checks; both
 /// are folded into the single SQL query inside
 /// [`feed_cache::feed_for_child`].
@@ -760,17 +756,15 @@ async fn up_next_from_channel(
     child_id: i64,
     channel_id: &str,
 ) -> AppResult<Vec<UpNextItem>> {
-    // Prefer the cached items populated by the feed refresher; this
-    // avoids a sidecar round-trip on every up-next request and reuses
-    // the same data the new-videos feed shows.
+    // Read from the local archive populated by RSS + sidecar + yt-dlp
+    // backfill — no YouTube round-trip on the request path.
     let rows: Vec<UpNextRow> = sqlx::query_as(
         "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-           FROM feed_source_items \
-          WHERE kind = ? AND source_id = ? \
-          ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
+           FROM channel_videos \
+          WHERE channel_id = ? AND is_deleted = 0 \
+          ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC \
           LIMIT 25",
     )
-    .bind(feed_cache::KIND_CHANNEL)
     .bind(channel_id)
     .fetch_all(&state.db)
     .await?;
@@ -792,7 +786,7 @@ async fn up_next_from_channel(
     Ok(items)
 }
 
-/// One row pulled from `feed_source_items` for the up-next builder.
+/// One row pulled from `channel_videos` for the up-next builder.
 /// Pulled out into a struct to satisfy clippy's `type_complexity` lint
 /// and to make the column ordering explicit.
 #[derive(sqlx::FromRow)]
@@ -829,12 +823,11 @@ async fn up_next_from_new_videos(
     for channel_id in &channels {
         let rows: Vec<UpNextRow> = sqlx::query_as(
             "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-               FROM feed_source_items \
-              WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
+               FROM channel_videos \
+              WHERE channel_id = ? AND is_deleted = 0 \
+              ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC \
               LIMIT 5",
         )
-        .bind(feed_cache::KIND_CHANNEL)
         .bind(channel_id)
         .fetch_all(&state.db)
         .await

@@ -93,7 +93,10 @@ pub struct SearchItem {
     pub published_at: Option<String>,
 }
 
-/// A channel resource (subset).
+/// A channel resource (subset). `subscriber_count` was dropped when
+/// the channel-archive sync work moved channel header metadata to
+/// local storage — YouTube's count is purely informational and not
+/// load-bearing for any HomeTube feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub id: String,
@@ -102,7 +105,6 @@ pub struct ChannelInfo {
     pub description: String,
     #[serde(default)]
     pub thumbnails: HashMap<String, ThumbnailInfo>,
-    pub subscriber_count: Option<i64>,
     pub video_count: Option<i64>,
 }
 
@@ -495,6 +497,9 @@ mod tests {
 
     #[test]
     fn deserialize_channel_info() {
+        // The sidecar payload may still include `subscriber_count` —
+        // we deserialize it but the field has been dropped from the
+        // struct, so serde just ignores it.
         let json = serde_json::json!({
             "id": "UCabc",
             "title": "Channel",
@@ -506,7 +511,7 @@ mod tests {
         let ch: ChannelInfo = serde_json::from_value(json).unwrap();
         assert_eq!(ch.id, "UCabc");
         assert_eq!(ch.title, "Channel");
-        assert_eq!(ch.subscriber_count, Some(1000));
+        assert_eq!(ch.video_count, Some(50));
     }
 
     #[test]

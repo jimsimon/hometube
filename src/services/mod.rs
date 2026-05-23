@@ -13,6 +13,7 @@
 //!   yt-dlp / cache-cleanup handlers
 
 pub mod access;
+pub mod channel_backfill;
 pub mod cron;
 pub mod dash;
 pub mod feed_cache;

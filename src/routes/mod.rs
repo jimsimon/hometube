@@ -139,7 +139,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/system/pot-server", get(system::get_pot_server_status))
         // Feed-cache diagnostics + refresher tunables (parent-only)
-        .route("/api/admin/feed-sources", get(feed::admin_list_sources))
+        .route(
+            "/api/admin/channel-sync-state",
+            get(feed::admin_list_sources),
+        )
         .route(
             "/api/admin/feed-refresher/settings",
             get(feed::admin_get_refresher_settings).put(feed::admin_put_refresher_settings),

@@ -408,6 +408,7 @@ fn ntfy_priority_for(kind: &str, default: Option<u8>) -> u8 {
     }
     match kind {
         "ytdlp_failure" => 4,
+        "channel_backfill_error" => 3,
         "new_search_term" => 2,
         _ => 3,
     }
@@ -419,6 +420,7 @@ fn gotify_priority_for(kind: &str, default: Option<u8>) -> u8 {
     }
     match kind {
         "ytdlp_failure" => 8,
+        "channel_backfill_error" => 5,
         "new_search_term" => 3,
         _ => 5,
     }

@@ -39,9 +39,30 @@ pub struct AllowlistedChannel {
     pub created_at: i64,
 }
 
+/// Body for `POST /api/children/:id/allowlist/channels`.
+///
+/// `channel_id` is required; the rest are caller-supplied metadata
+/// from the parent search response that the server uses **in
+/// preference to** calling the discovery sidecar. The dominant
+/// allowlist flow is "parent searches → clicks a result → adds":
+/// the search response already contains the title and thumbnail, so
+/// forwarding them in the POST body lets the server skip the sidecar
+/// `/channels/:id` call entirely — eliminating an anti-bot-sensitive
+/// burst surface when many channels are added in quick succession.
+///
+/// Body data wins when present; the sidecar is only called as a
+/// fallback when `channel_title` is missing (e.g. raw URL/ID pastes).
+/// This mirrors the existing `AddVideoBody` pattern but with a
+/// stronger preference for body data.
 #[derive(Debug, Deserialize)]
 pub struct AddChannelBody {
     pub channel_id: String,
+    #[serde(default)]
+    pub channel_title: Option<String>,
+    #[serde(default)]
+    pub channel_thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `GET /api/children/:id/allowlist/channels`.
@@ -68,12 +89,60 @@ pub async fn add_channel(
     Json(body): Json<AddChannelBody>,
 ) -> AppResult<Json<AllowlistedChannel>> {
     require_child_id(&state, child_id).await?;
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_channel(&body.channel_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("channel not found on YouTube".into()))?;
-    let thumb = preferred_thumbnail(&info.thumbnails);
+
+    // 1. Try body data first (trim + filter empty per add_video convention).
+    let body_title = body
+        .channel_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_thumb = body
+        .channel_thumbnail_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let body_desc = body
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // 2. Only call the sidecar if essential body data is missing.
+    //    Title is the gate — if present, we trust the rest of the body too.
+    let info = if body_title.is_some() {
+        None
+    } else {
+        let yt = YoutubeClient::from_db(&state.db).await?;
+        yt.get_channel(&body.channel_id).await.ok().flatten()
+    };
+
+    // 3. Combine, preferring body, then sidecar, then error if both empty.
+    let title = body_title
+        .map(str::to_string)
+        .or_else(|| {
+            info.as_ref()
+                .map(|i| i.title.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .ok_or_else(|| {
+            AppError::BadRequest("channel_title required (sidecar lookup also failed)".into())
+        })?;
+    let thumb = body_thumb
+        .map(str::to_string)
+        .or_else(|| info.as_ref().and_then(|i| preferred_thumbnail(&i.thumbnails)));
+    let description = body_desc.map(str::to_string).or_else(|| {
+        info.as_ref()
+            .map(|i| i.description.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+
+    // Use the sidecar's canonical channel ID when available (handle
+    // any redirect / disambiguation the sidecar may have applied);
+    // otherwise trust the body channel_id.
+    let canonical_id = info
+        .as_ref()
+        .map(|i| i.id.clone())
+        .unwrap_or_else(|| body.channel_id.clone());
 
     let row: AllowlistedChannel = sqlx::query_as(
         "INSERT INTO allowlisted_channels \
@@ -85,34 +154,42 @@ pub async fn add_channel(
          RETURNING id, channel_id, channel_title, channel_thumbnail_url, created_at",
     )
     .bind(child_id)
-    .bind(&info.id)
-    .bind(&info.title)
-    .bind(thumb)
+    .bind(&canonical_id)
+    .bind(&title)
+    .bind(&thumb)
     .bind(current.id)
     .fetch_one(&state.db)
     .await?;
 
-    // Seed the feed-source cache so this channel will be polled by
-    // the background refresher. Failures here are logged but do not
-    // fail the allowlist write — the user has already committed.
-    if let Err(err) = crate::services::feed_cache::upsert_source(
+    // Seed the channel sync state with the full header metadata. The
+    // RSS refresher and the backfill loop both pick this up on their
+    // next ticks. Failures here are logged but do not fail the
+    // allowlist write — the user has already committed.
+    if let Err(err) = crate::services::feed_cache::upsert_channel_with_metadata(
         &state.db,
-        crate::services::feed_cache::KIND_CHANNEL,
-        &info.id,
+        &canonical_id,
+        Some(&title),
+        thumb.as_deref(),
+        description.as_deref(),
     )
     .await
     {
-        tracing::warn!(channel_id = %info.id, %err, "failed to seed feed source for newly allowlisted channel");
+        tracing::warn!(
+            channel_id = %canonical_id,
+            %err,
+            "failed to seed channel_sync_state for newly allowlisted channel",
+        );
     }
     Ok(Json(row))
 }
 
 /// `DELETE /api/children/:id/allowlist/channels/:channelId`.
 ///
-/// Performs the allowlist delete and the optional `feed_sources` GC
-/// inside a single transaction so an observer can never witness "no
-/// child references this channel but feed_sources still holds it" —
-/// the diagnostics page and the refresher both see a consistent view.
+/// Performs the allowlist delete and the optional `channel_sync_state`
+/// + `channel_videos` GC inside a single transaction so an observer
+/// can never witness "no child references this channel but
+/// channel_sync_state still holds it" — the diagnostics page and the
+/// refresher both see a consistent view.
 pub async fn delete_channel(
     State(state): State<AppState>,
     Path((child_id, channel_id)): Path<(i64, String)>,
@@ -127,16 +204,21 @@ pub async fn delete_channel(
         .await?;
 
     // If no other child still has this channel allowlisted, drop the
-    // matching `feed_sources` row so the refresher stops polling it
-    // immediately rather than waiting up to a day for the `feed_gc`
-    // cron. The `feed_source_items` rows cascade via FK.
+    // matching `channel_sync_state` row + cascade the `channel_videos`
+    // archive so the refresher and the backfill loop stop processing
+    // it immediately rather than waiting up to a day for the `feed_gc`
+    // cron.
     let still_used: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = ?")
             .bind(&channel_id)
             .fetch_one(&mut *tx)
             .await?;
     if still_used == 0 {
-        sqlx::query("DELETE FROM feed_sources WHERE kind = 'channel' AND source_id = ?")
+        sqlx::query("DELETE FROM channel_videos WHERE channel_id = ?")
+            .bind(&channel_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM channel_sync_state WHERE channel_id = ?")
             .bind(&channel_id)
             .execute(&mut *tx)
             .await?;

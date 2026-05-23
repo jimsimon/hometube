@@ -171,19 +171,20 @@ async fn continue_watching_includes_channel_allowlisted_videos() {
     .await
     .unwrap();
 
-    // (b) Legacy row: channel_id NULL but resolvable via
-    // feed_source_items (the refresher cache).
+    // (b) Legacy row: channel_id NULL on watch_history but resolvable
+    // via channel_videos (the refresher cache).
     sqlx::query(
-        "INSERT INTO feed_sources (kind, source_id, title) \
-         VALUES ('channel', 'ch-allow', 'My Channel')",
+        "INSERT INTO channel_sync_state (channel_id, channel_title) \
+         VALUES ('ch-allow', 'My Channel')",
     )
     .execute(&app.pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO feed_source_items (kind, source_id, video_id, title, channel_id, \
-         channel_title, thumbnail_url, published_at, fetched_at) \
-         VALUES ('channel', 'ch-allow', 'vid-legacy', 'Legacy', 'ch-allow', 'My Channel', NULL, 1, 1)",
+        "INSERT INTO channel_videos \
+            (channel_id, video_id, title, channel_title, thumbnail_url, published_at, \
+             first_seen_at, last_seen_at, source) \
+         VALUES ('ch-allow', 'vid-legacy', 'Legacy', 'My Channel', NULL, 1, 1, 1, 'rss')",
     )
     .execute(&app.pool)
     .await
@@ -213,7 +214,7 @@ async fn continue_watching_includes_channel_allowlisted_videos() {
     );
     assert!(
         ids.contains(&"vid-legacy"),
-        "legacy row with NULL channel_id must resolve via feed_source_items, got {ids:?}"
+        "legacy row with NULL channel_id must resolve via channel_videos, got {ids:?}"
     );
 }
 

@@ -1,9 +1,11 @@
-//! Background task that keeps `feed_source_items` warm.
+//! Background task that keeps `channel_videos` warm for the freshness
+//! tier (RSS → InnerTube sidecar fallback).
 //!
-//! Picks the most-overdue sources, polls them (currently RSS-only —
-//! channels), and writes the results back via [`feed_cache`]. Drives
-//! the user-facing `/api/feed/new-videos` endpoint without it ever
-//! having to talk to YouTube.
+//! Picks the most-overdue channels, polls them via RSS (with sidecar
+//! fallback on RSS failure), and writes the results back via
+//! [`feed_cache`]. Drives the user-facing `/api/feed/new-videos`
+//! endpoint without it ever having to talk to YouTube on the request
+//! path.
 //!
 //! ### Concurrency and rate limiting
 //!
@@ -36,15 +38,17 @@ use sqlx::SqlitePool;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use crate::services::feed_cache::{self, DueSource, ItemRow, KIND_CHANNEL};
+use crate::services::feed_cache::{self, DueSource, ItemRow};
 use crate::services::youtube::{
     ChannelVideoItem as SidecarChannelVideoItem, SidecarRefresherOutcome, YoutubeClient,
 };
 use crate::services::youtube_rss::{self, PollOutcome};
 
-/// How many items the sidecar fallback asks for per source. Matches
-/// `PER_SOURCE_CAP` (the storage cap) and the RSS feed's ~15-item
-/// natural ceiling so the two paths produce comparably-sized writes.
+/// Sanity ceiling on the per-channel sidecar fallback response — caps
+/// a runaway InnerTube response. Matches the natural ~15-item ceiling
+/// of the RSS feed so RSS and sidecar produce comparably-sized writes.
+/// Vestigial since the per-source storage cap was removed in the
+/// channel_videos consolidation, but retained as a defensive ceiling.
 const SIDECAR_FALLBACK_MAX_ITEMS: u32 = 15;
 
 /// When the sidecar confirms a source is dead (`NotFound`), push its
@@ -479,8 +483,7 @@ pub async fn run(pool: SqlitePool) {
                 .await
                 {
                     warn!(
-                        kind = %source.kind,
-                        source_id = %source.source_id,
+                        channel_id = %source.channel_id,
                         %err,
                         "feed refresher: poll task errored at outer layer",
                     );
@@ -497,53 +500,35 @@ pub async fn run(pool: SqlitePool) {
     }
 }
 
-/// Drive one source through poll + persist. Errors here are logged but
-/// swallowed by the outer caller; per-source failures are *also*
-/// recorded in `feed_sources.last_error` for diagnostics.
+/// Drive one channel through poll + persist. Errors here are logged
+/// but swallowed by the outer caller; per-channel failures are also
+/// recorded in `channel_sync_state.rss_last_error` for diagnostics.
 ///
-/// The poll strategy depends on the source kind:
-///
-/// - **Channel sources** try RSS first (cheapest, lowest anti-bot
-///   risk). On RSS error, fall back to the youtubei.js sidecar if the
-///   per-source and aggregate rate caps permit.
+/// Tries RSS first (cheapest, lowest anti-bot risk). On RSS error,
+/// falls back to the youtubei.js sidecar if the per-source and
+/// aggregate rate caps permit.
 #[tracing::instrument(
     name = "feed.poll",
     skip_all,
-    fields(kind = %source.kind, source_id = %source.source_id),
+    fields(channel_id = %source.channel_id),
 )]
 async fn poll_one(
     pool: &SqlitePool,
     http: &Client,
     base: &str,
     yt: Option<&YoutubeClient>,
-    // Aggregate sidecar-fallback count captured at the start of the
-    // outer loop tick. Per-task snapshot — see the comment in `run`.
     fallbacks_this_hour: u64,
     source: &DueSource,
     cfg: RefresherConfig,
 ) -> crate::error::AppResult<()> {
     let now = unix_now();
 
-    if source.kind != KIND_CHANNEL {
-        // Unknown kind. Shelve so the row doesn't poison diagnostics.
-        let one_year_secs: i64 = 365 * 24 * 60 * 60;
-        feed_cache::record_poll_skipped(
-            pool,
-            &source.kind,
-            &source.source_id,
-            "kind not supported (deferred)",
-            now + one_year_secs,
-        )
-        .await?;
-        return Ok(());
-    }
-
     let result = youtube_rss::poll_channel(
         http,
         base,
-        &source.source_id,
-        source.etag.as_deref(),
-        source.last_modified.as_deref(),
+        &source.channel_id,
+        source.rss_etag.as_deref(),
+        source.rss_last_modified.as_deref(),
     )
     .await;
 
@@ -553,11 +538,10 @@ async fn poll_one(
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     title: None,
-                    etag: source.etag.as_deref(),
-                    last_modified: source.last_modified.as_deref(),
+                    etag: source.rss_etag.as_deref(),
+                    last_modified: source.rss_last_modified.as_deref(),
                     next_poll_at: next,
                     now,
                 },
@@ -570,13 +554,13 @@ async fn poll_one(
             last_modified,
             items,
         }) => {
-            persist_items(pool, &source.kind, &source.source_id, &items, now).await?;
+            feed_cache::upsert_channel_videos_from_rss(pool, &source.channel_id, &items, now)
+                .await?;
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     title: title.as_deref(),
                     etag: etag.as_deref(),
                     last_modified: last_modified.as_deref(),
@@ -602,16 +586,8 @@ async fn poll_one(
             }
 
             let next =
-                now + backoff_for_attempt(source.consecutive_errors + 1, cfg.channel_interval);
-            feed_cache::record_poll_failure(
-                pool,
-                &source.kind,
-                &source.source_id,
-                &rss_msg,
-                next,
-                now,
-            )
-            .await?;
+                now + backoff_for_attempt(source.rss_consecutive_errors + 1, cfg.channel_interval);
+            feed_cache::record_poll_failure(pool, &source.channel_id, &rss_msg, next, now).await?;
             warn!(error = %rss_msg, "source poll failed");
         }
     }
@@ -628,10 +604,6 @@ async fn poll_one(
 ///   of the outer loop tick) must be below
 ///   `cfg.sidecar_fallback_max_per_hour`. A configured value of `0`
 ///   disables this cap (per-source still applies).
-///
-/// Pure function — no DB I/O — because both inputs are captured at
-/// the start of the tick. Cheaper than the previous design that
-/// queried `feed_sources` once per spawned task.
 fn fallback_caps_permit(
     source: &DueSource,
     cfg: RefresherConfig,
@@ -642,8 +614,7 @@ fn fallback_caps_permit(
     if let Some(last) = source.last_sidecar_fallback_at {
         if now - last < min_interval {
             debug!(
-                kind = %source.kind,
-                source_id = %source.source_id,
+                channel_id = %source.channel_id,
                 elapsed = now - last,
                 "skip sidecar fallback: per-source cap",
             );
@@ -655,8 +626,7 @@ fn fallback_caps_permit(
         && fallbacks_this_hour >= cfg.sidecar_fallback_max_per_hour
     {
         debug!(
-            kind = %source.kind,
-            source_id = %source.source_id,
+            channel_id = %source.channel_id,
             count = fallbacks_this_hour,
             cap = cfg.sidecar_fallback_max_per_hour,
             "skip sidecar fallback: aggregate cap",
@@ -666,15 +636,10 @@ fn fallback_caps_permit(
     true
 }
 
-/// Dispatch the sidecar fallback for one source. Reservation is
+/// Dispatch the sidecar fallback for one channel. Reservation is
 /// written *before* the network call so a concurrent loop iteration or
 /// a fast restart sees the per-source cap in effect even if the call
-/// itself takes a while. Classifies the outcome into items / dead /
-/// soft-error.
-///
-/// `rss_err` is the upstream RSS error message (if any) that triggered
-/// the fallback. Used purely for diagnostics in the `last_error`
-/// column when both transports fail.
+/// itself takes a while.
 async fn run_sidecar_fallback(
     pool: &SqlitePool,
     yt: &YoutubeClient,
@@ -683,37 +648,11 @@ async fn run_sidecar_fallback(
     now: i64,
     rss_err: Option<&str>,
 ) -> crate::error::AppResult<()> {
-    // Reserve the slot *before* the network call. The per-source
-    // cap is fail-safe even under concurrent dispatch: a second tick
-    // checking `last_sidecar_fallback_at` will see the timestamp
-    // from this write and back off.
-    //
-    // Consequence operators should be aware of: a fallback that
-    // *fails* (sidecar 5xx, network timeout) still consumes a
-    // per-source and aggregate slot. This is deliberate — under
-    // sustained sidecar misbehaviour we'd rather burn one cap slot
-    // and back off than retry-storm — but it means the diagnostics
-    // UI's "Last fallback" column will tick on a *dispatch*, not on
-    // a *successful* fallback. To distinguish, cross-reference
-    // `last_error`: a sidecar-induced error message means the
-    // fallback was attempted but failed; absence means it succeeded.
-    feed_cache::record_sidecar_fallback_dispatched(pool, &source.kind, &source.source_id, now)
-        .await?;
+    feed_cache::record_sidecar_fallback_dispatched(pool, &source.channel_id, now).await?;
 
-    let outcome = match source.kind.as_str() {
-        KIND_CHANNEL => {
-            yt.refresher_list_channel_videos(&source.source_id, SIDECAR_FALLBACK_MAX_ITEMS)
-                .await
-        }
-        unknown => {
-            // Shouldn't happen — `poll_one`'s `KIND_CHANNEL` /
-            // shelve-and-return guards already filter unknown kinds
-            // before we get here — but be defensive rather than
-            // panicking inside the refresher if a new kind is
-            // introduced upstream of this match.
-            SidecarRefresherOutcome::Error(format!("unsupported kind: {unknown}"))
-        }
-    };
+    let outcome = yt
+        .refresher_list_channel_videos(&source.channel_id, SIDECAR_FALLBACK_MAX_ITEMS)
+        .await;
 
     match outcome {
         SidecarRefresherOutcome::Items(items) => {
@@ -721,13 +660,13 @@ async fn run_sidecar_fallback(
                 .iter()
                 .map(|it| sidecar_item_to_row(it, now))
                 .collect();
-            persist_items(pool, &source.kind, &source.source_id, &rows, now).await?;
+            feed_cache::upsert_channel_videos_from_sidecar(pool, &source.channel_id, &rows, now)
+                .await?;
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     // The sidecar response doesn't carry the source
                     // title (it lives in a separate sidecar endpoint),
                     // so we leave the existing title untouched.
@@ -740,58 +679,36 @@ async fn run_sidecar_fallback(
             )
             .await?;
             info!(
-                kind = %source.kind,
-                source_id = %source.source_id,
+                channel_id = %source.channel_id,
                 count = rows.len(),
                 "sidecar fallback succeeded",
             );
         }
         SidecarRefresherOutcome::NotFound => {
-            // Debounced shelve: a single 404 isn't enough — brief
-            // YouTube-side glitches on channels would otherwise
-            // permanently shelve live rows.
-            // Require `SIDECAR_NOTFOUND_SHELVE_THRESHOLD` consecutive
-            // failures (including this one), counted via the existing
-            // `consecutive_errors` column.
-            let attempt = source.consecutive_errors + 1;
+            let attempt = source.rss_consecutive_errors + 1;
             if attempt >= SIDECAR_NOTFOUND_SHELVE_THRESHOLD {
                 feed_cache::record_source_dead(
                     pool,
-                    &source.kind,
-                    &source.source_id,
+                    &source.channel_id,
                     "sidecar reports source not found",
                     now + DEAD_SOURCE_DEFER_SECS,
                     now,
                 )
                 .await?;
                 info!(
-                    kind = %source.kind,
-                    source_id = %source.source_id,
+                    channel_id = %source.channel_id,
                     attempt,
                     "sidecar fallback classified source as dead; deferring 1 year",
                 );
             } else {
-                // Bump `consecutive_errors` and apply normal backoff;
-                // we'll re-check on the next eligible poll. The
-                // diagnostic message includes the running count so an
-                // operator can see "2/3 NotFound" in the UI.
                 let next = now + backoff_for_attempt(attempt, cfg.channel_interval);
                 let msg = format!(
                     "sidecar reports source not found ({}/{})",
                     attempt, SIDECAR_NOTFOUND_SHELVE_THRESHOLD
                 );
-                feed_cache::record_poll_failure(
-                    pool,
-                    &source.kind,
-                    &source.source_id,
-                    &msg,
-                    next,
-                    now,
-                )
-                .await?;
+                feed_cache::record_poll_failure(pool, &source.channel_id, &msg, next, now).await?;
                 info!(
-                    kind = %source.kind,
-                    source_id = %source.source_id,
+                    channel_id = %source.channel_id,
                     attempt,
                     threshold = SIDECAR_NOTFOUND_SHELVE_THRESHOLD,
                     "sidecar fallback returned NotFound; backing off, will retry",
@@ -799,24 +716,14 @@ async fn run_sidecar_fallback(
             }
         }
         SidecarRefresherOutcome::Error(sidecar_err) => {
-            // Soft-fail: don't classify the source. Combine the
-            // upstream RSS error (if any) with the sidecar error so
-            // diagnostics show the full picture.
             let combined = match rss_err {
                 Some(r) => format!("rss: {r}; sidecar: {sidecar_err}"),
                 None => format!("sidecar: {sidecar_err}"),
             };
             let next =
-                now + backoff_for_attempt(source.consecutive_errors + 1, cfg.channel_interval);
-            feed_cache::record_poll_failure(
-                pool,
-                &source.kind,
-                &source.source_id,
-                &combined,
-                next,
-                now,
-            )
-            .await?;
+                now + backoff_for_attempt(source.rss_consecutive_errors + 1, cfg.channel_interval);
+            feed_cache::record_poll_failure(pool, &source.channel_id, &combined, next, now)
+                .await?;
             warn!(error = %combined, "sidecar fallback errored; recording soft failure");
         }
     }
@@ -1053,16 +960,6 @@ mod relative_parser_tests {
         // negative timestamp that would pin the row to the far past.
         assert_eq!(parse_relative_to_unix("4294967295 years ago", NOW), None);
     }
-}
-
-async fn persist_items(
-    pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
-    items: &[ItemRow],
-    now: i64,
-) -> crate::error::AppResult<()> {
-    feed_cache::replace_source_items(pool, kind, source_id, items, now).await
 }
 
 /// `interval ± 15%`, as seconds.
