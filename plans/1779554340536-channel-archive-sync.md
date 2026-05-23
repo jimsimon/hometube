@@ -97,7 +97,8 @@ CREATE TABLE channel_videos (
     thumbnail_url   TEXT,                      -- RSS-supplied or derived (i.ytimg.com/vi/<id>/hqdefault.jpg)
     first_seen_at   INTEGER NOT NULL,          -- set on insert, never updated
     last_seen_at    INTEGER NOT NULL,          -- bumped by every successful sighting (RSS, sidecar, or backfill)
-    source          TEXT NOT NULL,             -- 'rss' | 'sidecar' | 'backfill' — most recent writer
+    source          TEXT NOT NULL              -- most recent writer
+                     CHECK (source IN ('rss', 'sidecar', 'backfill')),
     is_deleted      INTEGER NOT NULL DEFAULT 0,-- 1 = backfill reconciliation no longer lists it
     PRIMARY KEY (channel_id, video_id)
 );
@@ -593,7 +594,7 @@ It mirrors the cookie/PO-token/plugin-dir setup already present in `src/services
 - additional `--extractor-args "youtubetab:approximate_date"` so we get *some* `upload_date` even for channels with sparse metadata
 - URL: `https://www.youtube.com/channel/<channel_id>/videos` (the `/videos` tab — uploads only, excluding shorts/lives by default)
 
-If we want shorts + lives too, we can later parameterise to also pull `/shorts` and `/streams` tabs (separate subprocess invocations). For v1, `/videos` only.
+The `/videos` tab is the only one consumed. HomeTube doesn't support shorts or live streams as playable content types, so backfilling them would create rows the rest of the system can't render or play.
 
 ### Failure handling
 
@@ -646,9 +647,10 @@ Mirror the existing `/api/admin/feed-sources` / `/api/admin/feed-refresher/{sett
 | `PUT` | `/api/admin/channel-backfill/settings` | validated writes to `app_config` (`RANGE_…` consts). |
 | `POST` | `/api/admin/channel-backfill/run-now/:channelId` | set `backfill_next_at=0`; loop picks it up within `idle_tick`. |
 | `POST` | `/api/admin/channel-backfill/unshelve/:channelId` | clear `backfill_status='shelved'` → `pending`, reset `backfill_consecutive_errors`, `backfill_next_at=0`. |
-| `GET` | `/api/channels/:channelId/videos-archive` | paginated read of `channel_videos` (for "browse all videos from this channel" UI, future use). Parent-gated for now; child-gated later when paired with allowlist filtering. |
 
-All admin routes parent-gated, same auth pattern as existing `/api/admin/*` (`src/routes/feed.rs`). No new pages required for v1; the JSON endpoints are enough to support manual ops and to be wired into the parent settings page in a follow-up.
+All admin routes parent-gated, same auth pattern as existing `/api/admin/*` (`src/routes/feed.rs`). Consumed by the new `<hometube-channel-backfill-settings>` Lit component mounted on the existing `/parent/system` page (see "Parent UI: channel backfill settings + per-channel state" section under "## Rollout plan").
+
+(No separate `videos-archive` endpoint is needed — the child-facing `GET /api/channels/:channelId/videos` is repointed to `channel_videos` in this plan and already serves the full paginated archive with allowlist filtering applied.)
 
 ### Notifications
 
@@ -666,7 +668,7 @@ All admin routes parent-gated, same auth pattern as existing `/api/admin/*` (`sr
 5. **No periodic re-backfill** for 30 days after a complete pass.
 6. **Bot-check signature detection** (sign-in / consent / 429 / 403) classifies failures and triggers exponential backoff with cap 24 h, not retry-immediately.
 7. **Shared cooldown read** with `channel_sync_state.sidecar_last_fallback_at`: if the refresher recently took a sidecar fallback for a given channel, defer that channel's next backfill by an additional hour. This avoids stacking two anti-bot-sensitive operations on the same channel back-to-back.
-8. **Off by default for the first release window?** Open question — see "Open questions" below.
+8. **Default-on at first ship.** `channel_backfill.enabled = true` by default — see Resolved Decision #1. The kill switch is the `channel_backfill.enabled` tunable in `app_config`; flipping it to `false` halts the loop within `idle_tick` (60s) without restart.
 
 ## Testing
 
