@@ -420,11 +420,32 @@ async fn run_backfill_for(
         }
     };
 
+    apply_backfill_entries(pool, channel_id, started_at, &result.entries, bcfg).await
+}
+
+/// Apply a successful `flat_playlist_channel` result to the database:
+/// upsert observed video stubs into `channel_videos`, reconcile
+/// tombstones, and transition the channel's `backfill_status` back to
+/// `pending` with the next due time set.
+///
+/// Extracted from [`run_backfill_for`] so unit tests can drive the DB
+/// behavior with a canned `Vec<FlatPlaylistEntry>` without spawning
+/// yt-dlp. The integration test in `tests/channel_backfill_ytdlp_shim.rs`
+/// reaches in via [`apply_backfill_entries_for_testing`] (a pub wrapper
+/// flagged `#[doc(hidden)]`).
+#[doc(hidden)]
+pub async fn apply_backfill_entries(
+    pool: &SqlitePool,
+    channel_id: &str,
+    started_at: i64,
+    entries: &[FlatPlaylistEntry],
+    bcfg: &BackfillConfig,
+) -> AppResult<()> {
     // Persist observed entries + reconcile tombstones in a single tx.
     let mut tx = pool.begin().await?;
-    let mut observed_ids: Vec<String> = Vec::with_capacity(result.entries.len());
+    let mut observed_ids: Vec<String> = Vec::with_capacity(entries.len());
     let mut new_count: i64 = 0;
-    for entry in &result.entries {
+    for entry in entries {
         let (published_at, published_raw) = parse_upload_date(entry);
         let title = entry.title.clone().unwrap_or_else(|| entry.video_id.clone());
         let thumbnail_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", entry.video_id);
@@ -512,7 +533,7 @@ async fn run_backfill_for(
     // simultaneously-completed channels doesn't synchronise on the
     // 30-day boundary.
     let next_at = unix_now() + jittered_interval(bcfg.re_backfill_interval, 0.05);
-    let observed_total = result.entries.len() as i64;
+    let observed_total = entries.len() as i64;
     sqlx::query(
         "UPDATE channel_sync_state SET \
              backfill_status                  = 'complete', \
@@ -999,6 +1020,297 @@ mod tests {
         assert_eq!(err, None);
         assert_eq!(errs, 0);
         assert_eq!(next, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // apply_backfill_entries — the DB half of run_backfill_for, extracted
+    // so tests don't need to spawn yt-dlp. The yt-dlp invocation itself
+    // is mocked at the subprocess boundary (covered by the integration
+    // test harness against a shim binary on PATH).
+    // -----------------------------------------------------------------
+
+    fn entry(video_id: &str, title: &str) -> FlatPlaylistEntry {
+        FlatPlaylistEntry {
+            video_id: video_id.into(),
+            title: Some(title.into()),
+            upload_date: Some("20240601".to_string()),
+            duration: Some(123.0),
+            view_count: Some(1_000),
+            channel: Some("Channel One".into()),
+            channel_id: Some("UC1".into()),
+        }
+    }
+
+    async fn prime_channel(pool: &SqlitePool, channel_id: &str) {
+        allow_channel(pool, channel_id).await;
+        reconcile_with_allowlist(pool).await.unwrap();
+    }
+
+    async fn cv_count(pool: &SqlitePool, channel_id: &str, deleted: bool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_videos \
+              WHERE channel_id = ? AND is_deleted = ?",
+        )
+        .bind(channel_id)
+        .bind(if deleted { 1 } else { 0 })
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_first_run_inserts_all_rows() {
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+        let entries = vec![entry("vA", "A"), entry("vB", "B"), entry("vC", "C")];
+
+        let started_at = 1_000;
+        apply_backfill_entries(&pool, "UC1", started_at, &entries, &bcfg)
+            .await
+            .unwrap();
+
+        assert_eq!(cv_count(&pool, "UC1", false).await, 3);
+        assert_eq!(cv_count(&pool, "UC1", true).await, 0);
+
+        // Every row should have first_seen_at == last_seen_at == started_at,
+        // source='backfill', is_deleted=0.
+        let rows: Vec<(String, i64, i64, String, i64)> = sqlx::query_as(
+            "SELECT video_id, first_seen_at, last_seen_at, source, is_deleted \
+               FROM channel_videos WHERE channel_id = 'UC1' ORDER BY video_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        for (_, first, last, source, is_deleted) in &rows {
+            assert_eq!(*first, started_at);
+            assert_eq!(*last, started_at);
+            assert_eq!(source, "backfill");
+            assert_eq!(*is_deleted, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_second_run_bumps_last_seen_preserves_first_seen() {
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+        let entries = vec![entry("vA", "A"), entry("vB", "B")];
+
+        apply_backfill_entries(&pool, "UC1", 1_000, &entries, &bcfg)
+            .await
+            .unwrap();
+        apply_backfill_entries(&pool, "UC1", 2_500, &entries, &bcfg)
+            .await
+            .unwrap();
+
+        let (first, last): (i64, i64) = sqlx::query_as(
+            "SELECT first_seen_at, last_seen_at FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vA'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(first, 1_000, "first_seen_at must be preserved");
+        assert_eq!(last, 2_500, "last_seen_at must be bumped to started_at of latest run");
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_second_run_tombstones_missing_items() {
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+        let first = vec![entry("vA", "A"), entry("vB", "B"), entry("vC", "C")];
+        let second = vec![entry("vA", "A"), entry("vC", "C")]; // vB missing
+
+        apply_backfill_entries(&pool, "UC1", 1_000, &first, &bcfg)
+            .await
+            .unwrap();
+        apply_backfill_entries(&pool, "UC1", 2_000, &second, &bcfg)
+            .await
+            .unwrap();
+
+        assert_eq!(cv_count(&pool, "UC1", false).await, 2);
+        assert_eq!(cv_count(&pool, "UC1", true).await, 1);
+
+        let vb_deleted: i64 = sqlx::query_scalar(
+            "SELECT is_deleted FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vB'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(vb_deleted, 1, "missing item must be tombstoned");
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_second_run_inserts_new_items_only() {
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+
+        apply_backfill_entries(&pool, "UC1", 1_000, &[entry("vA", "A")], &bcfg)
+            .await
+            .unwrap();
+        apply_backfill_entries(
+            &pool,
+            "UC1",
+            2_500,
+            &[entry("vA", "A"), entry("vB", "B-new")],
+            &bcfg,
+        )
+        .await
+        .unwrap();
+
+        // Existing vA: first_seen_at stays 1000.
+        let va_first: i64 = sqlx::query_scalar(
+            "SELECT first_seen_at FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vA'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(va_first, 1_000);
+
+        // New vB: first_seen_at == 2500 (the second run's started_at).
+        let vb_first: i64 = sqlx::query_scalar(
+            "SELECT first_seen_at FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vB'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(vb_first, 2_500, "new item gets first_seen_at = started_at");
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_does_not_tombstone_rss_rows_landing_mid_backfill() {
+        // The critical safety property: an RSS upsert that lands AFTER
+        // a backfill started must not be tombstoned by the
+        // reconciliation UPDATE. This guards against the freshness
+        // tier racing the reconciliation tier during a long backfill.
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+
+        // 1. Backfill starts at t=1000 and would observe vA only.
+        let started_at = 1_000;
+        // 2. Between the backfill's last upsert and its reconciliation
+        //    step, an RSS poll lands and writes vB with first_seen_at
+        //    AFTER started_at. We simulate this by inserting vB
+        //    directly with first_seen_at = 1500 before the call.
+        sqlx::query(
+            "INSERT INTO channel_videos \
+                (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vB-from-rss', 'B', ?, ?, 'rss', 0)",
+        )
+        .bind(1_500)
+        .bind(1_500)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 3. The backfill call upserts only vA and runs reconciliation.
+        apply_backfill_entries(&pool, "UC1", started_at, &[entry("vA", "A")], &bcfg)
+            .await
+            .unwrap();
+
+        // The reconciliation MUST NOT tombstone vB-from-rss because
+        // its first_seen_at (1500) is NOT < started_at (1000).
+        let vb_deleted: i64 = sqlx::query_scalar(
+            "SELECT is_deleted FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vB-from-rss'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            vb_deleted, 0,
+            "RSS row with first_seen_at > backfill started_at must NOT be tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_clears_tombstone_when_video_reappears() {
+        // A previously-tombstoned video that reappears in the backfill
+        // output should be untombstoned (is_deleted=0) with source
+        // flipped back to 'backfill'.
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+
+        // Seed a tombstoned row from an earlier backfill.
+        sqlx::query(
+            "INSERT INTO channel_videos \
+                (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vReborn', 'X', 100, 100, 'backfill', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_backfill_entries(&pool, "UC1", 2_000, &[entry("vReborn", "Reborn")], &bcfg)
+            .await
+            .unwrap();
+
+        let (is_deleted, source, last_seen): (i64, String, i64) = sqlx::query_as(
+            "SELECT is_deleted, source, last_seen_at FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vReborn'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(is_deleted, 0, "tombstone must be cleared on re-sighting");
+        assert_eq!(source, "backfill");
+        assert_eq!(last_seen, 2_000);
+    }
+
+    #[tokio::test]
+    async fn apply_backfill_completion_sets_status_and_next_at() {
+        let pool = setup_db().await;
+        prime_channel(&pool, "UC1").await;
+        let bcfg = BackfillConfig::default();
+
+        let before = unix_now();
+        apply_backfill_entries(&pool, "UC1", 1_000, &[entry("vA", "A")], &bcfg)
+            .await
+            .unwrap();
+        let after = unix_now();
+
+        let (status, completed, next, observed, new_last, removed_last): (
+            String,
+            Option<i64>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT backfill_status, backfill_last_completed_at, backfill_next_at, \
+                    backfill_videos_observed_total, backfill_videos_new_last_run, \
+                    backfill_videos_removed_last_run \
+               FROM channel_sync_state WHERE channel_id = 'UC1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Loop normalises 'complete' → 'pending' on the next tick so
+        // the row remains claimable. The completion timestamp + next-at
+        // are still set.
+        assert_eq!(status, "pending");
+        assert!(completed.is_some());
+        assert!(completed.unwrap() >= before && completed.unwrap() <= after);
+        // next_at lands ~30 days in the future (±5%).
+        let thirty_days = 30 * 24 * 3600;
+        let lower = (thirty_days as f64 * 0.94) as i64 + before;
+        let upper = (thirty_days as f64 * 1.06) as i64 + after;
+        assert!(
+            next >= lower && next <= upper,
+            "expected next_at to land near {thirty_days}s in the future, got {next} (window {lower}..={upper})"
+        );
+        assert_eq!(observed, 1);
+        assert_eq!(new_last, 1);
+        assert_eq!(removed_last, 0);
     }
 
     #[tokio::test]

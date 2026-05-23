@@ -346,6 +346,7 @@ pub struct FlatPlaylistEntry {
 
 /// Result of a successful channel-archive backfill run, returned by
 /// [`flat_playlist_channel`].
+#[derive(Debug)]
 pub struct FlatPlaylistResult {
     pub entries: Vec<FlatPlaylistEntry>,
 }
