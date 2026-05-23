@@ -736,6 +736,10 @@ Phase 1 (this plan):
 - **Thumbnail prefetching to a new on-disk cache** — net-new `src/services/thumbnail_store.rs` (parallel to `segment_store.rs`), migration 022 (`thumbnail_cache` table + `app_config` size cap), proxy route at `src/routes/videos.rs:903-932` updated to read disk-first, backfill loop tail-call enqueues prefetch for newly-observed videos, cache cleanup folded into existing `cache_cleanup` cron, parent cache-manager UI extended to surface the second cache. Largest of the three promoted items. See "Thumbnail prefetching — net-new on-disk thumbnail cache" section below.
 - Migration 022: create `thumbnail_cache` table (parallel to `segment_cache`). Add `thumbnail_cache.max_bytes` to `app_config`.
 
+**Incidental cleanup (this plan):**
+
+- Delete `src/db/queries.rs`. It is a 4-line stub (`//! Database queries.` docstring + a comment noting it's "Currently empty — Phase 1 only provisions the database; later phases populate it") that has been empty since the original 20-phase plan was abandoned in favour of inlining SQL into route/service modules. The convention this plan continues (SQL co-located with the module that owns the operation: `feed_cache.rs`, the new `channel_backfill.rs`, `src/routes/allowlist.rs`, etc.) is now well-established across the codebase, so the stub no longer represents a pending migration target. Remove the file and drop the `pub mod queries;` line from `src/db/mod.rs`. No callers to update — verified empty in initial explore.
+
 ### Parent UI: channel backfill settings + per-channel state
 
 The existing parent system page (`templates/pages/parent/system.html:35-38`) already hosts `<hometube-feed-refresher-settings>` — a parallel component for the existing freshness refresher with tunables editor + diagnostics. The channel backfill subsystem gets its own twin:
