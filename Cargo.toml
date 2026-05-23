@@ -19,7 +19,7 @@ tower-cookies = { version = "0.11", features = ["signed"] }
 askama = "0.16"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
 
 # HTTP Client (YouTube API + video stream proxying)
 reqwest = { version = "0.13", features = ["stream", "json", "query"] }
@@ -57,7 +57,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 cron = "0.16"
 
 # XML parsing for YouTube channel Atom/RSS feeds.
-quick-xml = "0.36"
+quick-xml = "0.40"
 
 [features]
 # `test-login` exposes a small set of unauthenticated HTTP routes that
