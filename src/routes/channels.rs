@@ -23,7 +23,10 @@ use std::collections::HashMap;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
 use crate::routes::search::{decode_page_token, encode_page_token, PageCursor};
-use crate::services::access::can_child_view;
+// Note: `can_child_view` is no longer needed here — `list_videos`
+// applies its blocked/hidden filters inline in the main SQL query
+// (which simultaneously fixes the prior pagination bug). Channel-level
+// access is still gated by `enforce_channel_access`.
 use crate::services::youtube::{ChannelInfo, ChannelVideoItem, ThumbnailInfo};
 use crate::state::AppState;
 
@@ -111,6 +114,20 @@ pub struct ChannelVideosPage {
 /// by the yt-dlp backfill); RSS-only rows with NULL view_count sort to
 /// the bottom via `COALESCE(view_count, -1)`. The default `latest` sort
 /// is by `published_at DESC, last_seen_at DESC`.
+///
+/// **Access control** lives in the SQL: blocked + hidden videos are
+/// excluded by `NOT EXISTS` subqueries in the main query, mirroring
+/// `feed_for_child`. We previously filtered post-fetch via
+/// `can_child_view`, which had two bugs:
+///   1. **N+1 queries** — up to 4 round-trips per row × `PAGE_SIZE`
+///      rows = ~120 queries per page.
+///   2. **Broken pagination** — `next_page_token` was emitted iff the
+///      *filtered* page was full, so any blocked/hidden video silently
+///      truncated the listing (`items.len() < PAGE_SIZE` ⇒ no more
+///      pages, even when thousands more were available).
+/// `enforce_channel_access` at the top of the handler still gates
+/// channel-level access; per-video allowlist is implicit since we
+/// only read from this channel's rows.
 pub async fn list_videos(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -127,11 +144,6 @@ pub async fn list_videos(
         .unwrap_or(0);
     let sort = q.sort.as_deref().unwrap_or("latest").to_string();
 
-    // We fetch one page worth of rows. The ORDER BY uses a CASE on
-    // the requested sort so we don't have to fork two queries:
-    //   - `most_viewed` → sort by view_count DESC (nulls last via
-    //     COALESCE(-1)), then published_at DESC as a tiebreaker.
-    //   - anything else → sort by published_at DESC, last_seen_at DESC.
     #[derive(sqlx::FromRow)]
     struct Row {
         video_id: String,
@@ -145,30 +157,50 @@ pub async fn list_videos(
         #[allow(dead_code)]
         view_count: Option<i64>,
     }
+
+    // Single query: filter tombstones + blocked + hidden inline so
+    // `LIMIT n` returns at most `n` actually-renderable rows. The
+    // `NOT EXISTS` pattern is the same one `feed_for_child` uses
+    // (`src/services/feed_cache.rs:feed_for_child`).
+    //
+    // The ORDER BY uses a CASE on the requested sort so we don't have
+    // to fork two queries:
+    //   - `most_viewed` → sort by view_count DESC (nulls last via
+    //     COALESCE(-1)), then published_at DESC as a tiebreaker.
+    //   - anything else → sort by published_at DESC, last_seen_at DESC.
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT video_id, title, channel_id, channel_title, thumbnail_url, \
-                published_at, duration_s, view_count \
-           FROM channel_videos \
-          WHERE channel_id = ? AND is_deleted = 0 \
+        "SELECT cv.video_id, cv.title, cv.channel_id, cv.channel_title, cv.thumbnail_url, \
+                cv.published_at, cv.duration_s, cv.view_count \
+           FROM channel_videos cv \
+          WHERE cv.channel_id = ?1 \
+            AND cv.is_deleted = 0 \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM blocked_videos b \
+                 WHERE b.child_account_id = ?2 AND b.video_id = cv.video_id) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM hidden_videos h \
+                 WHERE h.child_account_id = ?2 AND h.video_id = cv.video_id) \
           ORDER BY \
-              CASE WHEN ? = 'most_viewed' THEN COALESCE(view_count, -1) ELSE 0 END DESC, \
-              published_at DESC, \
-              last_seen_at DESC \
-          LIMIT ? OFFSET ?",
+              CASE WHEN ?3 = 'most_viewed' THEN COALESCE(cv.view_count, -1) ELSE 0 END DESC, \
+              cv.published_at DESC, \
+              cv.last_seen_at DESC \
+          LIMIT ?4 OFFSET ?5",
     )
     .bind(&channel_id)
+    .bind(current.id)
     .bind(&sort)
     .bind(PAGE_SIZE as i64)
     .bind(cursor)
     .fetch_all(&state.db)
     .await?;
 
-    // Adapt to ChannelVideoItem + run access control.
-    let mut items: Vec<ChannelVideoItem> = Vec::with_capacity(rows.len());
-    for r in rows {
-        let video_id = r.video_id.clone();
-        let row_channel_id = r.channel_id.clone();
-        let item = ChannelVideoItem {
+    // Capture the row count BEFORE adapting, so pagination is driven
+    // by what the DB returned (post-filter) rather than by what we
+    // hand back to the client.
+    let fetched = rows.len() as u32;
+    let items: Vec<ChannelVideoItem> = rows
+        .into_iter()
+        .map(|r| ChannelVideoItem {
             video_id: r.video_id,
             title: r.title,
             channel_id: r.channel_id,
@@ -190,22 +222,13 @@ pub async fn list_videos(
                 .unwrap_or_default(),
             published_at: r.published_at.map(|s| s.to_string()),
             position: None,
-        };
-        let allowed = can_child_view(
-            &state.db,
-            current.id,
-            &video_id,
-            row_channel_id.as_deref().or(Some(channel_id.as_str())),
-        )
-        .await
-        .unwrap_or(false);
-        if allowed {
-            items.push(item);
-        }
-    }
+        })
+        .collect();
 
-    // Emit a next_page_token if we filled the page (might be more).
-    let next_page_token = if items.len() as u32 >= PAGE_SIZE {
+    // Emit a next_page_token whenever the DB filled the page. The
+    // server has already applied is_deleted / blocked / hidden filters
+    // in SQL, so a full page from the DB really is a full client page.
+    let next_page_token = if fetched >= PAGE_SIZE {
         Some(encode_page_token(&PageCursor {
             offset: cursor + PAGE_SIZE as i64,
         }))

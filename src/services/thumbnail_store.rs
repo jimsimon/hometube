@@ -18,6 +18,26 @@ use tracing::{debug, warn};
 
 use crate::error::AppResult;
 
+/// Validate that `video_id` is a syntactically-plausible YouTube video
+/// ID before interpolating it into a filesystem path. Cheap defence
+/// against path traversal — even though the proxy route only reaches
+/// `put` after `cache.get_or_extract` succeeds (yt-dlp's URL parser
+/// would reject anything malformed), the backfill prefetch path
+/// writes whatever video_id yt-dlp emitted in its `--flat-playlist`
+/// JSON without re-validation. Defence in depth.
+///
+/// YouTube IDs are 11 chars from `[A-Za-z0-9_-]`. We accept slightly
+/// looser (any length 1..=64 of the same character class) so a future
+/// schema bump (longer IDs?) doesn't break the cache silently. The
+/// critical property is "no `/`, no `..`, no `\0`" — anything that
+/// could break out of `<cache_dir>/thumbnails/`.
+fn is_safe_video_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// `app_config` key for the configured maximum total cache size in
 /// bytes. `0` (or unset) means "no LRU eviction" — the cache grows
 /// unbounded until cleared explicitly.
@@ -44,7 +64,15 @@ pub fn thumbnail_path(cache_dir: &str, video_id: &str) -> PathBuf {
 ///
 /// Also bumps `last_accessed_at` to `now` for LRU purposes. Best
 /// effort — a touch failure does not fail the lookup.
+///
+/// Returns `None` if `video_id` doesn't look like a YouTube video ID
+/// — the DB lookup is short-circuited so callers can rely on the
+/// stored `file_path` being safe to read without re-validating the
+/// id at every consumer.
 pub async fn get(pool: &SqlitePool, video_id: &str) -> Option<PathBuf> {
+    if !is_safe_video_id(video_id) {
+        return None;
+    }
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT file_path FROM thumbnail_cache WHERE video_id = ?",
     )
@@ -84,12 +112,20 @@ pub async fn get(pool: &SqlitePool, video_id: &str) -> Option<PathBuf> {
 /// Best-effort: a filesystem error returns early without recording the
 /// row, so the next request will retry from upstream rather than
 /// serving a half-written file.
+///
+/// Rejects `video_id`s that don't match the YouTube ID character class
+/// — defence against path traversal if a future caller forwards an
+/// untrusted ID into the cache without intermediate validation.
 pub async fn put(
     pool: &SqlitePool,
     cache_dir: &str,
     video_id: &str,
     bytes: &[u8],
 ) -> AppResult<()> {
+    if !is_safe_video_id(video_id) {
+        warn!(video_id, "thumbnail_store::put: refusing unsafe video_id");
+        return Ok(());
+    }
     let path = thumbnail_path(cache_dir, video_id);
 
     if let Some(parent) = path.parent() {
@@ -230,6 +266,62 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[test]
+    fn is_safe_video_id_rejects_traversal_and_separators() {
+        // Accepted: real YouTube IDs and similar short alphanumeric+_- strings.
+        assert!(is_safe_video_id("dQw4w9WgXcQ"));
+        assert!(is_safe_video_id("abc_DEF-123"));
+        assert!(is_safe_video_id("a"));
+
+        // Rejected: anything that could escape `<cache_dir>/thumbnails/`.
+        assert!(!is_safe_video_id(""));
+        assert!(!is_safe_video_id(".."));
+        assert!(!is_safe_video_id("../etc/passwd"));
+        assert!(!is_safe_video_id("a/b"));
+        assert!(!is_safe_video_id("a\\b"));
+        assert!(!is_safe_video_id("a\0b"));
+        assert!(!is_safe_video_id("a.b"));
+        assert!(!is_safe_video_id("a b"));
+        assert!(!is_safe_video_id(&"x".repeat(65))); // length cap
+    }
+
+    #[tokio::test]
+    async fn put_refuses_unsafe_video_id() {
+        let pool = setup_db().await;
+        let cache = TempDir::new().unwrap();
+        let dir = cache.path().to_str().unwrap();
+
+        // Attempt to write to a path-traversing video_id.
+        put(&pool, dir, "../escape", b"x").await.unwrap();
+
+        // No row was inserted.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM thumbnail_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // And no file was written outside the cache dir.
+        let escape_path = cache.path().parent().unwrap().join("escape.jpg");
+        assert!(!escape_path.exists(), "must not write outside cache dir");
+    }
+
+    #[tokio::test]
+    async fn get_refuses_unsafe_video_id() {
+        let pool = setup_db().await;
+        // Even if a row somehow exists with an unsafe id (e.g. raw SQL
+        // injection or schema rollback), `get` doesn't return it.
+        sqlx::query(
+            "INSERT INTO thumbnail_cache \
+                (video_id, file_path, file_size_bytes, cached_at, last_accessed_at) \
+             VALUES ('../escape', '/etc/passwd', 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(get(&pool, "../escape").await.is_none());
     }
 
     #[tokio::test]

@@ -32,6 +32,7 @@
 //! Spawned from `main` after the freshness refresher. The task loops
 //! forever; on shutdown the runtime drops it.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use rand::RngExt;
@@ -375,23 +376,44 @@ async fn claim_one_due(pool: &SqlitePool, now: i64) -> AppResult<Option<String>>
     // loop). Single-concurrency by design means this is mostly
     // belt-and-braces, but cheap.
     //
-    // The `last_sidecar_fallback_at` clause defers a backfill by up
-    // to SIDECAR_FALLBACK_COOLDOWN_SECS after the freshness loop took
-    // a sidecar fallback for this channel. The two anti-bot paths
-    // (sidecar `/channel-videos` and yt-dlp `--flat-playlist`) end up
-    // talking to InnerTube for the same channel, and stacking them
-    // back-to-back is more likely to provoke YouTube than spacing
-    // them out by an hour.
+    // Three conditions on the WHERE:
+    //
+    // 1. **Status gate**: the channel is either `'pending'` (the
+    //    common case) OR `'running'` with an expired lease. The
+    //    second arm recovers stranded rows: if a worker crashed
+    //    between `claim_one_due` flipping the status to `'running'`
+    //    and the eventual reset to `'pending'`/`'shelved'`, the
+    //    `backfill_lease_expires_at` we wrote on claim will eventually
+    //    fall below `now` and the row becomes reclaimable. Without
+    //    this clause, a single crash mid-`apply_backfill_entries`
+    //    would strand the channel forever.
+    //
+    // 2. **Schedule gate**: `backfill_next_at <= now` — only claim
+    //    channels whose backoff window has elapsed.
+    //
+    // 3. **Sidecar cooldown**: defers a backfill by up to
+    //    `SIDECAR_FALLBACK_COOLDOWN_SECS` after the freshness loop
+    //    took a sidecar fallback for this channel. The two anti-bot
+    //    paths (sidecar `/channel-videos` and yt-dlp `--flat-playlist`)
+    //    end up talking to InnerTube for the same channel, and
+    //    stacking them back-to-back is more likely to provoke YouTube
+    //    than spacing them out by an hour.
     let mut tx = pool.begin().await?;
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT channel_id FROM channel_sync_state \
-          WHERE backfill_status = 'pending' \
+          WHERE ( \
+                backfill_status = 'pending' \
+                OR (backfill_status = 'running' \
+                    AND backfill_lease_expires_at IS NOT NULL \
+                    AND backfill_lease_expires_at <= ?) \
+              ) \
             AND backfill_next_at <= ? \
             AND (last_sidecar_fallback_at IS NULL \
                  OR last_sidecar_fallback_at <= ?) \
           ORDER BY backfill_next_at ASC \
           LIMIT 1",
     )
+    .bind(now)
     .bind(now)
     .bind(sidecar_cutoff)
     .fetch_optional(&mut *tx)
@@ -527,11 +549,16 @@ async fn prefetch_thumbnails(pool: &SqlitePool, cache_dir: &str, video_ids: &[St
                 }
             }
         }
-        if !stored {
+        if stored {
+            // ~1 image/sec to keep the prefetch from spiking
+            // i.ytimg.com. Only sleep when we actually fetched bytes
+            // — a hard-failed video (network error, 404, etc.)
+            // generates no upstream traffic, so there's nothing to
+            // pace against.
+            tokio::time::sleep(StdDuration::from_secs(1)).await;
+        } else {
             debug!(%video_id, "prefetch: no thumbnail variant succeeded");
         }
-        // ~1 image/sec to keep the prefetch from spiking i.ytimg.com.
-        tokio::time::sleep(StdDuration::from_secs(1)).await;
     }
 }
 
@@ -555,6 +582,21 @@ pub async fn apply_backfill_entries(
 ) -> AppResult<Vec<String>> {
     // Persist observed entries + reconcile tombstones in a single tx.
     let mut tx = pool.begin().await?;
+
+    // Pre-fetch every existing video_id for this channel into a HashSet
+    // so the per-entry "is this row new?" check is O(1) instead of an
+    // extra SELECT per row. For a 10k-video channel this collapses
+    // ~10k DB round-trips into one — meaningful inside a single tx
+    // where SQLite holds an exclusive write lock the whole time.
+    let existing_ids: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT video_id FROM channel_videos WHERE channel_id = ?",
+    )
+    .bind(channel_id)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+
     let mut observed_ids: Vec<String> = Vec::with_capacity(entries.len());
     // `new_video_ids` is returned to the caller so it can enqueue
     // thumbnail prefetching for genuinely-new uploads. Held outside
@@ -568,18 +610,10 @@ pub async fn apply_backfill_entries(
         let thumbnail_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", entry.video_id);
         let duration_s: Option<i64> = entry.duration.map(|d| d.round() as i64);
 
-        // Detect insert vs update for stats purposes. We just need
-        // to know whether a row exists; the per-row `is_deleted` /
-        // `source` columns are updated by the upsert below regardless.
-        let exists: Option<(i64,)> = sqlx::query_as(
-            "SELECT 1 FROM channel_videos \
-              WHERE channel_id = ? AND video_id = ?",
-        )
-        .bind(channel_id)
-        .bind(&entry.video_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if exists.is_none() {
+        // Detect insert vs update via the pre-fetched HashSet — no
+        // extra round-trip per entry. The upsert below handles the
+        // `is_deleted` / `source` reset regardless of insert-vs-update.
+        if !existing_ids.contains(&entry.video_id) {
             new_count += 1;
             new_video_ids.push(entry.video_id.clone());
         }
@@ -1429,6 +1463,82 @@ mod tests {
         assert_eq!(observed, 1);
         assert_eq!(new_last, 1);
         assert_eq!(removed_last, 0);
+    }
+
+    #[tokio::test]
+    async fn claim_one_due_recovers_stale_running_lease() {
+        // If a worker crashed mid-backfill, the row is stuck with
+        // backfill_status='running' and no automatic recovery —
+        // unless `claim_one_due` also picks up rows whose
+        // `backfill_lease_expires_at` has already passed. This test
+        // simulates the crash by writing `'running'` directly with an
+        // expired lease, then asserts the next claim reclaims it.
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCstuck").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+
+        let now = 1_000_000_i64;
+        let expired_lease = now - 60; // expired 60s ago
+        sqlx::query(
+            "UPDATE channel_sync_state SET \
+                 backfill_status           = 'running', \
+                 backfill_lease_expires_at = ?, \
+                 backfill_next_at          = 0 \
+              WHERE channel_id = 'UCstuck'",
+        )
+        .bind(expired_lease)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Without the stale-lease clause this would return None and
+        // strand the channel.
+        let claimed = claim_one_due(&pool, now).await.unwrap();
+        assert_eq!(claimed.as_deref(), Some("UCstuck"));
+
+        // After claim, status is back to 'running' with a fresh lease.
+        let (status, lease): (String, Option<i64>) = sqlx::query_as(
+            "SELECT backfill_status, backfill_lease_expires_at \
+               FROM channel_sync_state WHERE channel_id = 'UCstuck'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "running");
+        assert!(
+            lease.unwrap() > now,
+            "fresh lease must extend into the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_one_due_leaves_running_lease_that_has_not_expired() {
+        // The opposite of the stale-lease case: if a worker is
+        // actively backfilling (`backfill_lease_expires_at > now`),
+        // we must NOT race-claim the channel under it.
+        let pool = setup_db().await;
+        allow_channel(&pool, "UClive").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+
+        let now = 1_000_000_i64;
+        let fresh_lease = now + 30 * 60; // 30 minutes in the future
+        sqlx::query(
+            "UPDATE channel_sync_state SET \
+                 backfill_status           = 'running', \
+                 backfill_lease_expires_at = ?, \
+                 backfill_next_at          = 0 \
+              WHERE channel_id = 'UClive'",
+        )
+        .bind(fresh_lease)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let claimed = claim_one_due(&pool, now).await.unwrap();
+        assert_eq!(
+            claimed, None,
+            "fresh-lease running channel must not be reclaimed"
+        );
     }
 
     #[tokio::test]
