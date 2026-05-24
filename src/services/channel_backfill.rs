@@ -85,6 +85,20 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
 /// without writing back.
 pub const LEASE_SECS: i64 = 30 * 60 + 5 * 60;
 
+/// Cooldown applied AFTER a sidecar fallback for the same channel
+/// before the backfill loop will pick the row up. Avoids stacking two
+/// anti-bot-sensitive operations (a sidecar `/channel-videos` call and
+/// a yt-dlp `--flat-playlist` subprocess) on the same channel
+/// back-to-back. Mirrors the "additional hour" defer from the plan's
+/// anti-bot strategy item #7.
+///
+/// One hour matches the per-source sidecar fallback min interval for
+/// active channels, so a channel that just took a sidecar fallback
+/// won't be backfill-claimed before its next sidecar fallback would
+/// even be eligible. Effectively serialises the two anti-bot paths
+/// per channel.
+pub const SIDECAR_FALLBACK_COOLDOWN_SECS: i64 = 60 * 60;
+
 /// `app_config` keys for the live tunables. Read once per outer-loop
 /// iteration; out-of-range values silently fall back to defaults.
 pub const KEY_ENABLED: &str = "channel_backfill_enabled";
@@ -355,18 +369,31 @@ pub async fn run(pool: SqlitePool, cfg: Config) {
 /// future. Returns `None` when no row is due.
 async fn claim_one_due(pool: &SqlitePool, now: i64) -> AppResult<Option<String>> {
     let lease_until = now.saturating_add(LEASE_SECS);
+    let sidecar_cutoff = now.saturating_sub(SIDECAR_FALLBACK_COOLDOWN_SECS);
     // Two-step in a transaction to keep the claim atomic against
     // concurrent calls (e.g. the daily feed_gc reconcile racing the
     // loop). Single-concurrency by design means this is mostly
     // belt-and-braces, but cheap.
+    //
+    // The `last_sidecar_fallback_at` clause defers a backfill by up
+    // to SIDECAR_FALLBACK_COOLDOWN_SECS after the freshness loop took
+    // a sidecar fallback for this channel. The two anti-bot paths
+    // (sidecar `/channel-videos` and yt-dlp `--flat-playlist`) end up
+    // talking to InnerTube for the same channel, and stacking them
+    // back-to-back is more likely to provoke YouTube than spacing
+    // them out by an hour.
     let mut tx = pool.begin().await?;
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT channel_id FROM channel_sync_state \
-          WHERE backfill_status = 'pending' AND backfill_next_at <= ? \
+          WHERE backfill_status = 'pending' \
+            AND backfill_next_at <= ? \
+            AND (last_sidecar_fallback_at IS NULL \
+                 OR last_sidecar_fallback_at <= ?) \
           ORDER BY backfill_next_at ASC \
           LIMIT 1",
     )
     .bind(now)
+    .bind(sidecar_cutoff)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((channel_id,)) = row else {
@@ -1402,6 +1429,60 @@ mod tests {
         assert_eq!(observed, 1);
         assert_eq!(new_last, 1);
         assert_eq!(removed_last, 0);
+    }
+
+    #[tokio::test]
+    async fn claim_one_due_skips_channel_with_recent_sidecar_fallback() {
+        // Anti-bot safeguard #7 from the plan: a channel whose
+        // freshness loop just took a sidecar fallback must NOT be
+        // claimed by the backfill loop until the cooldown elapses.
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCcool").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+
+        // Pretend the freshness loop took a sidecar fallback 10
+        // minutes ago — well inside the 1h cooldown.
+        let now: i64 = 1_000_000;
+        let recent = now - 10 * 60;
+        sqlx::query(
+            "UPDATE channel_sync_state SET last_sidecar_fallback_at = ? \
+              WHERE channel_id = 'UCcool'",
+        )
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Even though the row is otherwise eligible
+        // (backfill_status='pending' AND backfill_next_at=0), the
+        // cooldown gates it out.
+        let claimed = claim_one_due(&pool, now).await.unwrap();
+        assert_eq!(
+            claimed, None,
+            "channel within sidecar cooldown must not be claimed"
+        );
+
+        // After the cooldown elapses, the channel becomes claimable.
+        let later = now + SIDECAR_FALLBACK_COOLDOWN_SECS + 1;
+        let claimed = claim_one_due(&pool, later).await.unwrap();
+        assert_eq!(
+            claimed.as_deref(),
+            Some("UCcool"),
+            "channel becomes claimable after the sidecar cooldown elapses"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_one_due_does_not_block_channels_that_never_used_sidecar() {
+        // Symmetric to the above: channels with NULL
+        // last_sidecar_fallback_at (i.e. RSS has always succeeded) are
+        // not gated by the cooldown.
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCnever").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+
+        let claimed = claim_one_due(&pool, 1_000_000).await.unwrap();
+        assert_eq!(claimed.as_deref(), Some("UCnever"));
     }
 
     #[tokio::test]
