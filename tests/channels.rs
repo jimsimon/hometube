@@ -206,8 +206,8 @@ async fn list_videos_accepts_most_viewed_sort() {
             (channel_id, video_id, title, channel_title, view_count, published_at, \
              first_seen_at, last_seen_at, source) \
          VALUES \
-            ('UCviews', 'low-views', 'Low', 'Viewed', 10, 1_700_000_000, 1, 1, 'backfill'), \
-            ('UCviews', 'high-views', 'High', 'Viewed', 1_000_000, 1_700_000_001, 1, 1, 'backfill')",
+            ('UCviews', 'low-views', 'Low', 'Viewed', 10, 1700000000, 1, 1, 'backfill'), \
+            ('UCviews', 'high-views', 'High', 'Viewed', 1000000, 1700000001, 1, 1, 'backfill')",
     )
     .execute(&app.pool)
     .await

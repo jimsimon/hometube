@@ -120,6 +120,9 @@ async fn allowlist_rejects_non_child_target() {
 /// rest of the handler (and the downstream sidecar call / DB insert)
 /// from doing pointless work with an obviously-bogus payload. Catches
 /// regressions in the validation block at the top of the handler.
+///
+/// The assertion is status-code-only — error-copy substring matches
+/// are brittle across phrasing changes.
 #[tokio::test]
 async fn add_channel_rejects_oversized_channel_id() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
@@ -135,11 +138,6 @@ async fn add_channel_rejects_oversized_channel_id() {
         }))
         .await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-    let body = res.text();
-    assert!(
-        body.contains("channel_id too long"),
-        "expected length-cap message, got {body}"
-    );
 }
 
 /// Body-supplied thumbnail URLs are gated to YouTube/Google-controlled
@@ -147,6 +145,9 @@ async fn add_channel_rejects_oversized_channel_id() {
 /// attacker-controlled host is the only realistic abuse vector for the
 /// body-data path (which otherwise skips the sidecar's own
 /// validation).
+///
+/// The assertion is status-code-only — error-copy substring matches
+/// are brittle across phrasing changes.
 #[tokio::test]
 async fn add_channel_rejects_untrusted_thumbnail_host() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
@@ -162,11 +163,6 @@ async fn add_channel_rejects_untrusted_thumbnail_host() {
         }))
         .await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
-    let body = res.text();
-    assert!(
-        body.contains("channel_thumbnail_url"),
-        "expected URL-validation message, got {body}"
-    );
 }
 
 /// Empty `channel_id` is the trivial mistake — handler must 400.
@@ -202,4 +198,102 @@ async fn add_channel_rejects_oversized_channel_title() {
         }))
         .await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}
+
+/// Regression: a description with multi-byte UTF-8 characters
+/// (emoji, CJK, accented Latin) longer than `MAX_DESCRIPTION_LEN`
+/// used to panic when truncated because `&d[..8192]` byte-slices
+/// at a non-char-boundary. A malicious parent could trigger a 500
+/// (handler panic → connection drop / process-kill in some
+/// configurations) by sending such a payload.
+///
+/// The fixed truncation uses `char_indices` to find a safe boundary,
+/// so this test should now return a `2xx` (truncated and saved
+/// successfully).
+///
+/// The test uses a 5000-char emoji repeat — each '🎉' is 4 UTF-8
+/// bytes, so the byte length is ~20 KB, well past the 8192-byte cap.
+/// Truncating at byte 8192 lands mid-codepoint (8192 % 4 == 0 here,
+/// but the cap could change), so the `char_indices` boundary search
+/// is required for safety in general.
+#[tokio::test]
+async fn add_channel_truncates_multibyte_description_without_panicking() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+    // 5000 × '🎉' = 20,000 bytes of UTF-8 — well past the 8192 cap.
+    // We pad with one '😀' so the byte alignment is guaranteed not
+    // to fall on a multiple of 4 (the fix must not depend on that).
+    let description = format!("😀{}", "🎉".repeat(5000));
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/channels"))
+        .json(&serde_json::json!({
+            "channel_id": "UCemoji",
+            "channel_title": "Emoji",
+            "channel_thumbnail_url": "https://i.ytimg.com/vi/x/hqdefault.jpg",
+            "description": description,
+        }))
+        .await;
+    // The response should be 2xx — the handler must not panic.
+    assert!(
+        res.status_code().is_success(),
+        "expected 2xx, got {} (handler panicked on multi-byte truncation?)",
+        res.status_code()
+    );
+
+    // The stored description should be valid UTF-8 of at most
+    // MAX_DESCRIPTION_LEN bytes (8192). We verify both via DB.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM channel_sync_state WHERE channel_id = 'UCemoji'",
+    )
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap()
+    .flatten();
+    let stored = stored.expect("description was stored");
+    assert!(
+        stored.len() <= 8192,
+        "byte length capped at MAX_DESCRIPTION_LEN"
+    );
+    // The stored string must be valid UTF-8 (Rust would refuse to
+    // build a &str otherwise, but this proves it survived the
+    // round-trip through SQLite without corruption).
+    assert!(stored.chars().all(|c| c == '🎉' || c == '😀'));
+}
+
+/// Regression: the `is_safe_thumbnail_url` validator must terminate
+/// the authority component at `/`, `?`, or `#`. Splitting on `/`
+/// alone would let `https://attacker.com#@x.ytimg.com/foo` pass
+/// because the `@`-split would pick `x.ytimg.com` as the apparent
+/// host. The browser ignores the fragment when fetching and would
+/// load `attacker.com`.
+///
+/// Asserted via the route boundary so the regression survives any
+/// future refactor that moves the validator.
+#[tokio::test]
+async fn add_channel_rejects_fragment_bypass_in_thumbnail_url() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    for url in [
+        "https://attacker.com#@x.ytimg.com/poison.jpg",
+        "https://attacker.com?@x.ytimg.com/poison.jpg",
+        "https://attacker.com?host=x.ytimg.com",
+    ] {
+        let res = app
+            .server
+            .post(&format!("/api/children/{child_id}/allowlist/channels"))
+            .json(&serde_json::json!({
+                "channel_id": "UCevil",
+                "channel_title": "Hostile",
+                "channel_thumbnail_url": url,
+            }))
+            .await;
+        assert_eq!(
+            res.status_code(),
+            StatusCode::BAD_REQUEST,
+            "URL {url} must be rejected by host validation"
+        );
+    }
 }

@@ -114,10 +114,46 @@ fn is_safe_thumbnail_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
-    // Take the host segment up to the next '/' or end.
-    let host = rest.split('/').next().unwrap_or("");
-    // Strip any optional userinfo or port.
-    let host = host.split('@').next_back().unwrap_or(host);
+
+    // The authority component of a URL ends at the FIRST occurrence
+    // of `/`, `?`, or `#` (per RFC 3986). Splitting on `/` alone
+    // would have let an attacker hide the real host behind a query
+    // or fragment delimiter:
+    //
+    //     https://attacker.com#@x.ytimg.com/foo
+    //
+    // `rest.split('/').next()` returns
+    // `"attacker.com#@x.ytimg.com"`; the subsequent `@`-split picks
+    // `x.ytimg.com` as the apparent host, the validator returns
+    // true, and the browser then fetches `attacker.com` (the
+    // fragment is client-side only). The same bypass applies with
+    // `?` in place of `#`. Splitting on all three terminators
+    // closes both holes.
+    //
+    // We resist reaching for the `url` crate here for the same
+    // reason this helper exists — the `url` crate's `Url::parse`
+    // would happily accept the malicious URL too; we'd still have
+    // to check `.host_str()` against our suffix list afterward, and
+    // ad-hoc-parse the userinfo. The set of corner cases relevant
+    // to thumbnail validation is small enough that an inline parser
+    // is honest about what it's doing.
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+
+    // Reject any userinfo. The `@`-split approach we previously
+    // used resolved the host to the right-of-`@` segment (which
+    // works for legitimate `user:pass@host/...` URLs the browser
+    // would fetch correctly), but accepting userinfo at all
+    // creates a confusing wart for a validator whose job is to
+    // gate user-visible <img src> URLs. There's no legitimate
+    // reason for a thumbnail URL to carry HTTP basic-auth
+    // credentials; reject outright.
+    if host.contains('@') {
+        return false;
+    }
+
+    // Strip an optional port (`host:443`). IPv6 literals carry
+    // brackets (`[::1]:443`) which we reject implicitly via the
+    // suffix check below.
     let host = host.split(':').next().unwrap_or(host);
     let host_lower = host.to_ascii_lowercase();
     // Accept hosts that match a known YouTube/Google CDN suffix. The
@@ -200,7 +236,22 @@ pub async fn add_channel(
             // very long bio shouldn't fail the allowlist add. The
             // length cap is here to bound the column size, not to
             // reject content.
-            Some(&d[..MAX_DESCRIPTION_LEN.min(d.len())])
+            //
+            // **UTF-8 safety**: bytes 8192-onwards may fall mid-
+            // codepoint for any description containing multi-byte
+            // characters (emoji, CJK, accented Latin). A naive
+            // byte-slice `&d[..8192]` would panic with
+            // `byte index 8192 is not a char boundary`, which a
+            // malicious parent could weaponise as a remote DoS.
+            // `char_indices` gives us safe boundaries; we take the
+            // last one that fits.
+            let end = d
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= MAX_DESCRIPTION_LEN)
+                .last()
+                .unwrap_or(0);
+            Some(&d[..end])
         } else {
             Some(d)
         }
@@ -603,12 +654,16 @@ mod tests {
         // Length cap.
         let huge = format!("https://i.ytimg.com/{}", "a".repeat(3000));
         assert!(!is_safe_thumbnail_url(&huge));
-        // Userinfo before host — should still pick out the host
-        // correctly, but our parser is conservative: any unusual
-        // structure is rejected.
+        // Userinfo is always rejected — even for a legitimate-looking
+        // suffix. There's no reason for a thumbnail URL to carry
+        // HTTP basic-auth credentials.
         assert!(!is_safe_thumbnail_url(
             "https://user:pass@attacker.example/x.jpg"
         ));
+        assert!(
+            !is_safe_thumbnail_url("https://user:pass@i.ytimg.com/x.jpg"),
+            "userinfo is rejected even on a trusted suffix"
+        );
         // Port — accept https://*.ytimg.com:443/...
         assert!(is_safe_thumbnail_url(
             "https://i.ytimg.com:443/vi/x/hqdefault.jpg"
@@ -620,5 +675,46 @@ mod tests {
         assert!(is_safe_thumbnail_url(
             "https://I.YTIMG.COM/vi/x/hqdefault.jpg"
         ));
+    }
+
+    /// Regression: the host-extraction logic must terminate the
+    /// authority at any of `/`, `?`, or `#`. Splitting on `/` alone
+    /// would let an attacker hide the real host behind a query or
+    /// fragment delimiter — the browser ignores the fragment when
+    /// fetching, so `attacker.com#@x.ytimg.com` is fetched as
+    /// `attacker.com`. The validator must reject these.
+    #[test]
+    fn is_safe_thumbnail_url_rejects_fragment_and_query_bypasses() {
+        // Fragment-confusion: browser fetches attacker.com.
+        assert!(
+            !is_safe_thumbnail_url("https://attacker.com#@x.ytimg.com/foo"),
+            "fragment bypass must be rejected"
+        );
+        assert!(
+            !is_safe_thumbnail_url("https://attacker.com#/path/that/looks/like.ytimg.com/foo.jpg"),
+            "fragment containing apparent-suffix must be rejected"
+        );
+        // Query-confusion: browser fetches attacker.com?…
+        assert!(
+            !is_safe_thumbnail_url("https://attacker.com?@x.ytimg.com/foo"),
+            "query bypass must be rejected"
+        );
+        assert!(
+            !is_safe_thumbnail_url("https://attacker.com?host=x.ytimg.com"),
+            "query string with apparent-suffix must be rejected"
+        );
+
+        // Confirm the legitimate fragment/query usage still passes
+        // — fragments/queries on a real trusted suffix host should
+        // work (the host extraction stops at the delimiter and
+        // checks the suffix correctly).
+        assert!(
+            is_safe_thumbnail_url("https://i.ytimg.com/vi/x/hqdefault.jpg?v=2"),
+            "trusted host with a benign query string is fine"
+        );
+        assert!(
+            is_safe_thumbnail_url("https://i.ytimg.com/vi/x/hqdefault.jpg#cache-bust"),
+            "trusted host with a benign fragment is fine"
+        );
     }
 }

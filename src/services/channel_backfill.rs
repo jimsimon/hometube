@@ -1850,15 +1850,21 @@ mod tests {
         assert_eq!(status, "pending", "row goes back to 'pending' for retry");
         assert_eq!(errs, 1);
         assert!(lease.is_none(), "lease cleared on backoff");
-        // backoff_for_attempt(1, 3600s) ≈ 7200s ± 15%, so next is
-        // somewhere in (before + ~6000, after + ~8500).
+        // backoff_for_attempt(1, 3600s) computes
+        // 2 ^ clamp(1, 1, 16) × 3600 = 2 × 3600 = 7200, then applies
+        // ±15% jitter, so the value lands in roughly [6120, 8280].
+        // Lower bound: be defensive against any rounding in
+        // jittered_interval — use 6000 as the floor (giving ~120s
+        // slack on the 15% nominal).
+        let backoff_lower = 6_000_i64;
+        let backoff_upper = 8_500_i64;
         assert!(
-            next >= before + 1_000,
-            "next_at must move into the future (got {next}, before={before})"
+            next >= before + backoff_lower,
+            "next_at must be at least ~6000s in the future (got {next}, before={before})"
         );
         assert!(
-            next <= after + 24 * 3600,
-            "next_at must be within MAX_BACKOFF (24h)"
+            next <= after + backoff_upper,
+            "next_at must be at most ~8500s in the future (got {next}, after={after})"
         );
     }
 
