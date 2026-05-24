@@ -420,7 +420,92 @@ async fn run_backfill_for(
         }
     };
 
-    apply_backfill_entries(pool, channel_id, started_at, &result.entries, bcfg).await
+    let newly_observed = apply_backfill_entries(pool, channel_id, started_at, &result.entries, bcfg)
+        .await?;
+
+    // Tail-call: enqueue a slow prefetch of the thumbnails for any
+    // newly-observed videos. Best-effort — failures are logged but
+    // don't fail the backfill. The prefetcher is rate-limited
+    // internally (~1 image/sec) so even a 10k-video channel's first
+    // pass settles within a couple of hours.
+    if !newly_observed.is_empty() {
+        let cache_dir = cfg.cache_dir.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            prefetch_thumbnails(&pool, &cache_dir, &newly_observed).await;
+        });
+    }
+    Ok(())
+}
+
+/// Slow-rate background fetcher that populates the `thumbnail_cache`
+/// for a batch of newly-observed videos. ~1 request/second; on
+/// failure (network, 4xx) we just skip the video and continue —
+/// `GET /api/proxy/thumbnail/:videoId` will fall back to the
+/// on-demand fetch path.
+async fn prefetch_thumbnails(pool: &SqlitePool, cache_dir: &str, video_ids: &[String]) {
+    use std::time::Duration as StdDuration;
+    let client = match reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            warn!(%err, "prefetch_thumbnails: failed to build HTTP client");
+            return;
+        }
+    };
+    for video_id in video_ids {
+        // Skip if a fresh entry already exists — could have been
+        // populated by a concurrent proxy request between the
+        // observation and the prefetch.
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT file_path FROM thumbnail_cache WHERE video_id = ?",
+        )
+        .bind(video_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        if existing.is_some() {
+            continue;
+        }
+
+        // Try hqdefault first, then mqdefault as a fallback.
+        let urls = [
+            format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"),
+            format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"),
+        ];
+        let mut stored = false;
+        for url in &urls {
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                    Ok(bytes) => {
+                        let _ = crate::services::thumbnail_store::put(
+                            pool, cache_dir, video_id, &bytes,
+                        )
+                        .await;
+                        stored = true;
+                        break;
+                    }
+                    Err(err) => {
+                        debug!(%video_id, %err, "prefetch: failed to read body");
+                    }
+                },
+                Ok(resp) => {
+                    debug!(%video_id, status = %resp.status(), "prefetch: non-success");
+                }
+                Err(err) => {
+                    debug!(%video_id, %err, "prefetch: request failed");
+                }
+            }
+        }
+        if !stored {
+            debug!(%video_id, "prefetch: no thumbnail variant succeeded");
+        }
+        // ~1 image/sec to keep the prefetch from spiking i.ytimg.com.
+        tokio::time::sleep(StdDuration::from_secs(1)).await;
+    }
 }
 
 /// Apply a successful `flat_playlist_channel` result to the database:
@@ -440,10 +525,15 @@ pub async fn apply_backfill_entries(
     started_at: i64,
     entries: &[FlatPlaylistEntry],
     bcfg: &BackfillConfig,
-) -> AppResult<()> {
+) -> AppResult<Vec<String>> {
     // Persist observed entries + reconcile tombstones in a single tx.
     let mut tx = pool.begin().await?;
     let mut observed_ids: Vec<String> = Vec::with_capacity(entries.len());
+    // `new_video_ids` is returned to the caller so it can enqueue
+    // thumbnail prefetching for genuinely-new uploads. Held outside
+    // the tx so a commit failure doesn't promise prefetches that
+    // never happened.
+    let mut new_video_ids: Vec<String> = Vec::new();
     let mut new_count: i64 = 0;
     for entry in entries {
         let (published_at, published_raw) = parse_upload_date(entry);
@@ -464,6 +554,7 @@ pub async fn apply_backfill_entries(
         .await?;
         if exists.is_none() {
             new_count += 1;
+            new_video_ids.push(entry.video_id.clone());
         }
 
         sqlx::query(
@@ -576,7 +667,7 @@ pub async fn apply_backfill_entries(
         removed = removed_count,
         "channel backfill completed"
     );
-    Ok(())
+    Ok(new_video_ids)
 }
 
 /// Failure-classification + state-transition for one failed backfill.

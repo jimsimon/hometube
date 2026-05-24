@@ -32,6 +32,17 @@ interface CacheStats {
     total_bytes: number;
     segment_count: number;
   }>;
+  /** Parallel thumbnail cache populated by the proxy route on miss
+   *  and by the channel-backfill tail-call. Lives on the same
+   *  payload so the panel can render both caches in one round-trip. */
+  thumbnail_cache: ThumbnailCacheSummary;
+}
+
+interface ThumbnailCacheSummary {
+  entry_count: number;
+  total_bytes: number;
+  /** Configured LRU cap in bytes. `0` = unlimited (no eviction). */
+  max_bytes: number;
 }
 
 interface CacheSettings {
@@ -313,6 +324,45 @@ export class CacheManager extends LitElement {
     }
   }
 
+  /**
+   * Renders the parallel thumbnail-cache stats as additional <dt>/<dd>
+   * rows inside the main cache <dl>. Separate function so the segment
+   * cache and thumbnail cache stay visually grouped without duplicating
+   * the surrounding markup.
+   */
+  private renderThumbnailCache() {
+    const tc = this.stats?.thumbnail_cache;
+    if (!tc) return nothing;
+    const cap = tc.max_bytes;
+    const unlimited = cap <= 0;
+    const pct =
+      !unlimited && cap > 0 ? Math.min(100, (tc.total_bytes / cap) * 100) : 0;
+    return html`
+      <dt>Thumbnail cache</dt>
+      <dd>
+        ${this.fmtBytes(tc.total_bytes)} · ${tc.entry_count} thumbnails
+        ${unlimited
+          ? html` <span class="hint">No LRU eviction (unlimited).</span>`
+          : html`
+              · ${this.fmtBytes(cap)} cap
+              <div
+                class="progress"
+                role="progressbar"
+                aria-valuenow=${Math.round(pct)}
+                aria-valuemin="0"
+                aria-valuemax="100"
+              >
+                <span style="width: ${pct}%"></span>
+              </div>
+            `}
+        <span class="hint">
+          Populated by the channel backfill prefetcher and by
+          <code>/api/proxy/thumbnail/&lt;id&gt;</code> on cache miss.
+        </span>
+      </dd>
+    `;
+  }
+
   override render() {
     if (!this.stats || !this.settings) return html`<p>Loading cache…</p>`;
     const usedPct =
@@ -350,6 +400,7 @@ export class CacheManager extends LitElement {
                   <span style="width: ${usedPct}%"></span>
                 </div>`}
           </dd>
+          ${this.renderThumbnailCache()}
         </dl>
 
         <div class="controls">

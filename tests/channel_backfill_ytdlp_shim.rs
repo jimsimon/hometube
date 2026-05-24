@@ -32,28 +32,38 @@ async fn setup_db() -> SqlitePool {
 /// Write a shell script that mimics `yt-dlp --flat-playlist -j` by
 /// emitting a fixed sequence of JSON lines on stdout and exiting 0.
 /// Returns the path to the script.
+///
+/// Writes to a `.partial` path, chmods it, then atomically renames
+/// into place. This guarantees the final file's inode is never open
+/// for writing in this process when we exec it — the kernel's
+/// ETXTBSY check would otherwise fail spawns under parallel tests.
 fn write_ytdlp_shim(json_lines: &[&str]) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
     let nonce: u64 = rand::random();
     let mut path = std::env::temp_dir();
     path.push(format!("hometube-ytdlp-shim-{nonce:x}.sh"));
 
-    let mut f = std::fs::File::create(&path).unwrap();
-    // Use printf, not echo, to control newlines precisely.
-    writeln!(f, "#!/bin/sh").unwrap();
-    writeln!(f, "# Ignore every argument — we always emit the same canned output.").unwrap();
-    for line in json_lines {
-        // Escape single quotes so the JSON survives embedding inside
-        // the shell single-quoted string.
-        let escaped = line.replace('\'', r#"'\''"#);
-        writeln!(f, "printf '%s\\n' '{escaped}'").unwrap();
+    let tmp_path = path.with_extension("sh.partial");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "# Ignore every argument — we always emit the same canned output.").unwrap();
+        for line in json_lines {
+            // Escape single quotes so the JSON survives embedding
+            // inside the shell single-quoted string.
+            let escaped = line.replace('\'', r#"'\''"#);
+            writeln!(f, "printf '%s\\n' '{escaped}'").unwrap();
+        }
+        writeln!(f, "exit 0").unwrap();
+        f.flush().unwrap();
+        // `f` drops at the end of the scope, closing the file before
+        // we chmod + rename.
     }
-    writeln!(f, "exit 0").unwrap();
-    drop(f);
-
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&tmp_path).unwrap().permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+    std::fs::set_permissions(&tmp_path, perms).unwrap();
+    std::fs::rename(&tmp_path, &path).unwrap();
     path
 }
 
@@ -109,18 +119,24 @@ async fn flat_playlist_parses_canned_jsonl_output() {
 #[tokio::test]
 async fn flat_playlist_surfaces_subprocess_failure() {
     // Shim that exits non-zero with an error on stderr.
+    // Uses the same atomic-write pattern as `write_ytdlp_shim` so the
+    // final file is never open for writing when we exec it.
+    use std::os::unix::fs::PermissionsExt;
     let nonce: u64 = rand::random();
     let mut path = std::env::temp_dir();
     path.push(format!("hometube-ytdlp-fail-shim-{nonce:x}.sh"));
-    let mut f = std::fs::File::create(&path).unwrap();
-    writeln!(f, "#!/bin/sh").unwrap();
-    writeln!(f, "echo 'Sign in to confirm you are not a bot' 1>&2").unwrap();
-    writeln!(f, "exit 1").unwrap();
-    drop(f);
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    let tmp_path = path.with_extension("sh.partial");
+    {
+        let mut f = std::fs::File::create(&tmp_path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "echo 'Sign in to confirm you are not a bot' 1>&2").unwrap();
+        writeln!(f, "exit 1").unwrap();
+        f.flush().unwrap();
+    }
+    let mut perms = std::fs::metadata(&tmp_path).unwrap().permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+    std::fs::set_permissions(&tmp_path, perms).unwrap();
+    std::fs::rename(&tmp_path, &path).unwrap();
 
     let cfg = config_with_ytdlp(&path);
     let tunables = FlatPlaylistTunables {

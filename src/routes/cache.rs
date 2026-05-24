@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 
 use crate::error::{AppError, AppResult};
 use crate::services::cron::{CACHE_HIT_COUNTER, CACHE_MISS_COUNTER};
-use crate::services::video_cache;
+use crate::services::{thumbnail_store, video_cache};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -30,6 +30,20 @@ pub struct CacheStats {
     /// rendering a progress bar against a zero limit.
     pub unlimited: bool,
     pub top_videos: Vec<CachedVideoSummary>,
+    /// Snapshot of the parallel thumbnail cache populated by the
+    /// proxy route on miss + the channel-backfill tail-call. Lives on
+    /// the same response so the parent UI can render both panels with
+    /// a single round-trip.
+    pub thumbnail_cache: ThumbnailCacheSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThumbnailCacheSummary {
+    pub entry_count: i64,
+    pub total_bytes: i64,
+    /// Configured LRU cap in bytes. `0` is treated as "unlimited" by
+    /// `thumbnail_store::cleanup_lru`.
+    pub max_bytes: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +78,14 @@ pub async fn stats(State(state): State<AppState>) -> AppResult<Json<CacheStats>>
     let max_size_label = video_cache::current_cache_size_label(&state.db).await;
     let max_size_bytes = video_cache::cache_size_preset_to_bytes(&max_size_label);
     let unlimited = max_size_label.eq_ignore_ascii_case("Unlimited");
+
+    let thumb_stats = thumbnail_store::stats(&state.db).await.unwrap_or(
+        thumbnail_store::ThumbnailCacheStats {
+            entry_count: 0,
+            total_bytes: 0,
+        },
+    );
+    let thumb_max = thumbnail_store::configured_max_bytes(&state.db).await;
     Ok(Json(CacheStats {
         total_bytes,
         segment_count,
@@ -75,6 +97,11 @@ pub async fn stats(State(state): State<AppState>) -> AppResult<Json<CacheStats>>
         max_size_bytes,
         unlimited,
         top_videos,
+        thumbnail_cache: ThumbnailCacheSummary {
+            entry_count: thumb_stats.entry_count,
+            total_bytes: thumb_stats.total_bytes,
+            max_bytes: thumb_max,
+        },
     }))
 }
 

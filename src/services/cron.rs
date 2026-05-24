@@ -428,7 +428,32 @@ async fn run_ytdlp_update(pool: &SqlitePool, cfg: &Config) -> AppResult<String> 
 }
 
 async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
-    crate::services::video_cache::cleanup_segment_cache(pool).await
+    let (msg, mut detail) = crate::services::video_cache::cleanup_segment_cache(pool).await?;
+
+    // Also evict the thumbnail cache by LRU. The thumbnail cache is a
+    // separate disk pool (one file per video) populated by
+    // `GET /api/proxy/thumbnail/:videoId` on miss + the backfill
+    // prefetch tail-call; its eviction budget is independent of the
+    // segment cache's so a busy thumbnail cache can't push out hot
+    // DASH segments.
+    let max_bytes = crate::services::thumbnail_store::configured_max_bytes(pool).await;
+    match crate::services::thumbnail_store::cleanup_lru(pool, max_bytes).await {
+        Ok((0, 0)) => {
+            detail.push_str("Thumbnail cache under cap; no evictions.\n");
+        }
+        Ok((evicted, bytes)) => {
+            detail.push_str(&format!(
+                "Thumbnail cache: evicted {evicted} entries ({} KB) by LRU.\n",
+                bytes / 1024
+            ));
+        }
+        Err(err) => {
+            tracing::warn!(%err, "thumbnail_cache cleanup failed");
+            detail.push_str(&format!("Thumbnail cache cleanup failed: {err}\n"));
+        }
+    }
+
+    Ok((msg, detail))
 }
 
 /// Drop `channel_sync_state` rows (and cascade `channel_videos`) for
