@@ -115,3 +115,91 @@ async fn allowlist_rejects_non_child_target() {
         .await;
     assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
 }
+
+/// `add_channel` enforces a max length on `channel_id` to keep the
+/// rest of the handler (and the downstream sidecar call / DB insert)
+/// from doing pointless work with an obviously-bogus payload. Catches
+/// regressions in the validation block at the top of the handler.
+#[tokio::test]
+async fn add_channel_rejects_oversized_channel_id() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/channels"))
+        .json(&serde_json::json!({
+            "channel_id": "x".repeat(200),
+            "channel_title": "Anything",
+            "channel_thumbnail_url": "https://i.ytimg.com/vi/x/hqdefault.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    let body = res.text();
+    assert!(
+        body.contains("channel_id too long"),
+        "expected length-cap message, got {body}"
+    );
+}
+
+/// Body-supplied thumbnail URLs are gated to YouTube/Google-controlled
+/// hosts because they're rendered child-side via `<img src>`. An
+/// attacker-controlled host is the only realistic abuse vector for the
+/// body-data path (which otherwise skips the sidecar's own
+/// validation).
+#[tokio::test]
+async fn add_channel_rejects_untrusted_thumbnail_host() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/channels"))
+        .json(&serde_json::json!({
+            "channel_id": "UCabcdefghijklmnopqrstuv",
+            "channel_title": "Hostile",
+            "channel_thumbnail_url": "https://attacker.example/poison.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    let body = res.text();
+    assert!(
+        body.contains("channel_thumbnail_url"),
+        "expected URL-validation message, got {body}"
+    );
+}
+
+/// Empty `channel_id` is the trivial mistake — handler must 400.
+#[tokio::test]
+async fn add_channel_rejects_empty_channel_id() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/channels"))
+        .json(&serde_json::json!({
+            "channel_id": "",
+            "channel_title": "X",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}
+
+/// Title length cap. Title lives in the DB row + the rendered UI; a
+/// 10 KB blob shouldn't be accepted just because the parent agent
+/// faked one.
+#[tokio::test]
+async fn add_channel_rejects_oversized_channel_title() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let child_id = app.child_id.unwrap();
+    let res = app
+        .server
+        .post(&format!("/api/children/{child_id}/allowlist/channels"))
+        .json(&serde_json::json!({
+            "channel_id": "UCfine",
+            "channel_title": "T".repeat(500),
+            "channel_thumbnail_url": "https://i.ytimg.com/vi/x/hqdefault.jpg",
+        }))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}

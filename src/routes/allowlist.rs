@@ -120,8 +120,14 @@ fn is_safe_thumbnail_url(url: &str) -> bool {
     let host = host.split('@').next_back().unwrap_or(host);
     let host = host.split(':').next().unwrap_or(host);
     let host_lower = host.to_ascii_lowercase();
+    // Accept hosts that match a known YouTube/Google CDN suffix. The
+    // `==` arms cover the (rare) bare-domain case; the `ends_with`
+    // arms must include the leading `.` so a suffix-spoof like
+    // `ytimg.com.evil` is rejected.
     host_lower.ends_with(".ytimg.com")
         || host_lower == "ytimg.com"
+        || host_lower.ends_with(".ggpht.com")
+        || host_lower == "ggpht.com"
         || host_lower.ends_with(".googleusercontent.com")
         || host_lower == "googleusercontent.com"
 }
@@ -546,4 +552,73 @@ fn parse_video_id(input: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_safe_thumbnail_url_accepts_real_youtube_hosts() {
+        // Real i.ytimg.com URLs from the search response.
+        assert!(is_safe_thumbnail_url(
+            "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
+        ));
+        assert!(is_safe_thumbnail_url("https://yt3.ggpht.com/something.jpg"));
+        // googleusercontent.com channel avatars
+        assert!(is_safe_thumbnail_url(
+            "https://yt3.googleusercontent.com/ytc/AAAA.jpg"
+        ));
+        assert!(is_safe_thumbnail_url(
+            "https://lh3.googleusercontent.com/ytc/AAAA.jpg"
+        ));
+    }
+
+    #[test]
+    fn is_safe_thumbnail_url_rejects_arbitrary_hosts() {
+        // An attacker-controlled URL embedded in the POST body.
+        assert!(!is_safe_thumbnail_url("https://attacker.example/x.jpg"));
+        // Lookalike domain (suffix-spoof).
+        assert!(!is_safe_thumbnail_url("https://ytimg.com.evil/x.jpg"));
+        assert!(!is_safe_thumbnail_url(
+            "https://googleusercontent.com.evil/x.jpg"
+        ));
+        // http:// is not allowed — only https://.
+        assert!(!is_safe_thumbnail_url(
+            "http://i.ytimg.com/vi/x/hqdefault.jpg"
+        ));
+        // No scheme.
+        assert!(!is_safe_thumbnail_url("i.ytimg.com/vi/x/hqdefault.jpg"));
+        // Schemes other than https.
+        assert!(!is_safe_thumbnail_url(
+            "ftp://i.ytimg.com/vi/x/hqdefault.jpg"
+        ));
+        assert!(!is_safe_thumbnail_url("javascript:alert(1)//i.ytimg.com"));
+    }
+
+    #[test]
+    fn is_safe_thumbnail_url_handles_edge_cases() {
+        assert!(!is_safe_thumbnail_url(""));
+        assert!(!is_safe_thumbnail_url("   "));
+        // Length cap.
+        let huge = format!("https://i.ytimg.com/{}", "a".repeat(3000));
+        assert!(!is_safe_thumbnail_url(&huge));
+        // Userinfo before host — should still pick out the host
+        // correctly, but our parser is conservative: any unusual
+        // structure is rejected.
+        assert!(!is_safe_thumbnail_url(
+            "https://user:pass@attacker.example/x.jpg"
+        ));
+        // Port — accept https://*.ytimg.com:443/...
+        assert!(is_safe_thumbnail_url(
+            "https://i.ytimg.com:443/vi/x/hqdefault.jpg"
+        ));
+        // Bare ytimg.com without subdomain is technically YouTube's CDN
+        // — accepted.
+        assert!(is_safe_thumbnail_url("https://ytimg.com/x.jpg"));
+        // Case insensitivity for the host suffix check.
+        assert!(is_safe_thumbnail_url(
+            "https://I.YTIMG.COM/vi/x/hqdefault.jpg"
+        ));
+    }
 }

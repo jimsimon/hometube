@@ -68,6 +68,162 @@ async fn subscribed_channel_also_passes_access_gate() {
     assert_ne!(res.status_code(), StatusCode::FORBIDDEN);
 }
 
+/// `get_channel` returns the locally-stored header metadata
+/// (title/thumbnail/description) without any sidecar call, plus a
+/// live-computed `video_count` from `channel_videos`.
+#[tokio::test]
+async fn get_channel_serves_local_header_metadata() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'UCmeta', 'Meta', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO channel_sync_state \
+            (channel_id, channel_title, channel_thumbnail_url, description, \
+             backfill_status, backfill_next_at, rss_next_poll_at) \
+         VALUES ('UCmeta', 'Meta Channel', 'https://yt3.googleusercontent.com/x.jpg', \
+                 'A description.', 'pending', 0, 0)",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Seed two videos, one tombstoned, so video_count = 1.
+    sqlx::query(
+        "INSERT INTO channel_videos \
+            (channel_id, video_id, title, channel_title, published_at, \
+             first_seen_at, last_seen_at, source, is_deleted) \
+         VALUES \
+            ('UCmeta', 'vA', 'A', 'Meta', 1700000000, 1, 1, 'rss', 0), \
+            ('UCmeta', 'vB', 'B', 'Meta', 1700000001, 1, 1, 'backfill', 1)",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/channels/UCmeta").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["id"], "UCmeta");
+    assert_eq!(body["title"], "Meta Channel");
+    assert_eq!(body["description"], "A description.");
+    assert_eq!(body["video_count"], 1, "tombstoned video must not count");
+    // Single thumbnail entry — keyed `default`.
+    assert!(body["thumbnails"]["default"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://yt3.googleusercontent.com/"));
+}
+
+/// `get_channel` for a channel that doesn't exist in
+/// `channel_sync_state` returns 404 (after passing the access gate).
+#[tokio::test]
+async fn get_channel_returns_404_when_no_sync_state_row() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    // Allowlist the channel so the access gate passes, but skip the
+    // channel_sync_state row.
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'UCmissing', 'Missing', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app.server.get("/api/channels/UCmissing").await;
+    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// Unknown `sort` values should 400 with a clear error rather than
+/// silently degrading to `latest` (the prior behaviour). Catches
+/// frontend typos that would otherwise produce subtly-wrong ordering.
+#[tokio::test]
+async fn list_videos_rejects_unknown_sort_parameter() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'UCsort', 'Sortable', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app
+        .server
+        .get("/api/channels/UCsort/videos?sort=oldest")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    let body = res.text();
+    assert!(
+        body.contains("unknown sort"),
+        "expected sort-validation message, got {body}"
+    );
+}
+
+/// `sort=most_viewed` is explicitly accepted (validates the
+/// whitelist arm of the match — without this test, a future
+/// refactor could drop `most_viewed` from the whitelist without
+/// failing existing tests).
+#[tokio::test]
+async fn list_videos_accepts_most_viewed_sort() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
+         VALUES (?, 'UCviews', 'Viewed', ?)",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Seed two videos with different view counts.
+    sqlx::query(
+        "INSERT INTO channel_videos \
+            (channel_id, video_id, title, channel_title, view_count, published_at, \
+             first_seen_at, last_seen_at, source) \
+         VALUES \
+            ('UCviews', 'low-views', 'Low', 'Viewed', 10, 1_700_000_000, 1, 1, 'backfill'), \
+            ('UCviews', 'high-views', 'High', 'Viewed', 1_000_000, 1_700_000_001, 1, 1, 'backfill')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let res = app
+        .server
+        .get("/api/channels/UCviews/videos?sort=most_viewed")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items[0]["video_id"], "high-views");
+    assert_eq!(items[1]["video_id"], "low-views");
+}
+
 /// Regression: a blocked video in the middle of a full page used to
 /// cause `next_page_token` to be `None` even when more rows existed.
 /// The handler now applies blocked/hidden filters inline in SQL, so
