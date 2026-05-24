@@ -1739,6 +1739,129 @@ mod tests {
         assert!(huge >= (cap as f64 * 0.84) as i64);
     }
 
+    // -----------------------------------------------------------------
+    // record_failure — failure classification + state transitions.
+    // Three branches: channel-not-found shelve, consecutive-errors
+    // shelve, and normal exponential backoff.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn record_failure_shelves_immediately_on_not_found() {
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCgone").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+        // Pretend the row was just claimed.
+        sqlx::query(
+            "UPDATE channel_sync_state SET \
+                 backfill_status = 'running', \
+                 backfill_lease_expires_at = 9999999 \
+             WHERE channel_id = 'UCgone'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let bcfg = BackfillConfig::default();
+        // A "channel does not exist" error — should single-strike shelve.
+        record_failure(&pool, "UCgone", "This channel does not exist", &bcfg)
+            .await
+            .unwrap();
+
+        let (status, err, lease): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT backfill_status, backfill_last_error, backfill_lease_expires_at \
+               FROM channel_sync_state WHERE channel_id = 'UCgone'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "shelved");
+        assert_eq!(err.as_deref(), Some("channel_not_found"));
+        assert!(lease.is_none(), "lease must be cleared on shelve");
+    }
+
+    #[tokio::test]
+    async fn record_failure_shelves_after_max_consecutive_errors() {
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCflaky").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+        let bcfg = BackfillConfig {
+            max_consecutive_errors_before_shelve: 3,
+            ..BackfillConfig::default()
+        };
+        // Seed the channel right at the threshold-minus-one so the
+        // next failure trips the shelve.
+        sqlx::query(
+            "UPDATE channel_sync_state SET \
+                 backfill_status = 'running', \
+                 backfill_consecutive_errors = 2 \
+             WHERE channel_id = 'UCflaky'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        record_failure(&pool, "UCflaky", "transient error", &bcfg)
+            .await
+            .unwrap();
+
+        let (status, errs, err): (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT backfill_status, backfill_consecutive_errors, backfill_last_error \
+               FROM channel_sync_state WHERE channel_id = 'UCflaky'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "shelved");
+        assert_eq!(errs, 3, "counter is bumped before the threshold check");
+        assert_eq!(err.as_deref(), Some("transient error"));
+    }
+
+    #[tokio::test]
+    async fn record_failure_backs_off_under_threshold() {
+        let pool = setup_db().await;
+        allow_channel(&pool, "UCsoft").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+        let bcfg = BackfillConfig {
+            max_consecutive_errors_before_shelve: 5,
+            ..BackfillConfig::default()
+        };
+        sqlx::query(
+            "UPDATE channel_sync_state SET backfill_status = 'running' \
+              WHERE channel_id = 'UCsoft'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let before = unix_now();
+        record_failure(&pool, "UCsoft", "transient", &bcfg)
+            .await
+            .unwrap();
+        let after = unix_now();
+
+        let (status, errs, next, lease): (String, i64, i64, Option<i64>) = sqlx::query_as(
+            "SELECT backfill_status, backfill_consecutive_errors, backfill_next_at, \
+                    backfill_lease_expires_at \
+               FROM channel_sync_state WHERE channel_id = 'UCsoft'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "pending", "row goes back to 'pending' for retry");
+        assert_eq!(errs, 1);
+        assert!(lease.is_none(), "lease cleared on backoff");
+        // backoff_for_attempt(1, 3600s) ≈ 7200s ± 15%, so next is
+        // somewhere in (before + ~6000, after + ~8500).
+        assert!(
+            next >= before + 1_000,
+            "next_at must move into the future (got {next}, before={before})"
+        );
+        assert!(
+            next <= after + 24 * 3600,
+            "next_at must be within MAX_BACKOFF (24h)"
+        );
+    }
+
     #[test]
     fn is_not_found_error_classifies_404_signals() {
         // Real yt-dlp / HTTP messages that genuinely indicate a

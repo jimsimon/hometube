@@ -1180,4 +1180,111 @@ mod tests {
         assert!(huge <= (cap as f64 * 1.16) as i64);
         assert!(huge >= (cap as f64 * 0.84) as i64);
     }
+
+    // -----------------------------------------------------------------
+    // effective_sidecar_min_interval — three recency buckets driven
+    // by the channel's most-recent upload.
+    // -----------------------------------------------------------------
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn setup_pool() -> sqlx::SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn seed_channel_with_max_published(
+        pool: &sqlx::SqlitePool,
+        channel_id: &str,
+        published_at: Option<i64>,
+    ) {
+        sqlx::query(
+            "INSERT INTO channel_sync_state (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
+             VALUES (?, 'pending', 0, 0)",
+        )
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(ts) = published_at {
+            sqlx::query(
+                "INSERT INTO channel_videos \
+                    (channel_id, video_id, title, published_at, \
+                     first_seen_at, last_seen_at, source) \
+                 VALUES (?, ?, 'X', ?, 1, 1, 'rss')",
+            )
+            .bind(channel_id)
+            .bind(format!("v-{channel_id}"))
+            .bind(ts)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_active_bucket_for_recent_upload() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // Uploaded today.
+        seed_channel_with_max_published(&pool, "UCactive", Some(now)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCactive", cfg, now).await;
+        assert_eq!(interval, cfg.sidecar_fallback_min_interval.as_secs() as i64);
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_dormant_bucket_for_30_to_90_days() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // 60 days ago — past the dormant threshold but inside the
+        // archived threshold.
+        let sixty_days_ago = now - 60 * 86_400;
+        seed_channel_with_max_published(&pool, "UCdormant", Some(sixty_days_ago)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCdormant", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_dormant_interval.as_secs() as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_archived_bucket_for_old_uploads() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // 200 days ago — past both thresholds.
+        let two_hundred_days_ago = now - 200 * 86_400;
+        seed_channel_with_max_published(&pool, "UCold", Some(two_hundred_days_ago)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCold", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_archived_interval.as_secs() as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_archived_bucket_when_no_videos() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // No channel_videos rows at all — most_published is NULL,
+        // days_since = i64::MAX, falls into the archived bucket.
+        seed_channel_with_max_published(&pool, "UCempty", None).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCempty", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_archived_interval.as_secs() as i64
+        );
+    }
 }
