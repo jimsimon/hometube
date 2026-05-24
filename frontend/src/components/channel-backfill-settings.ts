@@ -266,9 +266,7 @@ export class ChannelBackfillSettings extends LitElement {
   }
 
   private hasErrors(): boolean {
-    return Object.keys(this.form).some((k) =>
-      this.fieldError(k as NumericKey) !== null,
-    );
+    return Object.keys(this.form).some((k) => this.fieldError(k as NumericKey) !== null);
   }
 
   private async save(): Promise<void> {
@@ -287,10 +285,7 @@ export class ChannelBackfillSettings extends LitElement {
       if (raw) body[key] = Number(raw);
     }
     try {
-      this.settings = await api.put<BackfillSettings>(
-        "/api/admin/channel-backfill/settings",
-        body,
-      );
+      this.settings = await api.put<BackfillSettings>("/api/admin/channel-backfill/settings", body);
       this.enabled = this.settings.enabled;
       this.notifyOnShelve = this.settings.notify_on_shelve;
       // Clear the inputs after a successful save so the next edit
@@ -316,10 +311,7 @@ export class ChannelBackfillSettings extends LitElement {
   private async runNow(channelId: string): Promise<void> {
     this.busy = true;
     try {
-      await api.post(
-        `/api/admin/channel-backfill/run-now/${encodeURIComponent(channelId)}`,
-        {},
-      );
+      await api.post(`/api/admin/channel-backfill/run-now/${encodeURIComponent(channelId)}`, {});
       this.status = "Queued.";
       await this.refresh();
     } catch (err) {
@@ -332,10 +324,7 @@ export class ChannelBackfillSettings extends LitElement {
   private async unshelve(channelId: string): Promise<void> {
     this.busy = true;
     try {
-      await api.post(
-        `/api/admin/channel-backfill/unshelve/${encodeURIComponent(channelId)}`,
-        {},
-      );
+      await api.post(`/api/admin/channel-backfill/unshelve/${encodeURIComponent(channelId)}`, {});
       this.status = "Unshelved.";
       await this.refresh();
     } catch (err) {
@@ -352,11 +341,7 @@ export class ChannelBackfillSettings extends LitElement {
     };
   }
 
-  private renderField(
-    key: NumericKey,
-    label: string,
-    help?: string,
-  ): unknown {
+  private renderField(key: NumericKey, label: string, help?: string): unknown {
     const err = this.fieldError(key);
     const current =
       this.settings != null
@@ -395,12 +380,11 @@ export class ChannelBackfillSettings extends LitElement {
       <div class="card">
         <h3>Channel archive backfill</h3>
         <p class="help" style="grid-column: 1 / -1; max-width: 50rem;">
-          The backfiller runs <code>yt-dlp --flat-playlist</code> against
-          each allowlisted channel on the configured cadence, writing the
-          full upload history into the local archive. Single-concurrency
-          by design; the gap between channels caps the family-wide rate
-          on the anti-bot-sensitive path. Defaults are conservative — 1
-          channel/hour, 30-day re-backfill cycle.
+          The backfiller runs <code>yt-dlp --flat-playlist</code> against each allowlisted channel
+          on the configured cadence, writing the full upload history into the local archive.
+          Single-concurrency by design; the gap between channels caps the family-wide rate on the
+          anti-bot-sensitive path. Defaults are conservative — 1 channel/hour, 30-day re-backfill
+          cycle.
         </p>
 
         <div class="grid">
@@ -410,8 +394,7 @@ export class ChannelBackfillSettings extends LitElement {
               id="enabled"
               type="checkbox"
               .checked=${this.enabled}
-              @change=${(e: Event) =>
-                (this.enabled = (e.target as HTMLInputElement).checked)}
+              @change=${(e: Event) => (this.enabled = (e.target as HTMLInputElement).checked)}
             />
           </div>
 
@@ -514,11 +497,11 @@ export class ChannelBackfillSettings extends LitElement {
                           <div class="help" style="font-size: 0.75rem;">${r.channel_id}</div>
                         </td>
                         <td>
-                          <span class="pill ${r.backfill_status}">
-                            ${r.backfill_status}
-                          </span>
+                          <span class="pill ${r.backfill_status}"> ${r.backfill_status} </span>
                           ${r.backfill_consecutive_errors > 0
-                            ? html` <span class="help">(${r.backfill_consecutive_errors} err)</span>`
+                            ? html` <span class="help"
+                                >(${r.backfill_consecutive_errors} err)</span
+                              >`
                             : nothing}
                         </td>
                         <td>

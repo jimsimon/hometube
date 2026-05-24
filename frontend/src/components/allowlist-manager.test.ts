@@ -450,7 +450,7 @@ describe("<hometube-allowlist-manager>", () => {
         (c: unknown[]) =>
           typeof c[0] === "string" &&
           (c[0] as string).includes("/allowlist/channels") &&
-          !((c[0] as string).match(/\/allowlist\/channels\/[^/]+$/)) &&
+          !(c[0] as string).match(/\/allowlist\/channels\/[^/]+$/) &&
           (c[1] as RequestInit | undefined)?.method === "POST",
       );
       expect(channelPosts.length).toBe(1);

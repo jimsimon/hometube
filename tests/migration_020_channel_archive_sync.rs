@@ -98,7 +98,10 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(pre, 2, "feed_sources + feed_source_items must exist pre-020");
+    assert_eq!(
+        pre, 2,
+        "feed_sources + feed_source_items must exist pre-020"
+    );
 
     // 2. Seed pre-020 data: two channels with assorted items, plus an
     //    allowlist row so the optional thumbnail_url backfill has data
@@ -182,7 +185,10 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(post, 0, "feed_sources + feed_source_items must be dropped post-020");
+    assert_eq!(
+        post, 0,
+        "feed_sources + feed_source_items must be dropped post-020"
+    );
 
     // 4b. channel_sync_state contains both channels with poll bookkeeping
     //     migrated and channel_thumbnail_url backfilled from

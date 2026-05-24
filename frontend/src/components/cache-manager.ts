@@ -335,8 +335,7 @@ export class CacheManager extends LitElement {
     if (!tc) return nothing;
     const cap = tc.max_bytes;
     const unlimited = cap <= 0;
-    const pct =
-      !unlimited && cap > 0 ? Math.min(100, (tc.total_bytes / cap) * 100) : 0;
+    const pct = !unlimited && cap > 0 ? Math.min(100, (tc.total_bytes / cap) * 100) : 0;
     return html`
       <dt>Thumbnail cache</dt>
       <dd>

@@ -14,7 +14,7 @@
 CREATE TABLE thumbnail_cache (
     video_id          TEXT    PRIMARY KEY,
     file_path         TEXT    NOT NULL,
-    file_size_bytes   INTEGER NOT NULL,
+    file_size_bytes   INTEGER NOT NULL CHECK (file_size_bytes >= 0),
     cached_at         INTEGER NOT NULL DEFAULT (unixepoch()),
     last_accessed_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );

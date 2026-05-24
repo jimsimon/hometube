@@ -95,14 +95,9 @@ async fn rss_poll_populates_feed_then_handler_serves_it() {
         PollOutcome::Updated { items, etag, .. } => {
             assert_eq!(items.len(), 2);
             assert_eq!(etag.as_deref(), Some("\"abc\""));
-            feed_cache::upsert_channel_videos_from_rss(
-                &app.pool,
-                "UCtest",
-                &items,
-                1_718_531_999,
-            )
-            .await
-            .unwrap();
+            feed_cache::upsert_channel_videos_from_rss(&app.pool, "UCtest", &items, 1_718_531_999)
+                .await
+                .unwrap();
         }
         PollOutcome::NotModified => panic!("expected Updated"),
     }
@@ -168,12 +163,11 @@ async fn rss_304_preserves_existing_items() {
     .unwrap();
     assert!(matches!(outcome, PollOutcome::NotModified));
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channel_videos WHERE channel_id='UC304'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_videos WHERE channel_id='UC304'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 1, "304 must not clear cached items");
 }
 

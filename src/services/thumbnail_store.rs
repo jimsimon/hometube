@@ -53,7 +53,9 @@ pub const DEFAULT_MAX_BYTES: i64 = 500 * 1024 * 1024;
 /// under `<cache_dir>/thumbnails/<video_id>.jpg`. The subdirectory is
 /// created on first write by [`put`].
 pub fn thumbnail_path(cache_dir: &str, video_id: &str) -> PathBuf {
-    PathBuf::from(cache_dir).join("thumbnails").join(format!("{video_id}.jpg"))
+    PathBuf::from(cache_dir)
+        .join("thumbnails")
+        .join(format!("{video_id}.jpg"))
 }
 
 /// Look up the cache entry for `video_id`. Returns the on-disk path
@@ -73,14 +75,13 @@ pub async fn get(pool: &SqlitePool, video_id: &str) -> Option<PathBuf> {
     if !is_safe_video_id(video_id) {
         return None;
     }
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT file_path FROM thumbnail_cache WHERE video_id = ?",
-    )
-    .bind(video_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT file_path FROM thumbnail_cache WHERE video_id = ?")
+            .bind(video_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     let (path,) = row?;
     // Verify the file still exists on disk — if a manual `rm` removed
     // it, prefer "cache miss" over "broken read". Cheap stat; only
@@ -193,12 +194,11 @@ pub async fn cleanup_lru(pool: &SqlitePool, max_bytes: i64) -> AppResult<(u64, u
     if max_bytes <= 0 {
         return Ok((0, 0));
     }
-    let mut current_total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(file_size_bytes), 0) FROM thumbnail_cache",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let mut current_total: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size_bytes), 0) FROM thumbnail_cache")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
     if current_total <= max_bytes {
         return Ok((0, 0));
     }
@@ -226,7 +226,13 @@ pub async fn cleanup_lru(pool: &SqlitePool, max_bytes: i64) -> AppResult<(u64, u
             .await?;
         current_total = current_total.saturating_sub(size);
         evicted_count += 1;
-        evicted_bytes += size as u64;
+        // Saturating ops + clamp-to-zero guards against a negative
+        // `file_size_bytes` (which the `CHECK (file_size_bytes >= 0)`
+        // constraint on the column forbids, but belt-and-braces for
+        // older rows written before the constraint was added or DBs
+        // that bypassed the migration).
+        let size_u64 = size.max(0) as u64;
+        evicted_bytes = evicted_bytes.saturating_add(size_u64);
     }
     Ok((evicted_count, evicted_bytes))
 }
@@ -234,14 +240,12 @@ pub async fn cleanup_lru(pool: &SqlitePool, max_bytes: i64) -> AppResult<(u64, u
 /// Read the configured max-bytes from `app_config`. Falls back to the
 /// default when unset or out of range.
 pub async fn configured_max_bytes(pool: &SqlitePool) -> i64 {
-    let raw: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM app_config WHERE key = ?",
-    )
-    .bind(KEY_THUMBNAIL_CACHE_MAX_BYTES)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let raw: Option<String> = sqlx::query_scalar("SELECT value FROM app_config WHERE key = ?")
+        .bind(KEY_THUMBNAIL_CACHE_MAX_BYTES)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
     raw.as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|n| *n >= 0)
@@ -357,12 +361,11 @@ mod tests {
         tokio::fs::remove_file(&path).await.unwrap();
         // get() must return None and clean up the row.
         assert!(get(&pool, "vX").await.is_none());
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM thumbnail_cache WHERE video_id = 'vX'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thumbnail_cache WHERE video_id = 'vX'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(remaining, 0, "orphan row must be deleted on next get()");
     }
 
@@ -373,17 +376,21 @@ mod tests {
         put(&pool, cache.path().to_str().unwrap(), "vU", b"old")
             .await
             .unwrap();
-        put(&pool, cache.path().to_str().unwrap(), "vU", b"new-and-longer")
-            .await
-            .unwrap();
-
-        // Exactly one row should remain (UPSERT preserved PK).
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM thumbnail_cache WHERE video_id = 'vU'",
+        put(
+            &pool,
+            cache.path().to_str().unwrap(),
+            "vU",
+            b"new-and-longer",
         )
-        .fetch_one(&pool)
         .await
         .unwrap();
+
+        // Exactly one row should remain (UPSERT preserved PK).
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thumbnail_cache WHERE video_id = 'vU'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(n, 1);
 
         let path = get(&pool, "vU").await.unwrap();
@@ -416,12 +423,11 @@ mod tests {
         assert_eq!(evicted, 2);
         assert_eq!(bytes_freed, 200);
 
-        let remaining: Vec<String> = sqlx::query_scalar(
-            "SELECT video_id FROM thumbnail_cache ORDER BY video_id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT video_id FROM thumbnail_cache ORDER BY video_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(remaining, vec!["v1"]);
     }
 

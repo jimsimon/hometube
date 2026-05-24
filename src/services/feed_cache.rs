@@ -201,6 +201,16 @@ pub async fn upsert_channel_videos_from_sidecar(
 
 /// Shared implementation for the RSS/sidecar upsert path. The
 /// per-source variant just supplies the `source` tag.
+///
+/// **Round-trip footprint**: 1 batched SELECT + N UPSERTs in a single
+/// transaction. The freshness path's batches are small by construction
+/// (~15 items per RSS poll, ~30 per sidecar fallback), so this is
+/// cheap. The per-item SELECT-then-UPSERT loop in earlier versions
+/// was 2N round-trips; the upfront `HashMap` lookup collapses it to
+/// 1 + N. The same optimisation was applied to
+/// [`crate::services::channel_backfill::apply_backfill_entries`]
+/// where N can be 10k+ and the gain is dramatic; here it's modest
+/// but consistent.
 async fn upsert_channel_videos(
     pool: &SqlitePool,
     channel_id: &str,
@@ -208,27 +218,36 @@ async fn upsert_channel_videos(
     now: i64,
     source: &str,
 ) -> AppResult<UpsertStats> {
+    use std::collections::HashMap;
+
     let mut tx = pool.begin().await?;
     let mut stats = UpsertStats::default();
 
-    for item in items {
-        // Detect insert vs update vs untombstone for stats purposes. A
-        // single round-trip with `RETURNING` would be cleaner but
-        // SQLite's RETURNING-after-upsert reports the row regardless of
-        // whether it was inserted or updated, so we look first.
-        #[derive(sqlx::FromRow)]
-        struct ExistingRow {
-            is_deleted: i64,
+    // Pre-fetch prior is_deleted state for every video_id in the
+    // batch in one query, so the per-item branch is an O(1) HashMap
+    // lookup rather than an extra round-trip to SQLite per item.
+    let existing: HashMap<String, i64> = if items.is_empty() {
+        HashMap::new()
+    } else {
+        // SQLite's parameter limit is 999 by default; freshness
+        // batches are always far below this (RSS=15, sidecar=30).
+        // Build the IN clause dynamically so we still bind each
+        // video_id (no string interpolation).
+        let placeholders = std::iter::repeat_n("?", items.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT video_id, is_deleted FROM channel_videos \
+              WHERE channel_id = ? AND video_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (String, i64)>(&sql).bind(channel_id);
+        for item in items {
+            q = q.bind(&item.video_id);
         }
-        let prior: Option<ExistingRow> = sqlx::query_as(
-            "SELECT is_deleted FROM channel_videos \
-             WHERE channel_id = ? AND video_id = ?",
-        )
-        .bind(channel_id)
-        .bind(&item.video_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        q.fetch_all(&mut *tx).await?.into_iter().collect()
+    };
 
+    for item in items {
         sqlx::query(
             "INSERT INTO channel_videos \
                  (channel_id, video_id, title, channel_title, published_at, published_raw, \
@@ -256,9 +275,9 @@ async fn upsert_channel_videos(
         .execute(&mut *tx)
         .await?;
 
-        match prior {
+        match existing.get(&item.video_id) {
             None => stats.inserted += 1,
-            Some(r) if r.is_deleted != 0 => stats.untombstoned += 1,
+            Some(&prior_is_deleted) if prior_is_deleted != 0 => stats.untombstoned += 1,
             Some(_) => stats.updated += 1,
         }
     }
@@ -782,14 +801,9 @@ mod tests {
 
         upsert_channel(&pool, "UC1").await.unwrap();
         upsert_channel(&pool, "UC2").await.unwrap();
-        upsert_channel_videos_from_rss(
-            &pool,
-            "UC1",
-            &[mk_item("vA", 100), mk_item("vB", 200)],
-            0,
-        )
-        .await
-        .unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
         upsert_channel_videos_from_rss(&pool, "UC2", &[mk_item("vC", 300)], 0)
             .await
             .unwrap();
@@ -822,14 +836,9 @@ mod tests {
         let pool = setup_db().await;
         let child = insert_child(&pool, "kid").await;
         upsert_channel(&pool, "UC1").await.unwrap();
-        upsert_channel_videos_from_rss(
-            &pool,
-            "UC1",
-            &[mk_item("vA", 100), mk_item("vB", 200)],
-            0,
-        )
-        .await
-        .unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
         allow_channel(&pool, child, "UC1").await;
 
         // Tombstone vB.
@@ -886,14 +895,9 @@ mod tests {
         let pool = setup_db().await;
         let child = insert_child(&pool, "kid").await;
         upsert_channel(&pool, "UC1").await.unwrap();
-        upsert_channel_videos_from_rss(
-            &pool,
-            "UC1",
-            &[mk_item("vA", 100), mk_item("vB", 200)],
-            0,
-        )
-        .await
-        .unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
         allow_channel(&pool, child, "UC1").await;
 
         sqlx::query(
@@ -1080,13 +1084,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "UPDATE channel_sync_state SET rss_next_poll_at = ? WHERE channel_id = 'UCq3'",
-        )
-        .bind(now + 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE channel_sync_state SET rss_next_poll_at = ? WHERE channel_id = 'UCq3'")
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .unwrap();
         record_sidecar_fallback_dispatched(&pool, "UCq3", now - 600)
             .await
             .unwrap();

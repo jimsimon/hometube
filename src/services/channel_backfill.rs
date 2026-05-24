@@ -469,8 +469,8 @@ async fn run_backfill_for(
         }
     };
 
-    let newly_observed = apply_backfill_entries(pool, channel_id, started_at, &result.entries, bcfg)
-        .await?;
+    let newly_observed =
+        apply_backfill_entries(pool, channel_id, started_at, &result.entries, bcfg).await?;
 
     // Tail-call: enqueue a slow prefetch of the thumbnails for any
     // newly-observed videos. Best-effort — failures are logged but
@@ -487,15 +487,36 @@ async fn run_backfill_for(
     Ok(())
 }
 
+/// User-Agent sent on the thumbnail prefetch HTTP requests. Mirrors a
+/// modern desktop browser instead of the default `reqwest/x.y.z` so
+/// thousands of requests to `i.ytimg.com` from one host don't carry
+/// an obvious automation fingerprint. (`i.ytimg.com` is YouTube's
+/// thumbnail CDN; ordinary browsers fetching `<img src>` would set a
+/// User-Agent like this one.)
+const PREFETCH_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/126.0.0.0 Safari/537.36";
+
 /// Slow-rate background fetcher that populates the `thumbnail_cache`
 /// for a batch of newly-observed videos. ~1 request/second; on
 /// failure (network, 4xx) we just skip the video and continue —
 /// `GET /api/proxy/thumbnail/:videoId` will fall back to the
 /// on-demand fetch path.
+///
+/// Spawned via `tokio::spawn` from `run_backfill_for` without
+/// JoinHandle tracking. On runtime shutdown the prefetch is silently
+/// dropped mid-batch, which is acceptable because:
+/// - The thumbnail cache is a pure performance optimisation; missing
+///   entries fall back to the proxy on-demand path.
+/// - Newly-observed videos that miss prefetching will be picked up
+///   organically the next time a child renders the channel page.
+/// - The next backfill of the same channel will re-observe the same
+///   videos and re-enqueue prefetching from scratch.
 async fn prefetch_thumbnails(pool: &SqlitePool, cache_dir: &str, video_ids: &[String]) {
     use std::time::Duration as StdDuration;
     let client = match reqwest::Client::builder()
         .timeout(StdDuration::from_secs(15))
+        .user_agent(PREFETCH_USER_AGENT)
         .build()
     {
         Ok(c) => c,
@@ -508,14 +529,13 @@ async fn prefetch_thumbnails(pool: &SqlitePool, cache_dir: &str, video_ids: &[St
         // Skip if a fresh entry already exists — could have been
         // populated by a concurrent proxy request between the
         // observation and the prefetch.
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT file_path FROM thumbnail_cache WHERE video_id = ?",
-        )
-        .bind(video_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT file_path FROM thumbnail_cache WHERE video_id = ?")
+                .bind(video_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
         if existing.is_some() {
             continue;
         }
@@ -588,14 +608,13 @@ pub async fn apply_backfill_entries(
     // extra SELECT per row. For a 10k-video channel this collapses
     // ~10k DB round-trips into one — meaningful inside a single tx
     // where SQLite holds an exclusive write lock the whole time.
-    let existing_ids: HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT video_id FROM channel_videos WHERE channel_id = ?",
-    )
-    .bind(channel_id)
-    .fetch_all(&mut *tx)
-    .await?
-    .into_iter()
-    .collect();
+    let existing_ids: HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT video_id FROM channel_videos WHERE channel_id = ?")
+            .bind(channel_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
 
     let mut observed_ids: Vec<String> = Vec::with_capacity(entries.len());
     // `new_video_ids` is returned to the caller so it can enqueue
@@ -606,7 +625,10 @@ pub async fn apply_backfill_entries(
     let mut new_count: i64 = 0;
     for entry in entries {
         let (published_at, published_raw) = parse_upload_date(entry);
-        let title = entry.title.clone().unwrap_or_else(|| entry.video_id.clone());
+        let title = entry
+            .title
+            .clone()
+            .unwrap_or_else(|| entry.video_id.clone());
         let thumbnail_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", entry.video_id);
         let duration_s: Option<i64> = entry.duration.map(|d| d.round() as i64);
 
@@ -661,34 +683,63 @@ pub async fn apply_backfill_entries(
     // property — without it, RSS upserts that land mid-backfill would
     // get tombstoned at commit.
     //
-    // We build the JSON array client-side rather than using `json_each`
-    // on a bound parameter so the SQL stays simple and portable.
-    let observed_json = serde_json::to_string(&observed_ids).unwrap_or_else(|_| "[]".to_string());
+    // Implementation: stage the observed video_ids into a transaction-
+    // local temporary table and `NOT IN (SELECT … FROM tmp)`. For a
+    // 10k-video channel this avoids serialising ~150 KB of JSON
+    // through a single SQLite parameter and lets the query planner
+    // use a real index/hash join instead of `json_each`.
+    sqlx::query(
+        "CREATE TEMP TABLE _backfill_observed (video_id TEXT PRIMARY KEY) WITHOUT ROWID",
+    )
+    .execute(&mut *tx)
+    .await?;
+    for vid in &observed_ids {
+        sqlx::query("INSERT OR IGNORE INTO _backfill_observed(video_id) VALUES (?)")
+            .bind(vid)
+            .execute(&mut *tx)
+            .await?;
+    }
     let removed_result = sqlx::query(
         "UPDATE channel_videos \
             SET is_deleted = 1 \
           WHERE channel_id = ?1 \
             AND is_deleted = 0 \
             AND first_seen_at < ?2 \
-            AND video_id NOT IN (SELECT value FROM json_each(?3))",
+            AND video_id NOT IN (SELECT video_id FROM _backfill_observed)",
     )
     .bind(channel_id)
     .bind(started_at)
-    .bind(&observed_json)
     .execute(&mut *tx)
     .await?;
     let removed_count = removed_result.rows_affected() as i64;
+    // Drop the temp table so a second `apply_backfill_entries` call
+    // on the same connection (rare but possible in test setups) can
+    // re-create it cleanly.
+    sqlx::query("DROP TABLE _backfill_observed")
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
     // Schedule the next re-backfill with ±5% jitter so a wave of
     // simultaneously-completed channels doesn't synchronise on the
     // 30-day boundary.
+    //
+    // We write `backfill_status = 'pending'` directly (skipping the
+    // intermediate `'complete'`). The old two-step
+    // ('running' → 'complete' → 'pending') was vulnerable to a
+    // wedged-row scenario: if the process crashed between the two
+    // UPDATEs, the row stayed `'complete'` and was never re-claimable
+    // by the loop (which only matches `'pending'` and stale
+    // `'running'`). `backfill_last_completed_at` carries the
+    // completion-tracking semantic on its own — `'complete'` as a
+    // status value is redundant. The status `CHECK` constraint still
+    // permits it for forward compatibility / older row history.
     let next_at = unix_now() + jittered_interval(bcfg.re_backfill_interval, 0.05);
     let observed_total = entries.len() as i64;
     sqlx::query(
         "UPDATE channel_sync_state SET \
-             backfill_status                  = 'complete', \
+             backfill_status                  = 'pending', \
              backfill_last_completed_at       = ?, \
              backfill_last_error              = NULL, \
              backfill_consecutive_errors      = 0, \
@@ -704,19 +755,6 @@ pub async fn apply_backfill_entries(
     .bind(observed_total)
     .bind(new_count)
     .bind(removed_count)
-    .bind(channel_id)
-    .execute(pool)
-    .await?;
-
-    // After a successful run, immediately flip status back to 'pending'
-    // so the next iteration of the loop *could* re-enter it (no row is
-    // due though, because backfill_next_at is in the future). Keeping
-    // 'complete' as a terminal state would require a separate sweep
-    // to revive due rows, which is overhead with no benefit.
-    sqlx::query(
-        "UPDATE channel_sync_state SET backfill_status = 'pending' \
-         WHERE channel_id = ? AND backfill_status = 'complete'",
-    )
     .bind(channel_id)
     .execute(pool)
     .await?;
@@ -769,13 +807,12 @@ async fn record_failure(
 
     if attempt >= limit {
         // Shelve and (optionally) notify.
-        let channel_title: Option<String> = sqlx::query_scalar(
-            "SELECT channel_title FROM channel_sync_state WHERE channel_id = ?",
-        )
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
+        let channel_title: Option<String> =
+            sqlx::query_scalar("SELECT channel_title FROM channel_sync_state WHERE channel_id = ?")
+                .bind(channel_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten();
         sqlx::query(
             "UPDATE channel_sync_state SET \
                  backfill_status              = 'shelved', \
@@ -836,16 +873,37 @@ async fn record_failure(
 }
 
 /// Best-effort classification: does the error look like a YouTube
-/// "channel does not exist" signal? Cheap pattern match against the
-/// stderr tail produced by yt-dlp; if anything looks like a 404 / not
-/// found / unavailable, treat it as terminal.
+/// "channel permanently gone" signal?
+///
+/// Single-strike shelves the channel for 365 days, so this match must
+/// be **conservative** — we'd rather miss a real not-found (and let
+/// the normal exponential backoff drive retries) than mis-classify a
+/// transient error as terminal and lock the channel out for a year.
+///
+/// Tightened patterns:
+///
+/// - `"this channel does not exist"` / `"channel does not exist"` —
+///   exact yt-dlp message for a known-dead channel ID.
+/// - `"this channel was terminated"` — exact yt-dlp message for a
+///   policy-removed channel.
+/// - `"http error 404"` / `" 404 "` / `"status 404"` — anchored on
+///   the actual HTTP-error wording so we don't match an incidental
+///   `"404"` substring inside a URL or stack trace.
+///
+/// Removed the bare `"not found"` (matches yt-dlp's
+/// `"requested format not found"` for transient extractor failures)
+/// and the bare `"unavailable"` (yt-dlp says
+/// `"Sign in to confirm you're not a bot. Use --cookies-from-browser
+///  …"` on bot walls, and many transient errors include the word
+/// "unavailable" e.g. `"YouTube said: The service is unavailable"`).
 fn is_not_found_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("does not exist")
-        || lower.contains("not found")
-        || lower.contains("404")
+    lower.contains("channel does not exist")
         || lower.contains("this channel was terminated")
-        || lower.contains("unavailable")
+        || lower.contains("http error 404")
+        || lower.contains(" 404 ")
+        || lower.contains("status 404")
+        || lower.contains("returned 404")
 }
 
 /// Best-effort classification: does the error look like a YouTube
@@ -1086,7 +1144,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(vn, 0, "channel_videos cascade-deleted with channel_sync_state");
+        assert_eq!(
+            vn, 0,
+            "channel_videos cascade-deleted with channel_sync_state"
+        );
     }
 
     #[tokio::test]
@@ -1265,7 +1326,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(first, 1_000, "first_seen_at must be preserved");
-        assert_eq!(last, 2_500, "last_seen_at must be bumped to started_at of latest run");
+        assert_eq!(
+            last, 2_500,
+            "last_seen_at must be bumped to started_at of latest run"
+        );
     }
 
     #[tokio::test]
@@ -1446,9 +1510,9 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        // Loop normalises 'complete' → 'pending' on the next tick so
-        // the row remains claimable. The completion timestamp + next-at
-        // are still set.
+        // Successful completion writes 'pending' directly (no
+        // intermediate 'complete' status). The completion timestamp +
+        // next-at are still set so the loop knows when to re-run.
         assert_eq!(status, "pending");
         assert!(completed.is_some());
         assert!(completed.unwrap() >= before && completed.unwrap() <= after);
@@ -1673,11 +1737,41 @@ mod tests {
 
     #[test]
     fn is_not_found_error_classifies_404_signals() {
+        // Real yt-dlp / HTTP messages that genuinely indicate a
+        // permanently-gone channel.
         assert!(is_not_found_error("HTTP Error 404: Not Found"));
         assert!(is_not_found_error("This channel does not exist"));
         assert!(is_not_found_error("This channel was terminated"));
-        assert!(!is_not_found_error("Sign in to confirm you're not a bot"));
+        assert!(is_not_found_error("server returned 404 not found"));
+
+        // Negatives: transient errors that contain similar words but
+        // must NOT shelve the channel for a year. Each of these was
+        // matched by the prior overly-broad classifier.
+        assert!(
+            !is_not_found_error("Sign in to confirm you're not a bot"),
+            "bot-wall messages must not trigger not-found"
+        );
         assert!(!is_not_found_error("rate-limit"));
+        assert!(
+            !is_not_found_error("YouTube said: The service is unavailable"),
+            "transient 'unavailable' must not trigger not-found"
+        );
+        assert!(
+            !is_not_found_error("Video unavailable: This video is unavailable in your country"),
+            "geo-blocked 'unavailable' must not trigger not-found"
+        );
+        assert!(
+            !is_not_found_error("requested format not found"),
+            "extractor-level 'not found' must not match"
+        );
+        assert!(
+            !is_not_found_error("https://example.com/some/path/404page.html"),
+            "incidental 404 inside a URL must not match"
+        );
+        assert!(
+            !is_not_found_error("Error fetching video 4042: timeout"),
+            "incidental 404 inside numeric content must not match"
+        );
     }
 
     #[test]

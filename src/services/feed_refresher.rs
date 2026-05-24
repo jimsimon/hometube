@@ -291,9 +291,7 @@ impl RefresherConfig {
                 KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S => {
                     raw.sidecar_fallback_archived_interval_s = Some(v)
                 }
-                KEY_SIDECAR_DORMANT_THRESHOLD_DAYS => {
-                    raw.sidecar_dormant_threshold_days = Some(v)
-                }
+                KEY_SIDECAR_DORMANT_THRESHOLD_DAYS => raw.sidecar_dormant_threshold_days = Some(v),
                 KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS => {
                     raw.sidecar_archived_threshold_days = Some(v)
                 }
@@ -435,8 +433,7 @@ pub const RANGE_CHANNEL_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
 pub const RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
 /// Archived interval extends up to 1 week — a never-publishing channel
 /// can tolerate a longer gap on the riskier transport.
-pub const RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: std::ops::RangeInclusive<u64> =
-    60..=604_800;
+pub const RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=604_800;
 /// Recency bucket threshold (days). 1..3650 covers "1 day" up to
 /// "10 years", which is plenty of headroom.
 pub const RANGE_SIDECAR_THRESHOLD_DAYS: std::ops::RangeInclusive<u64> = 1..=3_650;
@@ -881,8 +878,7 @@ async fn run_sidecar_fallback(
             };
             let next =
                 now + backoff_for_attempt(source.rss_consecutive_errors + 1, cfg.channel_interval);
-            feed_cache::record_poll_failure(pool, &source.channel_id, &combined, next, now)
-                .await?;
+            feed_cache::record_poll_failure(pool, &source.channel_id, &combined, next, now).await?;
             warn!(error = %combined, "sidecar fallback errored; recording soft failure");
         }
     }

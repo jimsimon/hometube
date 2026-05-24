@@ -48,7 +48,11 @@ fn write_ytdlp_shim(json_lines: &[&str]) -> std::path::PathBuf {
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
         writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "# Ignore every argument — we always emit the same canned output.").unwrap();
+        writeln!(
+            f,
+            "# Ignore every argument — we always emit the same canned output."
+        )
+        .unwrap();
         for line in json_lines {
             // Escape single quotes so the JSON survives embedding
             // inside the shell single-quoted string.
@@ -242,10 +246,11 @@ async fn full_subprocess_to_db_pipeline_populates_channel_videos() {
             .unwrap();
     assert_eq!(n, 2);
 
-    let titles: Vec<String> =
-        sqlx::query_scalar("SELECT title FROM channel_videos WHERE channel_id = 'UCpipe' ORDER BY video_id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let titles: Vec<String> = sqlx::query_scalar(
+        "SELECT title FROM channel_videos WHERE channel_id = 'UCpipe' ORDER BY video_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(titles, vec!["Alpha", "Beta"]);
 }

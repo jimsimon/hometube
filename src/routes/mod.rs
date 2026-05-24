@@ -155,8 +155,7 @@ pub fn router(state: AppState) -> Router {
         // Channel backfill (parent-only)
         .route(
             "/api/admin/channel-backfill/settings",
-            get(channel_backfill::admin_get_settings)
-                .put(channel_backfill::admin_put_settings),
+            get(channel_backfill::admin_get_settings).put(channel_backfill::admin_put_settings),
         )
         .route(
             "/api/admin/channel-backfill/run-now/{channel_id}",

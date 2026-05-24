@@ -81,6 +81,51 @@ pub async fn list_channels(
     Ok(Json(rows))
 }
 
+/// Maximum length for the body-supplied `channel_title`. YouTube
+/// caps channel names at 100 chars; we accept up to 256 to leave room
+/// for unicode normalisation differences.
+const MAX_CHANNEL_TITLE_LEN: usize = 256;
+/// Maximum length for the body-supplied `channel_id`. Real YouTube
+/// IDs are 24 chars (`UC` + 22 base64url chars); 64 is comfortable.
+const MAX_CHANNEL_ID_LEN: usize = 64;
+/// Maximum length for the body-supplied thumbnail URL. The longest
+/// legitimate `i.ytimg.com` thumbnail URL is well under 200 chars.
+/// Reject anything past 2 KiB to prevent payload bloat in
+/// `allowlisted_channels.channel_thumbnail_url`.
+const MAX_THUMBNAIL_URL_LEN: usize = 2048;
+/// Maximum length for the body-supplied `description`. YouTube caps
+/// channel descriptions at 5,000 chars; we accept up to 8,192 for
+/// unicode headroom.
+const MAX_DESCRIPTION_LEN: usize = 8192;
+
+/// Validate that a body-supplied thumbnail URL is `https://` and
+/// (loosely) a YouTube-controlled host. Body data flows from the
+/// parent search response which is generated server-side from a
+/// sidecar call to `youtubei.js` — legitimate URLs are always under
+/// `*.ytimg.com` or `*.googleusercontent.com`. Rejecting anything
+/// else protects child UIs from rendering an attacker-controlled
+/// host via `<img src>` if a malicious parent (or compromised parent
+/// session) injects a body-data forgery.
+fn is_safe_thumbnail_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.len() > MAX_THUMBNAIL_URL_LEN {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    // Take the host segment up to the next '/' or end.
+    let host = rest.split('/').next().unwrap_or("");
+    // Strip any optional userinfo or port.
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host_lower = host.to_ascii_lowercase();
+    host_lower.ends_with(".ytimg.com")
+        || host_lower == "ytimg.com"
+        || host_lower.ends_with(".googleusercontent.com")
+        || host_lower == "googleusercontent.com"
+}
+
 /// `POST /api/children/:id/allowlist/channels`.
 pub async fn add_channel(
     State(state): State<AppState>,
@@ -90,22 +135,72 @@ pub async fn add_channel(
 ) -> AppResult<Json<AllowlistedChannel>> {
     require_child_id(&state, child_id).await?;
 
+    // Reject obviously-bad channel_id early — keeps us from
+    // round-tripping unbounded blobs through the rest of the handler
+    // and the sidecar.
+    let body_channel_id = body.channel_id.trim();
+    if body_channel_id.is_empty() {
+        return Err(AppError::BadRequest("channel_id required".into()));
+    }
+    if body_channel_id.len() > MAX_CHANNEL_ID_LEN {
+        return Err(AppError::BadRequest(format!(
+            "channel_id too long (max {MAX_CHANNEL_ID_LEN} chars)"
+        )));
+    }
+
     // 1. Try body data first (trim + filter empty per add_video convention).
     let body_title = body
         .channel_title
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    if let Some(t) = body_title {
+        if t.chars().count() > MAX_CHANNEL_TITLE_LEN {
+            return Err(AppError::BadRequest(format!(
+                "channel_title too long (max {MAX_CHANNEL_TITLE_LEN} chars)"
+            )));
+        }
+    }
     let body_thumb = body
         .channel_thumbnail_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    if let Some(u) = body_thumb {
+        // Reject body-supplied thumbnail URLs that don't point at a
+        // YouTube-controlled host. Rendered child-side via <img src>
+        // so this is a small-but-real XSS/SSRF surface if a malicious
+        // parent injects a forged body. The sidecar-fallback path
+        // (when body_thumb is None) is gated by the sidecar's own
+        // validation upstream and is trusted.
+        if !is_safe_thumbnail_url(u) {
+            return Err(AppError::BadRequest(
+                "channel_thumbnail_url must be https://*.ytimg.com or \
+                 https://*.googleusercontent.com (use sidecar lookup if you \
+                 don't have a trusted URL)"
+                    .into(),
+            ));
+        }
+    }
     let body_desc = body
         .description
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let body_desc = if let Some(d) = body_desc {
+        if d.len() > MAX_DESCRIPTION_LEN {
+            // Truncate rather than reject — channel descriptions are
+            // best-effort metadata and a legitimate channel with a
+            // very long bio shouldn't fail the allowlist add. The
+            // length cap is here to bound the column size, not to
+            // reject content.
+            Some(&d[..MAX_DESCRIPTION_LEN.min(d.len())])
+        } else {
+            Some(d)
+        }
+    } else {
+        None
+    };
 
     // 2. Only call the sidecar if essential body data is missing.
     //    Title is the gate — if present, we trust the rest of the body too.
@@ -113,7 +208,7 @@ pub async fn add_channel(
         None
     } else {
         let yt = YoutubeClient::from_db(&state.db).await?;
-        yt.get_channel(&body.channel_id).await.ok().flatten()
+        yt.get_channel(body_channel_id).await.ok().flatten()
     };
 
     // 3. Combine, preferring body, then sidecar, then error if both empty.
@@ -127,9 +222,10 @@ pub async fn add_channel(
         .ok_or_else(|| {
             AppError::BadRequest("channel_title required (sidecar lookup also failed)".into())
         })?;
-    let thumb = body_thumb
-        .map(str::to_string)
-        .or_else(|| info.as_ref().and_then(|i| preferred_thumbnail(&i.thumbnails)));
+    let thumb = body_thumb.map(str::to_string).or_else(|| {
+        info.as_ref()
+            .and_then(|i| preferred_thumbnail(&i.thumbnails))
+    });
     let description = body_desc.map(str::to_string).or_else(|| {
         info.as_ref()
             .map(|i| i.description.trim().to_string())
@@ -142,7 +238,7 @@ pub async fn add_channel(
     let canonical_id = info
         .as_ref()
         .map(|i| i.id.clone())
-        .unwrap_or_else(|| body.channel_id.clone());
+        .unwrap_or_else(|| body_channel_id.to_string());
 
     let row: AllowlistedChannel = sqlx::query_as(
         "INSERT INTO allowlisted_channels \

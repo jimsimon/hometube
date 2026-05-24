@@ -142,7 +142,18 @@ pub async fn list_videos(
         .and_then(decode_page_token)
         .map(|c| c.offset)
         .unwrap_or(0);
-    let sort = q.sort.as_deref().unwrap_or("latest").to_string();
+
+    // Whitelist `sort` so typos surface as a clear 400 instead of
+    // silently degrading to `latest` with no warning. The values
+    // accepted here must match the CASE expression in the SQL below.
+    let sort = match q.sort.as_deref().unwrap_or("latest") {
+        "latest" | "most_viewed" => q.sort.as_deref().unwrap_or("latest").to_string(),
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown sort '{other}' — accepted values: latest, most_viewed"
+            )));
+        }
+    };
 
     #[derive(sqlx::FromRow)]
     struct Row {

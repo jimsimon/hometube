@@ -79,12 +79,13 @@ pub async fn stats(State(state): State<AppState>) -> AppResult<Json<CacheStats>>
     let max_size_bytes = video_cache::cache_size_preset_to_bytes(&max_size_label);
     let unlimited = max_size_label.eq_ignore_ascii_case("Unlimited");
 
-    let thumb_stats = thumbnail_store::stats(&state.db).await.unwrap_or(
-        thumbnail_store::ThumbnailCacheStats {
-            entry_count: 0,
-            total_bytes: 0,
-        },
-    );
+    let thumb_stats =
+        thumbnail_store::stats(&state.db)
+            .await
+            .unwrap_or(thumbnail_store::ThumbnailCacheStats {
+                entry_count: 0,
+                total_bytes: 0,
+            });
     let thumb_max = thumbnail_store::configured_max_bytes(&state.db).await;
     Ok(Json(CacheStats {
         total_bytes,
