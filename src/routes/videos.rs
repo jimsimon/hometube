@@ -947,9 +947,29 @@ pub async fn get_thumbnail(
         .unwrap_or("image/jpeg")
         .to_string();
 
-    // Only populate the cache for successful 2xx responses. Failed
-    // upstream responses are streamed through but not cached.
-    if status.is_success() {
+    // Only populate the cache for successful 2xx responses, AND only
+    // when the upstream `Content-Length` is small enough that
+    // buffering the whole body to disk is safe. Above that ceiling
+    // (or when Content-Length is missing) we stream straight through
+    // to the client without caching — the cache fills opportunistically
+    // on a future request whose upstream returns a normally-sized
+    // image. This protects against an upstream misconfiguration (or
+    // path-traversal-to-a-large-blob attack via the video_id) turning
+    // a single thumbnail fetch into multi-megabyte memory growth on
+    // our process.
+    //
+    // Real `i.ytimg.com` thumbnails are 5–50 KB; the 1 MB ceiling is
+    // 20× headroom while still being safe to buffer.
+    const THUMBNAIL_CACHE_MAX_BYTES: u64 = 1024 * 1024;
+    let content_length: Option<u64> = res
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+    let cacheable =
+        status.is_success() && matches!(content_length, Some(n) if n <= THUMBNAIL_CACHE_MAX_BYTES);
+
+    if cacheable {
         let bytes = res.bytes().await.map_err(AppError::Http)?;
         // Best-effort cache write; failures are logged inside put()
         // and don't fail the request.
@@ -967,6 +987,13 @@ pub async fn get_thumbnail(
             .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
         Ok(response)
     } else {
+        if status.is_success() {
+            tracing::debug!(
+                %video_id,
+                ?content_length,
+                "thumbnail: upstream content too large to cache (or Content-Length missing); streaming through"
+            );
+        }
         let stream = res.bytes_stream().map_err(std::io::Error::other);
         let body = Body::from_stream(stream);
         let mut response = Response::new(body);

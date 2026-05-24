@@ -281,8 +281,8 @@ pub async fn add_channel(
 
 /// `DELETE /api/children/:id/allowlist/channels/:channelId`.
 ///
-/// Performs the allowlist delete and the optional `channel_sync_state`
-/// + `channel_videos` GC inside a single transaction so an observer
+/// Performs the allowlist delete and the optional channel_sync_state
+/// and channel_videos GC inside a single transaction so an observer
 /// can never witness "no child references this channel but
 /// channel_sync_state still holds it" — the diagnostics page and the
 /// refresher both see a consistent view.

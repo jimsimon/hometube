@@ -688,11 +688,9 @@ pub async fn apply_backfill_entries(
     // 10k-video channel this avoids serialising ~150 KB of JSON
     // through a single SQLite parameter and lets the query planner
     // use a real index/hash join instead of `json_each`.
-    sqlx::query(
-        "CREATE TEMP TABLE _backfill_observed (video_id TEXT PRIMARY KEY) WITHOUT ROWID",
-    )
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("CREATE TEMP TABLE _backfill_observed (video_id TEXT PRIMARY KEY) WITHOUT ROWID")
+        .execute(&mut *tx)
+        .await?;
     for vid in &observed_ids {
         sqlx::query("INSERT OR IGNORE INTO _backfill_observed(video_id) VALUES (?)")
             .bind(vid)
@@ -910,17 +908,23 @@ fn is_not_found_error(err: &str) -> bool {
 /// bot-check signal? Used by callers/tests to verify the loop handles
 /// these correctly (currently all classified failures go through the
 /// generic retry/shelve path; this is reserved for future routing).
+///
+/// Tightened to avoid the same loose-substring traps as
+/// [`is_not_found_error`]: HTTP status codes match on
+/// `"http error 403"` / `"http error 429"` rather than the bare
+/// numbers (which appear in URLs and timestamps).
 #[allow(dead_code)]
 pub(crate) fn is_bot_check_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("sign in")
-        || lower.contains("sign-in")
-        || lower.contains("consent")
+    lower.contains("sign in to confirm")
+        || lower.contains("consent.youtube.com")
         || lower.contains("captcha")
-        || lower.contains("403")
-        || lower.contains("429")
-        || lower.contains("rate")
-        || lower.contains("forbidden")
+        || lower.contains("http error 403")
+        || lower.contains("http error 429")
+        || lower.contains("status 403")
+        || lower.contains("status 429")
+        || lower.contains("rate-limit")
+        || lower.contains("rate limit")
 }
 
 /// Parse yt-dlp's `upload_date` field (typically `YYYYMMDD`) into a
@@ -1776,9 +1780,24 @@ mod tests {
 
     #[test]
     fn is_bot_check_error_classifies_well_known_signals() {
+        // Realistic yt-dlp / HTTP messages that genuinely indicate a
+        // bot-wall block.
         assert!(is_bot_check_error("Sign in to confirm you're not a bot"));
-        assert!(is_bot_check_error("Got HTTP 429"));
+        assert!(is_bot_check_error("HTTP Error 429: Too Many Requests"));
+        assert!(is_bot_check_error("HTTP Error 403: Forbidden"));
+        assert!(is_bot_check_error("server returned status 429"));
         assert!(is_bot_check_error("consent.youtube.com redirect"));
+        assert!(is_bot_check_error("captcha required"));
+        assert!(is_bot_check_error("rate-limit exceeded"));
+
+        // Negatives: messages that contain similar-looking words but
+        // are NOT bot walls.
         assert!(!is_bot_check_error("HTTP Error 404"));
+        assert!(!is_bot_check_error(
+            "Error 429 ms elapsed during DNS lookup"
+        ));
+        assert!(!is_bot_check_error(
+            "https://example.com/api/v1/403/something"
+        ));
     }
 }

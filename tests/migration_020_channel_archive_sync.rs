@@ -193,15 +193,16 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
     // 4b. channel_sync_state contains both channels with poll bookkeeping
     //     migrated and channel_thumbnail_url backfilled from
     //     allowlisted_channels.
-    let states: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        i64,
-        Option<String>,
-    )> = sqlx::query_as(
+    type SyncStateRow = (
+        String,         // channel_id
+        Option<String>, // channel_title
+        Option<String>, // channel_thumbnail_url
+        Option<String>, // rss_etag
+        Option<i64>,    // rss_last_success_at
+        i64,            // rss_consecutive_errors
+        Option<String>, // rss_last_error
+    );
+    let states: Vec<SyncStateRow> = sqlx::query_as(
         "SELECT channel_id, channel_title, channel_thumbnail_url, rss_etag, \
                 rss_last_success_at, rss_consecutive_errors, rss_last_error \
            FROM channel_sync_state ORDER BY channel_id",
@@ -230,7 +231,17 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
 
     // 4c. channel_videos contains all three items. Rows with a NULL
     //     channel_id in feed_source_items fall back to the source_id.
-    let videos: Vec<(String, String, String, String, i64, i64, String, i64)> = sqlx::query_as(
+    type VideoRow = (
+        String, // channel_id
+        String, // video_id
+        String, // title
+        String, // source
+        i64,    // first_seen_at
+        i64,    // last_seen_at
+        String, // published_raw (via COALESCE)
+        i64,    // is_deleted
+    );
+    let videos: Vec<VideoRow> = sqlx::query_as(
         "SELECT channel_id, video_id, title, source, first_seen_at, last_seen_at, \
                 COALESCE(published_raw, ''), is_deleted \
            FROM channel_videos ORDER BY channel_id, video_id",

@@ -405,9 +405,9 @@ mod tests {
         let dir = cache.path().to_str().unwrap();
 
         // Three entries, each ~100 bytes, total ~300 bytes.
-        put(&pool, dir, "v1", &vec![0u8; 100]).await.unwrap();
-        put(&pool, dir, "v2", &vec![0u8; 100]).await.unwrap();
-        put(&pool, dir, "v3", &vec![0u8; 100]).await.unwrap();
+        put(&pool, dir, "v1", &[0u8; 100]).await.unwrap();
+        put(&pool, dir, "v2", &[0u8; 100]).await.unwrap();
+        put(&pool, dir, "v3", &[0u8; 100]).await.unwrap();
 
         // Force v2 and v3 to look "older" than v1 so v1 survives. We
         // back-date their last_accessed_at; v1 stays at "now".
@@ -452,10 +452,10 @@ mod tests {
     async fn stats_aggregates_rows_and_bytes() {
         let pool = setup_db().await;
         let cache = TempDir::new().unwrap();
-        put(&pool, cache.path().to_str().unwrap(), "vA", &vec![0u8; 100])
+        put(&pool, cache.path().to_str().unwrap(), "vA", &[0u8; 100])
             .await
             .unwrap();
-        put(&pool, cache.path().to_str().unwrap(), "vB", &vec![0u8; 200])
+        put(&pool, cache.path().to_str().unwrap(), "vB", &[0u8; 200])
             .await
             .unwrap();
         let s = stats(&pool).await.unwrap();

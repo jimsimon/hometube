@@ -45,8 +45,18 @@ CREATE INDEX idx_channel_videos_channel_published
     ON channel_videos(channel_id, published_at DESC);
 CREATE INDEX idx_channel_videos_last_seen
     ON channel_videos(last_seen_at);
-CREATE INDEX idx_channel_videos_not_deleted_published
-    ON channel_videos(channel_id, is_deleted, published_at DESC);
+
+-- Partial index: every read query that filters by `is_deleted = 0`
+-- (the New Videos feed, child search, channel browse, up-next, etc.)
+-- can use this index instead of scanning + filtering on the full
+-- `idx_channel_videos_channel_published`. A partial index is smaller
+-- (excludes tombstoned rows entirely) and the planner picks it up
+-- automatically when the query's WHERE matches the partial
+-- expression. Tombstoned rows are still indexed via the non-partial
+-- index above for the admin/diagnostic queries that need them.
+CREATE INDEX idx_channel_videos_live_channel_published
+    ON channel_videos(channel_id, published_at DESC)
+    WHERE is_deleted = 0;
 
 -- Migrate existing feed_source_items rows. fetched_at becomes both
 -- first_seen_at and last_seen_at; source defaults to 'rss' since the

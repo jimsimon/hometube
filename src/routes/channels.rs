@@ -45,7 +45,11 @@ pub async fn get_channel(
 ) -> AppResult<Json<ChannelInfo>> {
     enforce_channel_access(&state, current.id, &channel_id).await?;
 
-    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    /// Columns selected from `channel_sync_state` for the header
+    /// metadata response. Aliased to satisfy clippy's
+    /// `type_complexity` lint.
+    type HeaderRow = (String, Option<String>, Option<String>, Option<String>);
+    let row: Option<HeaderRow> = sqlx::query_as(
         "SELECT channel_id, channel_title, channel_thumbnail_url, description \
            FROM channel_sync_state WHERE channel_id = ?",
     )
@@ -119,12 +123,14 @@ pub struct ChannelVideosPage {
 /// excluded by `NOT EXISTS` subqueries in the main query, mirroring
 /// `feed_for_child`. We previously filtered post-fetch via
 /// `can_child_view`, which had two bugs:
-///   1. **N+1 queries** — up to 4 round-trips per row × `PAGE_SIZE`
-///      rows = ~120 queries per page.
-///   2. **Broken pagination** — `next_page_token` was emitted iff the
-///      *filtered* page was full, so any blocked/hidden video silently
-///      truncated the listing (`items.len() < PAGE_SIZE` ⇒ no more
-///      pages, even when thousands more were available).
+///
+/// 1. **N+1 queries** — up to 4 round-trips per row × `PAGE_SIZE`
+///    rows = ~120 queries per page.
+/// 2. **Broken pagination** — `next_page_token` was emitted iff the
+///    *filtered* page was full, so any blocked/hidden video silently
+///    truncated the listing (`items.len() < PAGE_SIZE` ⇒ no more
+///    pages, even when thousands more were available).
+///
 /// `enforce_channel_access` at the top of the handler still gates
 /// channel-level access; per-video allowlist is implicit since we
 /// only read from this channel's rows.
