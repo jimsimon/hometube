@@ -1,5 +1,9 @@
 # HomeTube
 
+[![CI](https://github.com/jimsimon/hometube/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jimsimon/hometube/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jimsimon/hometube/branch/main/graph/badge.svg)](https://codecov.io/gh/jimsimon/hometube)
+[![Latest release](https://img.shields.io/github/v/release/jimsimon/hometube?sort=semver)](https://github.com/jimsimon/hometube/releases/latest)
+[![Renovate enabled](https://img.shields.io/badge/renovate-enabled-brightgreen.svg)](https://docs.renovatebot.com/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 A self-hosted YouTube frontend for kids that gives parents fine-grained
