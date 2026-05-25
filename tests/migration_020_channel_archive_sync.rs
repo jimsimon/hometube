@@ -60,7 +60,10 @@ async fn run_up_to(pool: &SqlitePool, migrator: &Migrator, stop_before_version: 
         // wrapping here so the first `COMMIT;` inside a migration body
         // has something to close.
         pool.execute("BEGIN").await.unwrap();
-        pool.execute(&*migration.sql)
+        // `Migration::sql` is `SqlStr` in sqlx 0.9 (was `Cow<str>` in
+        // 0.8). Clone the `SqlStr` directly so we can pass it through
+        // `Executor::execute`, which requires `SqlSafeStr`.
+        pool.execute(migration.sql.clone())
             .await
             .unwrap_or_else(|e| panic!("migration {} failed: {e}", migration.version));
         // Some migrations terminate with `BEGIN;` so sqlx's outer

@@ -138,8 +138,9 @@ pub async fn poll_channel(
 /// </feed>
 /// ```
 pub fn parse_atom(xml: &str) -> Result<(Option<String>, Vec<ItemRow>), quick_xml::Error> {
+    use quick_xml::escape::unescape;
     use quick_xml::events::Event;
-    use quick_xml::Reader;
+    use quick_xml::{Reader, XmlVersion};
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -225,7 +226,10 @@ pub fn parse_atom(xml: &str) -> Result<(Option<String>, Vec<ItemRow>), quick_xml
                     if let Some(acc) = current.as_mut() {
                         for attr in e.attributes().flatten() {
                             if attr.key.local_name().as_ref() == b"url" {
-                                if let Ok(v) = attr.unescape_value() {
+                                // `unescape_value()` was deprecated in
+                                // quick-xml 0.40 in favour of the more
+                                // explicit `normalized_value(version)`.
+                                if let Ok(v) = attr.normalized_value(XmlVersion::Implicit1_0) {
                                     // Prefer the first thumbnail we see.
                                     if acc.thumbnail.is_none() {
                                         acc.thumbnail = Some(v.into_owned());
@@ -237,7 +241,15 @@ pub fn parse_atom(xml: &str) -> Result<(Option<String>, Vec<ItemRow>), quick_xml
                 }
             }
             Event::Text(t) => {
-                let text = t.unescape().unwrap_or_default().into_owned();
+                // `BytesText::unescape()` was removed in quick-xml
+                // 0.40. The equivalent is to decode the bytes with the
+                // reader's encoding (and EOL-normalise per XML 1.0)
+                // and then resolve XML predefined entities ourselves.
+                let text = t
+                    .xml_content(XmlVersion::Implicit1_0)
+                    .ok()
+                    .and_then(|cow| unescape(&cow).map(|u| u.into_owned()).ok())
+                    .unwrap_or_default();
                 match current_tag {
                     // Only record the first non-empty title we see;
                     // YouTube's feed has a single <title> at feed level,
