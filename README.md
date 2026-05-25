@@ -118,8 +118,9 @@ cd docker && docker compose up -d
 
 The Compose stack runs three containers:
 
-- **app** — the HomeTube server on port 3000 (host port configurable
-  via `HOMETUBE_PORT`)
+- **app** — the HomeTube server, listening on container port 3000 and
+  mapped to host port `30000` by default (override with
+  `HOMETUBE_PORT`)
 - **discovery** — the youtubei.js sidecar; not exposed to the host,
   reached only by `app` on the internal Docker network
 - **pot-server** — `bgutil-ytdlp-pot-provider`; helps yt-dlp clear
@@ -129,8 +130,9 @@ All three services are required. The stack also supports TrueNAS Scale
 (ElectricEel 24.10+) as a Custom App; see the comments at the top of
 `docker/docker-compose.yml` for the dataset layout.
 
-Then open <http://localhost:3000> and follow the setup wizard — it
-asks for a parent name and PIN, nothing else.
+Then open <http://localhost:30000> (or whatever you set `HOMETUBE_PORT`
+to) and follow the setup wizard — it asks for a parent name and PIN,
+nothing else.
 
 See [`docs/deployment.md`](docs/deployment.md) for the full deploy
 walkthrough, healthcheck details, backup notes, and reverse-proxy
