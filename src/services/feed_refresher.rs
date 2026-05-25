@@ -1,9 +1,11 @@
-//! Background task that keeps `feed_source_items` warm.
+//! Background task that keeps `channel_videos` warm for the freshness
+//! tier (RSS → InnerTube sidecar fallback).
 //!
-//! Picks the most-overdue sources, polls them (currently RSS-only —
-//! channels), and writes the results back via [`feed_cache`]. Drives
-//! the user-facing `/api/feed/new-videos` endpoint without it ever
-//! having to talk to YouTube.
+//! Picks the most-overdue channels, polls them via RSS (with sidecar
+//! fallback on RSS failure), and writes the results back via
+//! [`feed_cache`]. Drives the user-facing `/api/feed/new-videos`
+//! endpoint without it ever having to talk to YouTube on the request
+//! path.
 //!
 //! ### Concurrency and rate limiting
 //!
@@ -36,15 +38,17 @@ use sqlx::SqlitePool;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use crate::services::feed_cache::{self, DueSource, ItemRow, KIND_CHANNEL};
+use crate::services::feed_cache::{self, DueSource, ItemRow};
 use crate::services::youtube::{
     ChannelVideoItem as SidecarChannelVideoItem, SidecarRefresherOutcome, YoutubeClient,
 };
 use crate::services::youtube_rss::{self, PollOutcome};
 
-/// How many items the sidecar fallback asks for per source. Matches
-/// `PER_SOURCE_CAP` (the storage cap) and the RSS feed's ~15-item
-/// natural ceiling so the two paths produce comparably-sized writes.
+/// Sanity ceiling on the per-channel sidecar fallback response — caps
+/// a runaway InnerTube response. Matches the natural ~15-item ceiling
+/// of the RSS feed so RSS and sidecar produce comparably-sized writes.
+/// Vestigial since the per-source storage cap was removed in the
+/// channel_videos consolidation, but retained as a defensive ceiling.
 const SIDECAR_FALLBACK_MAX_ITEMS: u32 = 15;
 
 /// When the sidecar confirms a source is dead (`NotFound`), push its
@@ -101,12 +105,32 @@ pub const DEFAULT_DISPATCH_DELAY_MS: u64 = 2_000;
 /// sidecar starts misbehaving without restarting the process.
 pub const DEFAULT_SIDECAR_FALLBACK_ENABLED: bool = true;
 
-/// Per-source rate cap on sidecar fallbacks, in seconds. The refresher
-/// will not issue a second fallback for the same source until at
-/// least this long has passed since the last one. Prevents a multi-
-/// hour RSS outage from generating N sidecar calls per hour where N
-/// is the source count.
+/// Per-source rate cap on sidecar fallbacks for an *active* channel
+/// (most recent upload within the dormant threshold). The refresher
+/// will not issue a second fallback for the same channel until at
+/// least this long has passed since the last one.
 pub const DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S: u64 = 60 * 60;
+
+/// Per-source rate cap on sidecar fallbacks for a *dormant* channel
+/// (no uploads in the last `sidecar_dormant_threshold_days` but within
+/// `sidecar_archived_threshold_days`). 6 hours by default — a dormant
+/// channel hasn't uploaded recently, so RSS-vs-sidecar freshness
+/// matters less.
+pub const DEFAULT_SIDECAR_FALLBACK_DORMANT_INTERVAL_S: u64 = 6 * 60 * 60;
+
+/// Per-source rate cap on sidecar fallbacks for an *archived* channel
+/// (no uploads in `sidecar_archived_threshold_days`, or no uploads
+/// ever observed). 24 hours by default — the channel has gone weeks+
+/// without anything new, so the riskier transport can wait.
+pub const DEFAULT_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: u64 = 24 * 60 * 60;
+
+/// Days since the most-recent upload before a channel transitions
+/// from "active" to "dormant" (the second-tier interval kicks in).
+pub const DEFAULT_SIDECAR_DORMANT_THRESHOLD_DAYS: u64 = 30;
+
+/// Days since the most-recent upload before a channel transitions
+/// from "dormant" to "archived" (the third-tier interval kicks in).
+pub const DEFAULT_SIDECAR_ARCHIVED_THRESHOLD_DAYS: u64 = 90;
 
 /// Aggregate per-hour cap on sidecar fallbacks across the entire
 /// refresher. `0` means "no aggregate cap" (the per-source cap still
@@ -130,8 +154,19 @@ pub const KEY_BATCH_SIZE: &str = "feed_refresher_batch_size";
 pub const KEY_IDLE_TICK_S: &str = "feed_refresher_idle_tick_s";
 pub const KEY_CHANNEL_INTERVAL_S: &str = "feed_channel_interval_s";
 pub const KEY_SIDECAR_FALLBACK_ENABLED: &str = "feed_refresher_sidecar_fallback_enabled";
+/// Per-source min interval for an *active* channel (≤dormant_threshold_days
+/// since last upload). Backward-compatible with the pre-adaptive setting
+/// — operators who hand-set this still get the active-channel behaviour.
 pub const KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S: &str =
     "feed_refresher_sidecar_fallback_min_interval_s";
+pub const KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S: &str =
+    "feed_refresher_sidecar_fallback_dormant_interval_s";
+pub const KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: &str =
+    "feed_refresher_sidecar_fallback_archived_interval_s";
+pub const KEY_SIDECAR_DORMANT_THRESHOLD_DAYS: &str =
+    "feed_refresher_sidecar_dormant_threshold_days";
+pub const KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS: &str =
+    "feed_refresher_sidecar_archived_threshold_days";
 pub const KEY_SIDECAR_FALLBACK_MAX_PER_HOUR: &str = "feed_refresher_sidecar_fallback_max_per_hour";
 
 /// A snapshot of the live refresher knobs, taken once per outer-loop
@@ -146,8 +181,16 @@ pub struct RefresherConfig {
     pub channel_interval: Duration,
     /// See [`DEFAULT_SIDECAR_FALLBACK_ENABLED`].
     pub sidecar_fallback_enabled: bool,
-    /// See [`DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S`].
+    /// Per-source min interval for an *active* channel.
     pub sidecar_fallback_min_interval: Duration,
+    /// Per-source min interval for a *dormant* channel.
+    pub sidecar_fallback_dormant_interval: Duration,
+    /// Per-source min interval for an *archived* channel.
+    pub sidecar_fallback_archived_interval: Duration,
+    /// Days since last upload before "active" → "dormant".
+    pub sidecar_dormant_threshold_days: u64,
+    /// Days since last upload before "dormant" → "archived".
+    pub sidecar_archived_threshold_days: u64,
     /// See [`DEFAULT_SIDECAR_FALLBACK_MAX_PER_HOUR`]. `0` means "no
     /// aggregate cap".
     pub sidecar_fallback_max_per_hour: u64,
@@ -165,6 +208,14 @@ impl Default for RefresherConfig {
             sidecar_fallback_min_interval: Duration::from_secs(
                 DEFAULT_SIDECAR_FALLBACK_MIN_INTERVAL_S,
             ),
+            sidecar_fallback_dormant_interval: Duration::from_secs(
+                DEFAULT_SIDECAR_FALLBACK_DORMANT_INTERVAL_S,
+            ),
+            sidecar_fallback_archived_interval: Duration::from_secs(
+                DEFAULT_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S,
+            ),
+            sidecar_dormant_threshold_days: DEFAULT_SIDECAR_DORMANT_THRESHOLD_DAYS,
+            sidecar_archived_threshold_days: DEFAULT_SIDECAR_ARCHIVED_THRESHOLD_DAYS,
             sidecar_fallback_max_per_hour: DEFAULT_SIDECAR_FALLBACK_MAX_PER_HOUR,
         }
     }
@@ -183,6 +234,10 @@ pub struct RefresherConfigRaw {
     pub channel_interval_s: Option<String>,
     pub sidecar_fallback_enabled: Option<String>,
     pub sidecar_fallback_min_interval_s: Option<String>,
+    pub sidecar_fallback_dormant_interval_s: Option<String>,
+    pub sidecar_fallback_archived_interval_s: Option<String>,
+    pub sidecar_dormant_threshold_days: Option<String>,
+    pub sidecar_archived_threshold_days: Option<String>,
     pub sidecar_fallback_max_per_hour: Option<String>,
 }
 
@@ -202,7 +257,7 @@ impl RefresherConfig {
         // Single batched query rather than separate SELECTs.
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT key, value FROM app_config \
-             WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)",
+             WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(KEY_DISPATCH_DELAY_MS)
         .bind(KEY_MAX_INFLIGHT)
@@ -211,6 +266,10 @@ impl RefresherConfig {
         .bind(KEY_CHANNEL_INTERVAL_S)
         .bind(KEY_SIDECAR_FALLBACK_ENABLED)
         .bind(KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S)
+        .bind(KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S)
+        .bind(KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S)
+        .bind(KEY_SIDECAR_DORMANT_THRESHOLD_DAYS)
+        .bind(KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS)
         .bind(KEY_SIDECAR_FALLBACK_MAX_PER_HOUR)
         .fetch_all(pool)
         .await
@@ -225,6 +284,16 @@ impl RefresherConfig {
                 KEY_SIDECAR_FALLBACK_ENABLED => raw.sidecar_fallback_enabled = Some(v),
                 KEY_SIDECAR_FALLBACK_MIN_INTERVAL_S => {
                     raw.sidecar_fallback_min_interval_s = Some(v)
+                }
+                KEY_SIDECAR_FALLBACK_DORMANT_INTERVAL_S => {
+                    raw.sidecar_fallback_dormant_interval_s = Some(v)
+                }
+                KEY_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S => {
+                    raw.sidecar_fallback_archived_interval_s = Some(v)
+                }
+                KEY_SIDECAR_DORMANT_THRESHOLD_DAYS => raw.sidecar_dormant_threshold_days = Some(v),
+                KEY_SIDECAR_ARCHIVED_THRESHOLD_DAYS => {
+                    raw.sidecar_archived_threshold_days = Some(v)
                 }
                 KEY_SIDECAR_FALLBACK_MAX_PER_HOUR => raw.sidecar_fallback_max_per_hour = Some(v),
                 _ => {}
@@ -301,6 +370,42 @@ impl RefresherConfig {
             }
         }
         if let Some(v) = raw
+            .sidecar_fallback_dormant_interval_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S.contains(&v) {
+                cfg.sidecar_fallback_dormant_interval = Duration::from_secs(v);
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_fallback_archived_interval_s
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S.contains(&v) {
+                cfg.sidecar_fallback_archived_interval = Duration::from_secs(v);
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_dormant_threshold_days
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+                cfg.sidecar_dormant_threshold_days = v;
+            }
+        }
+        if let Some(v) = raw
+            .sidecar_archived_threshold_days
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if RANGE_SIDECAR_THRESHOLD_DAYS.contains(&v) {
+                cfg.sidecar_archived_threshold_days = v;
+            }
+        }
+        if let Some(v) = raw
             .sidecar_fallback_max_per_hour
             .as_deref()
             .and_then(|s| s.parse::<u64>().ok())
@@ -324,8 +429,14 @@ pub const RANGE_IDLE_TICK_S: std::ops::RangeInclusive<u64> = 1..=3600;
 pub const RANGE_CHANNEL_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
 /// Minimum 1 minute (so a stuck-on-error source can't spam the sidecar
 /// every loop), up to 24 hours (effectively "fallback once a day per
-/// source"). Default is 1 hour.
+/// source"). Default for active channels is 1 hour.
 pub const RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=86_400;
+/// Archived interval extends up to 1 week — a never-publishing channel
+/// can tolerate a longer gap on the riskier transport.
+pub const RANGE_SIDECAR_FALLBACK_ARCHIVED_INTERVAL_S: std::ops::RangeInclusive<u64> = 60..=604_800;
+/// Recency bucket threshold (days). 1..3650 covers "1 day" up to
+/// "10 years", which is plenty of headroom.
+pub const RANGE_SIDECAR_THRESHOLD_DAYS: std::ops::RangeInclusive<u64> = 1..=3_650;
 /// `0` means unlimited; otherwise cap at 10 000/hour (well above any
 /// home-server need, but enough headroom for an operator scaling to
 /// thousands of sources who has explicitly raised it).
@@ -479,8 +590,7 @@ pub async fn run(pool: SqlitePool) {
                 .await
                 {
                     warn!(
-                        kind = %source.kind,
-                        source_id = %source.source_id,
+                        channel_id = %source.channel_id,
                         %err,
                         "feed refresher: poll task errored at outer layer",
                     );
@@ -497,53 +607,35 @@ pub async fn run(pool: SqlitePool) {
     }
 }
 
-/// Drive one source through poll + persist. Errors here are logged but
-/// swallowed by the outer caller; per-source failures are *also*
-/// recorded in `feed_sources.last_error` for diagnostics.
+/// Drive one channel through poll + persist. Errors here are logged
+/// but swallowed by the outer caller; per-channel failures are also
+/// recorded in `channel_sync_state.rss_last_error` for diagnostics.
 ///
-/// The poll strategy depends on the source kind:
-///
-/// - **Channel sources** try RSS first (cheapest, lowest anti-bot
-///   risk). On RSS error, fall back to the youtubei.js sidecar if the
-///   per-source and aggregate rate caps permit.
+/// Tries RSS first (cheapest, lowest anti-bot risk). On RSS error,
+/// falls back to the youtubei.js sidecar if the per-source and
+/// aggregate rate caps permit.
 #[tracing::instrument(
     name = "feed.poll",
     skip_all,
-    fields(kind = %source.kind, source_id = %source.source_id),
+    fields(channel_id = %source.channel_id),
 )]
 async fn poll_one(
     pool: &SqlitePool,
     http: &Client,
     base: &str,
     yt: Option<&YoutubeClient>,
-    // Aggregate sidecar-fallback count captured at the start of the
-    // outer loop tick. Per-task snapshot — see the comment in `run`.
     fallbacks_this_hour: u64,
     source: &DueSource,
     cfg: RefresherConfig,
 ) -> crate::error::AppResult<()> {
     let now = unix_now();
 
-    if source.kind != KIND_CHANNEL {
-        // Unknown kind. Shelve so the row doesn't poison diagnostics.
-        let one_year_secs: i64 = 365 * 24 * 60 * 60;
-        feed_cache::record_poll_skipped(
-            pool,
-            &source.kind,
-            &source.source_id,
-            "kind not supported (deferred)",
-            now + one_year_secs,
-        )
-        .await?;
-        return Ok(());
-    }
-
     let result = youtube_rss::poll_channel(
         http,
         base,
-        &source.source_id,
-        source.etag.as_deref(),
-        source.last_modified.as_deref(),
+        &source.channel_id,
+        source.rss_etag.as_deref(),
+        source.rss_last_modified.as_deref(),
     )
     .await;
 
@@ -553,11 +645,10 @@ async fn poll_one(
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     title: None,
-                    etag: source.etag.as_deref(),
-                    last_modified: source.last_modified.as_deref(),
+                    etag: source.rss_etag.as_deref(),
+                    last_modified: source.rss_last_modified.as_deref(),
                     next_poll_at: next,
                     now,
                 },
@@ -570,13 +661,13 @@ async fn poll_one(
             last_modified,
             items,
         }) => {
-            persist_items(pool, &source.kind, &source.source_id, &items, now).await?;
+            feed_cache::upsert_channel_videos_from_rss(pool, &source.channel_id, &items, now)
+                .await?;
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     title: title.as_deref(),
                     etag: etag.as_deref(),
                     last_modified: last_modified.as_deref(),
@@ -593,25 +684,22 @@ async fn poll_one(
             // Try the sidecar fallback before recording a hard
             // failure. Skipped when the kill switch is off, the
             // client failed to construct earlier, or either rate cap
-            // would be exceeded.
+            // would be exceeded. The per-source cap is adaptive: an
+            // archived channel that hasn't published in months tolerates
+            // a longer gap on the riskier transport, so we look up its
+            // most-recent upload to pick the right bucket.
             if let Some(client) = yt {
-                if fallback_caps_permit(source, cfg, fallbacks_this_hour, now) {
+                let effective_interval =
+                    effective_sidecar_min_interval(pool, &source.channel_id, cfg, now).await;
+                if fallback_caps_permit(source, effective_interval, cfg, fallbacks_this_hour, now) {
                     return run_sidecar_fallback(pool, client, source, cfg, now, Some(&rss_msg))
                         .await;
                 }
             }
 
             let next =
-                now + backoff_for_attempt(source.consecutive_errors + 1, cfg.channel_interval);
-            feed_cache::record_poll_failure(
-                pool,
-                &source.kind,
-                &source.source_id,
-                &rss_msg,
-                next,
-                now,
-            )
-            .await?;
+                now + backoff_for_attempt(source.rss_consecutive_errors + 1, cfg.channel_interval);
+            feed_cache::record_poll_failure(pool, &source.channel_id, &rss_msg, next, now).await?;
             warn!(error = %rss_msg, "source poll failed");
         }
     }
@@ -620,31 +708,27 @@ async fn poll_one(
 
 /// Both rate caps must permit a fallback before we dispatch one:
 ///
-/// - **Per-source cap**: at least `cfg.sidecar_fallback_min_interval`
-///   must have elapsed since this source's last fallback. Persistent,
-///   read from `DueSource::last_sidecar_fallback_at`. A `None` value
-///   means "never fallen back" → permitted.
+/// - **Per-source cap**: at least `effective_min_interval` seconds must
+///   have elapsed since this source's last fallback. The effective
+///   interval is bucketed by recency — see
+///   [`effective_sidecar_min_interval`].
 /// - **Aggregate cap**: `fallbacks_this_hour` (captured at the start
 ///   of the outer loop tick) must be below
 ///   `cfg.sidecar_fallback_max_per_hour`. A configured value of `0`
 ///   disables this cap (per-source still applies).
-///
-/// Pure function — no DB I/O — because both inputs are captured at
-/// the start of the tick. Cheaper than the previous design that
-/// queried `feed_sources` once per spawned task.
 fn fallback_caps_permit(
     source: &DueSource,
+    effective_min_interval_s: i64,
     cfg: RefresherConfig,
     fallbacks_this_hour: u64,
     now: i64,
 ) -> bool {
-    let min_interval = cfg.sidecar_fallback_min_interval.as_secs() as i64;
     if let Some(last) = source.last_sidecar_fallback_at {
-        if now - last < min_interval {
+        if now - last < effective_min_interval_s {
             debug!(
-                kind = %source.kind,
-                source_id = %source.source_id,
+                channel_id = %source.channel_id,
                 elapsed = now - last,
+                min_interval = effective_min_interval_s,
                 "skip sidecar fallback: per-source cap",
             );
             return false;
@@ -655,8 +739,7 @@ fn fallback_caps_permit(
         && fallbacks_this_hour >= cfg.sidecar_fallback_max_per_hour
     {
         debug!(
-            kind = %source.kind,
-            source_id = %source.source_id,
+            channel_id = %source.channel_id,
             count = fallbacks_this_hour,
             cap = cfg.sidecar_fallback_max_per_hour,
             "skip sidecar fallback: aggregate cap",
@@ -666,15 +749,53 @@ fn fallback_caps_permit(
     true
 }
 
-/// Dispatch the sidecar fallback for one source. Reservation is
+/// Compute the effective per-source min interval for the sidecar
+/// fallback based on the channel's most-recent upload. Channels with
+/// uploads in the last `sidecar_dormant_threshold_days` keep the
+/// "active" interval; channels dormant 30-90 days move to the
+/// "dormant" interval (default 6h); channels archived for >90 days
+/// move to the "archived" interval (default 24h).
+///
+/// One indexed query per RSS-failure event. The most-recent-upload
+/// lookup hits `idx_channel_videos_channel_published`.
+async fn effective_sidecar_min_interval(
+    pool: &SqlitePool,
+    channel_id: &str,
+    cfg: RefresherConfig,
+    now: i64,
+) -> i64 {
+    let max_published: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(published_at) FROM channel_videos \
+          WHERE channel_id = ? AND is_deleted = 0",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    let days_since = max_published
+        .map(|ts| (now - ts).max(0) / 86_400)
+        .unwrap_or(i64::MAX);
+
+    let dormant_days = cfg.sidecar_dormant_threshold_days as i64;
+    let archived_days = cfg.sidecar_archived_threshold_days as i64;
+
+    let bucket = if days_since <= dormant_days {
+        cfg.sidecar_fallback_min_interval
+    } else if days_since <= archived_days {
+        cfg.sidecar_fallback_dormant_interval
+    } else {
+        cfg.sidecar_fallback_archived_interval
+    };
+    bucket.as_secs() as i64
+}
+
+/// Dispatch the sidecar fallback for one channel. Reservation is
 /// written *before* the network call so a concurrent loop iteration or
 /// a fast restart sees the per-source cap in effect even if the call
-/// itself takes a while. Classifies the outcome into items / dead /
-/// soft-error.
-///
-/// `rss_err` is the upstream RSS error message (if any) that triggered
-/// the fallback. Used purely for diagnostics in the `last_error`
-/// column when both transports fail.
+/// itself takes a while.
 async fn run_sidecar_fallback(
     pool: &SqlitePool,
     yt: &YoutubeClient,
@@ -683,37 +804,11 @@ async fn run_sidecar_fallback(
     now: i64,
     rss_err: Option<&str>,
 ) -> crate::error::AppResult<()> {
-    // Reserve the slot *before* the network call. The per-source
-    // cap is fail-safe even under concurrent dispatch: a second tick
-    // checking `last_sidecar_fallback_at` will see the timestamp
-    // from this write and back off.
-    //
-    // Consequence operators should be aware of: a fallback that
-    // *fails* (sidecar 5xx, network timeout) still consumes a
-    // per-source and aggregate slot. This is deliberate — under
-    // sustained sidecar misbehaviour we'd rather burn one cap slot
-    // and back off than retry-storm — but it means the diagnostics
-    // UI's "Last fallback" column will tick on a *dispatch*, not on
-    // a *successful* fallback. To distinguish, cross-reference
-    // `last_error`: a sidecar-induced error message means the
-    // fallback was attempted but failed; absence means it succeeded.
-    feed_cache::record_sidecar_fallback_dispatched(pool, &source.kind, &source.source_id, now)
-        .await?;
+    feed_cache::record_sidecar_fallback_dispatched(pool, &source.channel_id, now).await?;
 
-    let outcome = match source.kind.as_str() {
-        KIND_CHANNEL => {
-            yt.refresher_list_channel_videos(&source.source_id, SIDECAR_FALLBACK_MAX_ITEMS)
-                .await
-        }
-        unknown => {
-            // Shouldn't happen — `poll_one`'s `KIND_CHANNEL` /
-            // shelve-and-return guards already filter unknown kinds
-            // before we get here — but be defensive rather than
-            // panicking inside the refresher if a new kind is
-            // introduced upstream of this match.
-            SidecarRefresherOutcome::Error(format!("unsupported kind: {unknown}"))
-        }
-    };
+    let outcome = yt
+        .refresher_list_channel_videos(&source.channel_id, SIDECAR_FALLBACK_MAX_ITEMS)
+        .await;
 
     match outcome {
         SidecarRefresherOutcome::Items(items) => {
@@ -721,13 +816,13 @@ async fn run_sidecar_fallback(
                 .iter()
                 .map(|it| sidecar_item_to_row(it, now))
                 .collect();
-            persist_items(pool, &source.kind, &source.source_id, &rows, now).await?;
+            feed_cache::upsert_channel_videos_from_sidecar(pool, &source.channel_id, &rows, now)
+                .await?;
             let next = now + jittered_interval(cfg.channel_interval);
             feed_cache::record_poll_success(
                 pool,
                 feed_cache::PollSuccess {
-                    kind: &source.kind,
-                    source_id: &source.source_id,
+                    channel_id: &source.channel_id,
                     // The sidecar response doesn't carry the source
                     // title (it lives in a separate sidecar endpoint),
                     // so we leave the existing title untouched.
@@ -740,58 +835,36 @@ async fn run_sidecar_fallback(
             )
             .await?;
             info!(
-                kind = %source.kind,
-                source_id = %source.source_id,
+                channel_id = %source.channel_id,
                 count = rows.len(),
                 "sidecar fallback succeeded",
             );
         }
         SidecarRefresherOutcome::NotFound => {
-            // Debounced shelve: a single 404 isn't enough — brief
-            // YouTube-side glitches on channels would otherwise
-            // permanently shelve live rows.
-            // Require `SIDECAR_NOTFOUND_SHELVE_THRESHOLD` consecutive
-            // failures (including this one), counted via the existing
-            // `consecutive_errors` column.
-            let attempt = source.consecutive_errors + 1;
+            let attempt = source.rss_consecutive_errors + 1;
             if attempt >= SIDECAR_NOTFOUND_SHELVE_THRESHOLD {
                 feed_cache::record_source_dead(
                     pool,
-                    &source.kind,
-                    &source.source_id,
+                    &source.channel_id,
                     "sidecar reports source not found",
                     now + DEAD_SOURCE_DEFER_SECS,
                     now,
                 )
                 .await?;
                 info!(
-                    kind = %source.kind,
-                    source_id = %source.source_id,
+                    channel_id = %source.channel_id,
                     attempt,
                     "sidecar fallback classified source as dead; deferring 1 year",
                 );
             } else {
-                // Bump `consecutive_errors` and apply normal backoff;
-                // we'll re-check on the next eligible poll. The
-                // diagnostic message includes the running count so an
-                // operator can see "2/3 NotFound" in the UI.
                 let next = now + backoff_for_attempt(attempt, cfg.channel_interval);
                 let msg = format!(
                     "sidecar reports source not found ({}/{})",
                     attempt, SIDECAR_NOTFOUND_SHELVE_THRESHOLD
                 );
-                feed_cache::record_poll_failure(
-                    pool,
-                    &source.kind,
-                    &source.source_id,
-                    &msg,
-                    next,
-                    now,
-                )
-                .await?;
+                feed_cache::record_poll_failure(pool, &source.channel_id, &msg, next, now).await?;
                 info!(
-                    kind = %source.kind,
-                    source_id = %source.source_id,
+                    channel_id = %source.channel_id,
                     attempt,
                     threshold = SIDECAR_NOTFOUND_SHELVE_THRESHOLD,
                     "sidecar fallback returned NotFound; backing off, will retry",
@@ -799,24 +872,13 @@ async fn run_sidecar_fallback(
             }
         }
         SidecarRefresherOutcome::Error(sidecar_err) => {
-            // Soft-fail: don't classify the source. Combine the
-            // upstream RSS error (if any) with the sidecar error so
-            // diagnostics show the full picture.
             let combined = match rss_err {
                 Some(r) => format!("rss: {r}; sidecar: {sidecar_err}"),
                 None => format!("sidecar: {sidecar_err}"),
             };
             let next =
-                now + backoff_for_attempt(source.consecutive_errors + 1, cfg.channel_interval);
-            feed_cache::record_poll_failure(
-                pool,
-                &source.kind,
-                &source.source_id,
-                &combined,
-                next,
-                now,
-            )
-            .await?;
+                now + backoff_for_attempt(source.rss_consecutive_errors + 1, cfg.channel_interval);
+            feed_cache::record_poll_failure(pool, &source.channel_id, &combined, next, now).await?;
             warn!(error = %combined, "sidecar fallback errored; recording soft failure");
         }
     }
@@ -1055,16 +1117,6 @@ mod relative_parser_tests {
     }
 }
 
-async fn persist_items(
-    pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
-    items: &[ItemRow],
-    now: i64,
-) -> crate::error::AppResult<()> {
-    feed_cache::replace_source_items(pool, kind, source_id, items, now).await
-}
-
 /// `interval ± 15%`, as seconds.
 pub fn jittered_interval(interval: Duration) -> i64 {
     let secs = interval.as_secs() as f64;
@@ -1127,5 +1179,112 @@ mod tests {
         let cap = MAX_BACKOFF.as_secs() as i64;
         assert!(huge <= (cap as f64 * 1.16) as i64);
         assert!(huge >= (cap as f64 * 0.84) as i64);
+    }
+
+    // -----------------------------------------------------------------
+    // effective_sidecar_min_interval — three recency buckets driven
+    // by the channel's most-recent upload.
+    // -----------------------------------------------------------------
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn setup_pool() -> sqlx::SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn seed_channel_with_max_published(
+        pool: &sqlx::SqlitePool,
+        channel_id: &str,
+        published_at: Option<i64>,
+    ) {
+        sqlx::query(
+            "INSERT INTO channel_sync_state (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
+             VALUES (?, 'pending', 0, 0)",
+        )
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(ts) = published_at {
+            sqlx::query(
+                "INSERT INTO channel_videos \
+                    (channel_id, video_id, title, published_at, \
+                     first_seen_at, last_seen_at, source) \
+                 VALUES (?, ?, 'X', ?, 1, 1, 'rss')",
+            )
+            .bind(channel_id)
+            .bind(format!("v-{channel_id}"))
+            .bind(ts)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_active_bucket_for_recent_upload() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // Uploaded today.
+        seed_channel_with_max_published(&pool, "UCactive", Some(now)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCactive", cfg, now).await;
+        assert_eq!(interval, cfg.sidecar_fallback_min_interval.as_secs() as i64);
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_dormant_bucket_for_30_to_90_days() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // 60 days ago — past the dormant threshold but inside the
+        // archived threshold.
+        let sixty_days_ago = now - 60 * 86_400;
+        seed_channel_with_max_published(&pool, "UCdormant", Some(sixty_days_ago)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCdormant", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_dormant_interval.as_secs() as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_archived_bucket_for_old_uploads() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // 200 days ago — past both thresholds.
+        let two_hundred_days_ago = now - 200 * 86_400;
+        seed_channel_with_max_published(&pool, "UCold", Some(two_hundred_days_ago)).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCold", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_archived_interval.as_secs() as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_sidecar_min_interval_uses_archived_bucket_when_no_videos() {
+        let pool = setup_pool().await;
+        let now = 1_700_000_000;
+        // No channel_videos rows at all — most_published is NULL,
+        // days_since = i64::MAX, falls into the archived bucket.
+        seed_channel_with_max_published(&pool, "UCempty", None).await;
+        let cfg = RefresherConfig::default();
+        let interval = effective_sidecar_min_interval(&pool, "UCempty", cfg, now).await;
+        assert_eq!(
+            interval,
+            cfg.sidecar_fallback_archived_interval.as_secs() as i64
+        );
     }
 }

@@ -1,32 +1,41 @@
-//! DB layer for the push-on-schedule new-videos feed.
+//! DB layer for the per-channel video archive and freshness sync state.
 //!
-//! Two tables back this module (see `migrations/009_feed_source_cache.sql`):
+//! Two tables back this module (see `migrations/020_channel_archive_sync.sql`):
 //!
-//! - `feed_sources`        — one row per (kind, source_id) currently
-//!   allowlisted by any child. Carries poll metadata (ETag, last
-//!   success, next scheduled poll).
-//! - `feed_source_items`   — the most recent N videos per source.
+//! - `channel_sync_state` — one row per channel currently allowlisted
+//!   by any child. Carries RSS poll metadata (etag, last success, next
+//!   scheduled poll), the sidecar fallback cooldown timestamp, the
+//!   backfill loop's lease/status columns, and the channel header
+//!   metadata (title, thumbnail, description) served by
+//!   `GET /api/channels/:channelId`.
+//! - `channel_videos` — the full archive of video stubs per channel,
+//!   written to by RSS, the InnerTube sidecar fallback, and the yt-dlp
+//!   `--flat-playlist` backfill. The `/api/feed/new-videos` handler
+//!   reads from this table joined against the requesting child's
+//!   allowlist.
 //!
 //! This module is pure DB; no networking, no scheduling decisions. The
-//! [`crate::services::feed_refresher`] task drives polling and calls
-//! [`replace_source_items`] / [`record_poll_success`] /
-//! [`record_poll_failure`] here. The `/api/feed/new-videos` handler
-//! reads via [`feed_for_child`].
+//! [`crate::services::feed_refresher`] task drives RSS+sidecar polling
+//! and calls [`upsert_channel_videos_from_rss`] /
+//! [`upsert_channel_videos_from_sidecar`] / [`record_poll_success`] /
+//! [`record_poll_failure`] here. The [`crate::services::channel_backfill`]
+//! task drives the monthly yt-dlp backfill.
 
 use sqlx::SqlitePool;
 
 use crate::error::AppResult;
 use crate::routes::feed::NewVideoItem;
 
-/// Items kept per source after [`replace_source_items`] trims.
-pub const PER_SOURCE_CAP: i64 = 20;
-
-/// `kind` values used in `feed_sources.kind` / `feed_source_items.kind`.
+/// Conceptual kind value emitted in API responses for any item served
+/// out of `channel_videos`. The schema no longer carries a kind column
+/// (migration 017 already locked it to 'channel'; migration 020
+/// consolidated the table away), but `NewVideoItem.source_kind` is
+/// still part of the public API response shape.
 pub const KIND_CHANNEL: &str = "channel";
 
-/// One item destined for `feed_source_items`. Built by the source-
-/// specific fetchers (RSS, sidecar) and handed to
-/// [`replace_source_items`] in a batch.
+/// One item destined for `channel_videos`. Built by the source-specific
+/// fetchers (RSS, sidecar) and handed to the upsert functions in a
+/// batch.
 #[derive(Debug, Clone)]
 pub struct ItemRow {
     pub video_id: String,
@@ -41,146 +50,247 @@ pub struct ItemRow {
     pub published_raw: Option<String>,
 }
 
-/// One row from `feed_sources`, used by the refresher when picking work.
+/// One row from `channel_sync_state`, used by the refresher when
+/// picking work.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DueSource {
-    pub kind: String,
-    pub source_id: String,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-    pub consecutive_errors: i64,
+    pub channel_id: String,
+    pub rss_etag: Option<String>,
+    pub rss_last_modified: Option<String>,
+    pub rss_consecutive_errors: i64,
     /// Unix-seconds timestamp of the most recent sidecar fallback for
-    /// this source (`NULL` if none has ever happened). Used by the
-    /// refresher to enforce the per-source rate cap without a second
+    /// this channel (`NULL` if none has ever happened). Used by the
+    /// refresher to enforce the per-channel rate cap without a second
     /// query.
     pub last_sidecar_fallback_at: Option<i64>,
 }
 
-/// One row of `feed_sources` for the admin diagnostics endpoint.
+/// Statistics returned by the upsert functions for diagnostics.
+#[derive(Debug, Clone, Default)]
+pub struct UpsertStats {
+    pub inserted: u64,
+    pub updated: u64,
+    pub untombstoned: u64,
+}
+
+/// One row of `channel_sync_state` for the admin diagnostics endpoint.
+/// Renamed from `FeedSourceStatus` to reflect the consolidated table.
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
-pub struct FeedSourceStatus {
-    pub kind: String,
-    pub source_id: String,
-    pub title: Option<String>,
-    pub last_polled_at: Option<i64>,
-    pub last_success_at: Option<i64>,
-    pub last_error: Option<String>,
-    pub consecutive_errors: i64,
-    pub next_poll_at: i64,
+pub struct ChannelSyncStateStatus {
+    pub channel_id: String,
+    pub channel_title: Option<String>,
+    pub rss_last_polled_at: Option<i64>,
+    pub rss_last_success_at: Option<i64>,
+    pub rss_last_error: Option<String>,
+    pub rss_consecutive_errors: i64,
+    pub rss_next_poll_at: i64,
+    /// Live videos for the channel (`is_deleted = 0`).
     pub item_count: i64,
+    /// Tombstoned videos for the channel (`is_deleted = 1`), surfaced
+    /// for the diagnostics UI's "archived (channel removed)" column.
+    pub archived_count: i64,
     /// Unix-seconds timestamp of the most recent sidecar fallback for
-    /// this source, or `NULL` if none has ever happened. Surfaced so
+    /// this channel, or `NULL` if none has ever happened. Surfaced so
     /// the diagnostics UI can show "last fallback: 5m ago" and the
     /// operator can correlate sidecar load with RSS outage windows.
     pub last_sidecar_fallback_at: Option<i64>,
+    /// Backfill tier status: pending / running / complete / failed / shelved.
+    pub backfill_status: String,
+    pub backfill_last_completed_at: Option<i64>,
+    pub backfill_last_error: Option<String>,
+    pub backfill_consecutive_errors: i64,
+    pub backfill_next_at: i64,
 }
 
-/// Insert a `(kind, source_id)` row if missing. Sets `next_poll_at = 0`
-/// so the refresher picks it up on its next tick. Idempotent.
-pub async fn upsert_source(pool: &SqlitePool, kind: &str, source_id: &str) -> AppResult<()> {
+/// Insert a `channel_id` row if missing. Sets `rss_next_poll_at = 0`
+/// and `backfill_next_at = 0` so both background loops pick it up on
+/// their next tick. Idempotent.
+pub async fn upsert_channel(pool: &SqlitePool, channel_id: &str) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO feed_sources (kind, source_id, next_poll_at) \
-         VALUES (?, ?, 0) \
-         ON CONFLICT(kind, source_id) DO NOTHING",
+        "INSERT INTO channel_sync_state \
+             (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
+         VALUES (?, 'pending', 0, 0) \
+         ON CONFLICT(channel_id) DO NOTHING",
     )
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Delete any `feed_sources` rows whose `(kind, source_id)` no longer
-/// appears in the relevant allowlist table. Items cascade via foreign
-/// key. Returns the number of sources removed.
-pub async fn gc_orphan_sources(pool: &SqlitePool) -> AppResult<u64> {
-    let result = sqlx::query(
-        "DELETE FROM feed_sources \
-         WHERE kind = 'channel' AND source_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
+/// Insert a `channel_id` row with explicit header metadata, or update
+/// any existing row's missing-metadata fields. Used by the allowlist
+/// POST handler so the channel page can render title/thumbnail/
+/// description from local state without a sidecar call on every visit.
+///
+/// COALESCE on the conflict path preserves any previously-set metadata
+/// when the new add path supplied NULL/empty values; the body-data
+/// path supplies real values most of the time.
+pub async fn upsert_channel_with_metadata(
+    pool: &SqlitePool,
+    channel_id: &str,
+    title: Option<&str>,
+    thumbnail_url: Option<&str>,
+    description: Option<&str>,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO channel_sync_state \
+             (channel_id, channel_title, channel_thumbnail_url, description, \
+              backfill_status, backfill_next_at, rss_next_poll_at) \
+         VALUES (?, ?, ?, ?, 'pending', 0, 0) \
+         ON CONFLICT(channel_id) DO UPDATE SET \
+             channel_title         = COALESCE(excluded.channel_title, channel_sync_state.channel_title), \
+             channel_thumbnail_url = COALESCE(excluded.channel_thumbnail_url, channel_sync_state.channel_thumbnail_url), \
+             description           = COALESCE(excluded.description, channel_sync_state.description)",
     )
+    .bind(channel_id)
+    .bind(title)
+    .bind(thumbnail_url)
+    .bind(description)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Delete any `channel_sync_state` rows whose `channel_id` no longer
+/// appears in `allowlisted_channels`. The corresponding `channel_videos`
+/// rows are cleaned up in the same transaction. Returns the number of
+/// channels removed.
+pub async fn gc_orphan_sources(pool: &SqlitePool) -> AppResult<u64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM channel_videos \
+         WHERE channel_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let result = sqlx::query(
+        "DELETE FROM channel_sync_state \
+         WHERE channel_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
-/// Replace this source's items with `items`, then trim down to the most
-/// recent [`PER_SOURCE_CAP`]. Runs in a single transaction so the table
-/// is never observed in a half-updated state.
-///
-/// "Replace" here means upsert by `video_id`; we don't blow away rows
-/// the source no longer mentions, because some YouTube views (e.g.
-/// channel RSS) only ever return the 15 most recent uploads and we
-/// want history to extend a little further than that.
-pub async fn replace_source_items(
+/// Upsert RSS-fed items into `channel_videos`. Does NOT delete absent
+/// rows (RSS only sees ~15 newest items; absence is not evidence of
+/// deletion). Clears `is_deleted=0` on re-sighting. Does NOT touch
+/// `duration_s` / `view_count` — RSS doesn't carry them and clobbering
+/// with NULL would lose backfill-supplied data.
+pub async fn upsert_channel_videos_from_rss(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     items: &[ItemRow],
     now: i64,
-) -> AppResult<()> {
+) -> AppResult<UpsertStats> {
+    upsert_channel_videos(pool, channel_id, items, now, "rss").await
+}
+
+/// Same as [`upsert_channel_videos_from_rss`] but tags `source='sidecar'`.
+/// Used by the InnerTube sidecar fallback path in the refresher.
+pub async fn upsert_channel_videos_from_sidecar(
+    pool: &SqlitePool,
+    channel_id: &str,
+    items: &[ItemRow],
+    now: i64,
+) -> AppResult<UpsertStats> {
+    upsert_channel_videos(pool, channel_id, items, now, "sidecar").await
+}
+
+/// Shared implementation for the RSS/sidecar upsert path. The
+/// per-source variant just supplies the `source` tag.
+///
+/// **Round-trip footprint**: 1 batched SELECT + N UPSERTs in a single
+/// transaction. The freshness path's batches are small by construction
+/// (~15 items per RSS poll, ~30 per sidecar fallback), so this is
+/// cheap. The per-item SELECT-then-UPSERT loop in earlier versions
+/// was 2N round-trips; the upfront `HashMap` lookup collapses it to
+/// 1 + N. The same optimisation was applied to
+/// [`crate::services::channel_backfill::apply_backfill_entries`]
+/// where N can be 10k+ and the gain is dramatic; here it's modest
+/// but consistent.
+async fn upsert_channel_videos(
+    pool: &SqlitePool,
+    channel_id: &str,
+    items: &[ItemRow],
+    now: i64,
+    source: &str,
+) -> AppResult<UpsertStats> {
+    use std::collections::HashMap;
+
     let mut tx = pool.begin().await?;
+    let mut stats = UpsertStats::default();
+
+    // Pre-fetch prior is_deleted state for every video_id in the
+    // batch in one query, so the per-item branch is an O(1) HashMap
+    // lookup rather than an extra round-trip to SQLite per item.
+    let existing: HashMap<String, i64> = if items.is_empty() {
+        HashMap::new()
+    } else {
+        // SQLite's parameter limit is 999 by default; freshness
+        // batches are always far below this (RSS=15, sidecar=30).
+        // Build the IN clause dynamically so we still bind each
+        // video_id (no string interpolation).
+        let placeholders = std::iter::repeat_n("?", items.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT video_id, is_deleted FROM channel_videos \
+              WHERE channel_id = ? AND video_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (String, i64)>(&sql).bind(channel_id);
+        for item in items {
+            q = q.bind(&item.video_id);
+        }
+        q.fetch_all(&mut *tx).await?.into_iter().collect()
+    };
 
     for item in items {
         sqlx::query(
-            "INSERT INTO feed_source_items \
-                 (kind, source_id, video_id, title, channel_id, channel_title, \
-                  thumbnail_url, published_at, published_raw, fetched_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(kind, source_id, video_id) DO UPDATE SET \
+            "INSERT INTO channel_videos \
+                 (channel_id, video_id, title, channel_title, published_at, published_raw, \
+                  thumbnail_url, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, 0) \
+             ON CONFLICT(channel_id, video_id) DO UPDATE SET \
                  title          = excluded.title, \
-                 channel_id     = excluded.channel_id, \
-                 channel_title  = excluded.channel_title, \
-                 thumbnail_url  = excluded.thumbnail_url, \
-                 published_at   = excluded.published_at, \
-                 published_raw  = excluded.published_raw, \
-                 fetched_at     = excluded.fetched_at",
+                 channel_title  = COALESCE(excluded.channel_title, channel_videos.channel_title), \
+                 published_at   = COALESCE(channel_videos.published_at, excluded.published_at), \
+                 published_raw  = COALESCE(channel_videos.published_raw, excluded.published_raw), \
+                 thumbnail_url  = COALESCE(excluded.thumbnail_url, channel_videos.thumbnail_url), \
+                 last_seen_at   = excluded.last_seen_at, \
+                 source         = excluded.source, \
+                 is_deleted     = 0",
         )
-        .bind(kind)
-        .bind(source_id)
+        .bind(channel_id)
         .bind(&item.video_id)
         .bind(&item.title)
-        .bind(&item.channel_id)
         .bind(&item.channel_title)
-        .bind(&item.thumbnail_url)
         .bind(item.published_at)
         .bind(&item.published_raw)
+        .bind(&item.thumbnail_url)
         .bind(now)
+        .bind(source)
         .execute(&mut *tx)
         .await?;
+
+        match existing.get(&item.video_id) {
+            None => stats.inserted += 1,
+            Some(&prior_is_deleted) if prior_is_deleted != 0 => stats.untombstoned += 1,
+            Some(_) => stats.updated += 1,
+        }
     }
 
-    // Trim down to PER_SOURCE_CAP most recent. When `published_at`
-    // is NULL (sidecar fallback path, where YouTube only gave us a
-    // relative time string like "3 days ago"), fall back to
-    // `fetched_at` so sidecar-sourced rows aren't all treated as
-    // epoch-old and discarded ahead of genuinely older RSS rows.
-    sqlx::query(
-        "DELETE FROM feed_source_items \
-         WHERE kind = ? AND source_id = ? AND video_id NOT IN ( \
-             SELECT video_id FROM feed_source_items \
-              WHERE kind = ? AND source_id = ? \
-              ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
-              LIMIT ? \
-         )",
-    )
-    .bind(kind)
-    .bind(source_id)
-    .bind(kind)
-    .bind(source_id)
-    .bind(PER_SOURCE_CAP)
-    .execute(&mut *tx)
-    .await?;
-
     tx.commit().await?;
-    Ok(())
+    Ok(stats)
 }
 
 /// Inputs to [`record_poll_success`]. Bundled into a struct so the
-/// (otherwise 8-positional-arg) call site stays readable.
+/// (otherwise 6-positional-arg) call site stays readable.
 #[derive(Debug)]
 pub struct PollSuccess<'a> {
-    pub kind: &'a str,
-    pub source_id: &'a str,
+    pub channel_id: &'a str,
     pub title: Option<&'a str>,
     pub etag: Option<&'a str>,
     pub last_modified: Option<&'a str>,
@@ -194,8 +304,7 @@ pub struct PollSuccess<'a> {
 /// next poll.
 pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> AppResult<()> {
     let PollSuccess {
-        kind,
-        source_id,
+        channel_id,
         title,
         etag,
         last_modified,
@@ -203,16 +312,16 @@ pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> Ap
         now,
     } = args;
     sqlx::query(
-        "UPDATE feed_sources SET \
-             title              = COALESCE(?, title), \
-             etag               = ?, \
-             last_modified      = ?, \
-             last_polled_at     = ?, \
-             last_success_at    = ?, \
-             last_error         = NULL, \
-             consecutive_errors = 0, \
-             next_poll_at       = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET \
+             channel_title          = COALESCE(?, channel_title), \
+             rss_etag               = ?, \
+             rss_last_modified      = ?, \
+             rss_last_polled_at     = ?, \
+             rss_last_success_at    = ?, \
+             rss_last_error         = NULL, \
+             rss_consecutive_errors = 0, \
+             rss_next_poll_at       = ? \
+         WHERE channel_id = ?",
     )
     .bind(title)
     .bind(etag)
@@ -220,44 +329,36 @@ pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> Ap
     .bind(now)
     .bind(now)
     .bind(next_poll_at)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 /// Mark a poll as **deferred-by-policy** — no network call attempted,
-/// row rescheduled, **and** `consecutive_errors` left untouched. Used
-/// when the refresher's rate caps temporarily deny a fallback for an
-/// otherwise-eligible source: the source isn't in error and shouldn't
-/// reset any existing error count from prior real failures, it just
-/// has to wait its turn.
-///
-/// Distinct from [`record_poll_skipped`], which *does* clear errors —
-/// that's the right semantics for the "we have no transport for this
-/// kind" path, where the row genuinely isn't failing, but the wrong
-/// semantics for "we briefly throttled this source."
+/// row rescheduled, **and** `rss_consecutive_errors` left untouched.
+/// Used when the refresher's rate caps temporarily deny a fallback for
+/// an otherwise-eligible source: the source isn't in error and shouldn't
+/// reset any existing error count from prior real failures, it just has
+/// to wait its turn.
 pub async fn record_poll_deferred(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     reason: &str,
     next_poll_at: i64,
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE feed_sources SET \
-             last_polled_at = ?, \
-             last_error     = ?, \
-             next_poll_at   = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET \
+             rss_last_polled_at = ?, \
+             rss_last_error     = ?, \
+             rss_next_poll_at   = ? \
+         WHERE channel_id = ?",
     )
     .bind(now)
     .bind(reason)
     .bind(next_poll_at)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -266,147 +367,111 @@ pub async fn record_poll_deferred(
 /// Mark a poll as **skipped** — no network I/O happened, but the row
 /// is rescheduled into the future and tagged so the diagnostics UI
 /// can distinguish skipped-by-policy from a recent successful poll.
-///
-/// Used for sources whose `kind` the refresher does not yet support
-/// (currently anything except `channel`). Crucially, this does NOT
-/// touch `last_polled_at` / `last_success_at` so the diagnostics page
-/// doesn't pretend a network round-trip occurred.
+/// Resets `rss_consecutive_errors` so rows that previously accumulated
+/// errors stop showing a misleading count.
 pub async fn record_poll_skipped(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     reason: &str,
     next_poll_at: i64,
 ) -> AppResult<()> {
-    // Also reset `consecutive_errors` so rows that previously
-    // accumulated errors under a removed source kind stop showing a
-    // misleading non-zero error count on the diagnostics page once
-    // they transition to the intentionally-skipped path.
     sqlx::query(
-        "UPDATE feed_sources SET \
-             last_error         = ?, \
-             consecutive_errors = 0, \
-             next_poll_at       = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET \
+             rss_last_error         = ?, \
+             rss_consecutive_errors = 0, \
+             rss_next_poll_at       = ? \
+         WHERE channel_id = ?",
     )
     .bind(reason)
     .bind(next_poll_at)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Mark a poll as failed. Increments `consecutive_errors` and schedules
-/// the next attempt. Does **not** clear cached items so the feed
-/// continues to serve stale data through transient outages.
+/// Mark a poll as failed. Increments `rss_consecutive_errors` and
+/// schedules the next attempt. Does **not** clear cached items so the
+/// feed continues to serve stale data through transient outages.
 pub async fn record_poll_failure(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     err: &str,
     next_poll_at: i64,
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE feed_sources SET \
-             last_polled_at     = ?, \
-             last_error         = ?, \
-             consecutive_errors = consecutive_errors + 1, \
-             next_poll_at       = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET \
+             rss_last_polled_at     = ?, \
+             rss_last_error         = ?, \
+             rss_consecutive_errors = rss_consecutive_errors + 1, \
+             rss_next_poll_at       = ? \
+         WHERE channel_id = ?",
     )
     .bind(now)
     .bind(err)
     .bind(next_poll_at)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 /// Mark the source as confidently dead: the sidecar returned a clean
-/// "channel not found" / 404. Pushes `next_poll_at` far into the
+/// "channel not found" / 404. Pushes `rss_next_poll_at` far into the
 /// future so the scheduler effectively shelves the row, clears the
-/// error counter (it's not "failing" any more; it's *done*), and sets
-/// `last_error` to a human-readable reason for the diagnostics UI.
-///
-/// We deliberately do not delete the row or its items: a future
-/// reactivation (channel restored, or operator manually reschedules)
-/// can pick it back up. The `feed_for_child` query will simply stop
-/// surfacing items once the upstream stops producing them.
+/// error counter, and sets `rss_last_error` to a human-readable reason
+/// for the diagnostics UI.
 pub async fn record_source_dead(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     reason: &str,
     next_poll_at: i64,
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE feed_sources SET \
-             last_polled_at     = ?, \
-             last_error         = ?, \
-             consecutive_errors = 0, \
-             next_poll_at       = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET \
+             rss_last_polled_at     = ?, \
+             rss_last_error         = ?, \
+             rss_consecutive_errors = 0, \
+             rss_next_poll_at       = ? \
+         WHERE channel_id = ?",
     )
     .bind(now)
     .bind(reason)
     .bind(next_poll_at)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Record that a sidecar fallback was dispatched for this source.
+/// Record that a sidecar fallback was dispatched for this channel.
 /// Called *before* the sidecar request goes out so concurrent claims
 /// (in the rare burst case) see the reservation and respect the
-/// per-source cap. The timestamp is also persisted across process
-/// restarts so a `docker restart` or `cargo watch` rebuild can't
-/// re-enable fallback for every source.
+/// per-source cap.
 pub async fn record_sidecar_fallback_dispatched(
     pool: &SqlitePool,
-    kind: &str,
-    source_id: &str,
+    channel_id: &str,
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE feed_sources SET last_sidecar_fallback_at = ? \
-         WHERE kind = ? AND source_id = ?",
+        "UPDATE channel_sync_state SET last_sidecar_fallback_at = ? \
+         WHERE channel_id = ?",
     )
     .bind(now)
-    .bind(kind)
-    .bind(source_id)
+    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 /// Count sidecar fallbacks dispatched in the last hour, used by the
-/// refresher to enforce the aggregate per-hour cap. Reads the same
-/// `last_sidecar_fallback_at` column the per-source cap consults, so
-/// "fallback fires" and "fallback would have been allowed" cannot
-/// drift apart across restarts.
-///
-/// We store only the most recent timestamp per source (not a history),
-/// so this query counts *sources that fell back in the last hour*
-/// rather than *individual calls*. That's accurate as long as the
-/// per-source rate cap is at least one hour: under that assumption a
-/// single source can contribute at most one fallback to the count.
-/// If the per-source interval is lowered below 3600 s (allowed by
-/// `RANGE_SIDECAR_FALLBACK_MIN_INTERVAL_S` down to 60 s) the aggregate
-/// cap will undercount, which is the safe direction — extra calls
-/// would be permitted only by the per-source cap, never blocked by a
-/// stricter-than-intended aggregate cap.
+/// refresher to enforce the aggregate per-hour cap.
 pub async fn sidecar_fallbacks_in_last_hour(pool: &SqlitePool, now: i64) -> AppResult<i64> {
     let cutoff = now - 3600;
     let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM feed_sources \
+        "SELECT COUNT(*) FROM channel_sync_state \
          WHERE last_sidecar_fallback_at IS NOT NULL \
            AND last_sidecar_fallback_at >= ?",
     )
@@ -416,18 +481,10 @@ pub async fn sidecar_fallbacks_in_last_hour(pool: &SqlitePool, now: i64) -> AppR
     Ok(n)
 }
 
-/// Atomically claim up to `limit` sources whose `next_poll_at <= now`,
-/// pushing their `next_poll_at` forward by `lease_secs` so a concurrent
-/// caller (or the next iteration of the refresher loop) does not pick
-/// them up while the poll is in flight.
-///
-/// The caller is expected to call [`record_poll_success`] or
-/// [`record_poll_failure`] before the lease expires; both overwrite
-/// `next_poll_at` with the real scheduled time.
-///
-/// SQLite's `UPDATE ... RETURNING` (available since 3.35) gives us
-/// the affected rows in a single statement, avoiding a TOCTOU between
-/// SELECT and UPDATE.
+/// Atomically claim up to `limit` channels whose `rss_next_poll_at <= now`,
+/// pushing their `rss_next_poll_at` forward by `lease_secs` so a
+/// concurrent caller (or the next iteration of the refresher loop)
+/// does not pick them up while the poll is in flight.
 pub async fn claim_due_sources(
     pool: &SqlitePool,
     now: i64,
@@ -436,15 +493,15 @@ pub async fn claim_due_sources(
 ) -> AppResult<Vec<DueSource>> {
     let leased_until = now.saturating_add(lease_secs);
     let rows = sqlx::query_as::<_, DueSource>(
-        "UPDATE feed_sources SET next_poll_at = ? \
-          WHERE (kind, source_id) IN ( \
-              SELECT kind, source_id FROM feed_sources \
-               WHERE next_poll_at <= ? \
-               ORDER BY next_poll_at ASC \
+        "UPDATE channel_sync_state SET rss_next_poll_at = ? \
+          WHERE channel_id IN ( \
+              SELECT channel_id FROM channel_sync_state \
+               WHERE rss_next_poll_at <= ? \
+               ORDER BY rss_next_poll_at ASC \
                LIMIT ? \
           ) \
-          RETURNING kind, source_id, etag, last_modified, \
-                    consecutive_errors, last_sidecar_fallback_at",
+          RETURNING channel_id, rss_etag, rss_last_modified, \
+                    rss_consecutive_errors, last_sidecar_fallback_at",
     )
     .bind(leased_until)
     .bind(now)
@@ -454,14 +511,10 @@ pub async fn claim_due_sources(
     Ok(rows)
 }
 
-/// Build the new-videos feed for a child. Joins `feed_source_items`
-/// against the child's allowlist tables, excludes blocked + hidden
-/// videos, dedupes by `video_id` keeping the most recent
+/// Build the new-videos feed for a child. Joins `channel_videos`
+/// against the child's allowlist, excludes blocked + hidden videos
+/// and tombstoned rows, dedupes by `video_id` keeping the most recent
 /// `published_at`, and sorts/limits.
-///
-/// Dedupe is performed inside SQL via a `ROW_NUMBER()` window
-/// function so the outer `LIMIT` applies to already-deduped rows and
-/// cannot be eaten by duplicates that survive into Rust.
 pub async fn feed_for_child(
     pool: &SqlitePool,
     child_id: i64,
@@ -471,52 +524,42 @@ pub async fn feed_for_child(
     struct Row {
         video_id: String,
         title: String,
-        channel_id: Option<String>,
+        channel_id: String,
         channel_title: Option<String>,
         thumbnail_url: Option<String>,
         published_raw: Option<String>,
         #[allow(dead_code)]
         published_at: Option<i64>,
-        kind: String,
-        source_id: String,
     }
 
-    // Window-function dedupe collapses duplicates inside SQL, so the
-    // LIMIT applies to already-deduped rows.
     let fetch_limit = limit as i64;
 
-    // Excludes both parent-controlled `blocked_videos` and per-child
-    // `hidden_videos` so the row matches the visibility rules the old
-    // `can_child_view`-based handler enforced. Dedupes by `video_id`
-    // inside the query (a video appearing in multiple allowed sources
-    // is collapsed to its newest copy) so the `LIMIT` cannot be eaten
-    // by duplicates and produce a short result.
     let rows: Vec<Row> = sqlx::query_as(
-        "WITH allowed(kind, source_id) AS ( \
-             SELECT 'channel', channel_id \
-               FROM allowlisted_channels WHERE child_account_id = ?1 \
+        "WITH allowed(channel_id) AS ( \
+             SELECT channel_id FROM allowlisted_channels WHERE child_account_id = ?1 \
          ), \
          candidates AS ( \
-             SELECT i.video_id, i.title, i.channel_id, i.channel_title, \
-                    i.thumbnail_url, i.published_raw, i.published_at, \
-                    i.fetched_at, i.kind, i.source_id, \
+             SELECT cv.video_id, cv.title, cv.channel_id, cv.channel_title, \
+                    cv.thumbnail_url, cv.published_raw, cv.published_at, \
+                    cv.last_seen_at, \
                     ROW_NUMBER() OVER ( \
-                        PARTITION BY i.video_id \
-                        ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.fetched_at DESC \
+                        PARTITION BY cv.video_id \
+                        ORDER BY COALESCE(cv.published_at, cv.last_seen_at) DESC, cv.last_seen_at DESC \
                     ) AS rn \
-               FROM feed_source_items i \
-               JOIN allowed a ON a.kind = i.kind AND a.source_id = i.source_id \
-              WHERE NOT EXISTS ( \
+               FROM channel_videos cv \
+               JOIN allowed a ON a.channel_id = cv.channel_id \
+              WHERE cv.is_deleted = 0 \
+                AND NOT EXISTS ( \
                     SELECT 1 FROM blocked_videos b \
-                     WHERE b.child_account_id = ?1 AND b.video_id = i.video_id) \
+                     WHERE b.child_account_id = ?1 AND b.video_id = cv.video_id) \
                 AND NOT EXISTS ( \
                     SELECT 1 FROM hidden_videos h \
-                     WHERE h.child_account_id = ?1 AND h.video_id = i.video_id) \
+                     WHERE h.child_account_id = ?1 AND h.video_id = cv.video_id) \
          ) \
          SELECT video_id, title, channel_id, channel_title, \
-                thumbnail_url, published_raw, published_at, kind, source_id \
+                thumbnail_url, published_raw, published_at \
            FROM candidates WHERE rn = 1 \
-          ORDER BY COALESCE(published_at, fetched_at) DESC, fetched_at DESC \
+          ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC \
           LIMIT ?2",
     )
     .bind(child_id)
@@ -529,12 +572,12 @@ pub async fn feed_for_child(
         out.push(NewVideoItem {
             video_id: r.video_id,
             title: r.title,
-            channel_id: r.channel_id,
+            channel_id: Some(r.channel_id.clone()),
             channel_title: r.channel_title,
             thumbnail_url: r.thumbnail_url,
             published_at: r.published_raw,
-            source_kind: r.kind,
-            source_id: r.source_id,
+            source_kind: KIND_CHANNEL.to_string(),
+            source_id: r.channel_id,
         });
     }
     Ok(out)
@@ -542,49 +585,36 @@ pub async fn feed_for_child(
 
 /// Capacity-utilisation snapshot, used by the diagnostics endpoint
 /// (and the parent settings UI) to surface "are we keeping up?" signal
-/// in a single round-trip. All counts are derived from `feed_sources`
-/// and aren't cached anywhere — the table is small enough (a few
-/// thousand rows at most) that an aggregate count is sub-millisecond.
+/// in a single round-trip.
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct FeedRefresherCapacityCounts {
-    /// Total rows in `feed_sources`.
+    /// Total rows in `channel_sync_state`.
     pub total_sources: i64,
-    /// Sources whose `next_poll_at <= now` *right now* — anything
-    /// non-zero means the dispatcher hasn't drained the work yet.
-    /// Persistent non-zero is the signal to lower `dispatch_delay_ms`
-    /// or `channel_interval_s`.
+    /// Sources whose `rss_next_poll_at <= now` *right now*.
     pub queue_depth: i64,
-    /// Sources whose `last_polled_at` falls inside the last hour.
-    /// Indicator of the dispatcher's actual throughput.
+    /// Sources whose `rss_last_polled_at` falls inside the last hour.
     pub polls_last_hour: i64,
-    /// Sidecar fallbacks dispatched in the last hour. Mirrors what
-    /// the aggregate-cap eligibility check sees, so the operator can
-    /// correlate the diagnostics UI with the cap value.
+    /// Sidecar fallbacks dispatched in the last hour.
     pub sidecar_fallbacks_last_hour: i64,
 }
 
 /// Compute the per-table capacity counts. All four counts come from
-/// a single query plan against `feed_sources` so we don't pay an
-/// extra round-trip per metric. The query uses conditional aggregates
-/// rather than four separate `SELECT COUNT(*) ... WHERE ...` queries.
+/// a single query plan against `channel_sync_state`.
 pub async fn capacity_counts(
     pool: &SqlitePool,
     now: i64,
 ) -> AppResult<FeedRefresherCapacityCounts> {
     let hour_ago = now - 3600;
-    // COALESCE wraps the conditional sums so an empty `feed_sources`
-    // table returns zeroes instead of NULLs (which would fail
-    // `FromRow` on `i64` columns).
     let row: FeedRefresherCapacityCounts = sqlx::query_as(
         "SELECT \
              COUNT(*) AS total_sources, \
-             COALESCE(SUM(CASE WHEN next_poll_at <= ? THEN 1 ELSE 0 END), 0) \
+             COALESCE(SUM(CASE WHEN rss_next_poll_at <= ? THEN 1 ELSE 0 END), 0) \
                  AS queue_depth, \
-             COALESCE(SUM(CASE WHEN last_polled_at >= ? THEN 1 ELSE 0 END), 0) \
+             COALESCE(SUM(CASE WHEN rss_last_polled_at >= ? THEN 1 ELSE 0 END), 0) \
                  AS polls_last_hour, \
              COALESCE(SUM(CASE WHEN last_sidecar_fallback_at >= ? THEN 1 ELSE 0 END), 0) \
                  AS sidecar_fallbacks_last_hour \
-           FROM feed_sources",
+           FROM channel_sync_state",
     )
     .bind(now)
     .bind(hour_ago)
@@ -594,26 +624,33 @@ pub async fn capacity_counts(
     Ok(row)
 }
 
-/// Diagnostic snapshot of every cached source. Used by the admin
-/// endpoint to surface poll health.
+/// Diagnostic snapshot of every cached channel. Used by the admin
+/// endpoint to surface poll + backfill health.
 ///
 /// Uses a single LEFT JOIN against an aggregated subquery rather than
 /// a per-row correlated subquery so the cost is O(N + M) instead of
-/// O(N × index seeks).
-pub async fn list_source_status(pool: &SqlitePool) -> AppResult<Vec<FeedSourceStatus>> {
-    let rows = sqlx::query_as::<_, FeedSourceStatus>(
-        "SELECT s.kind, s.source_id, s.title, s.last_polled_at, \
-                s.last_success_at, s.last_error, s.consecutive_errors, \
-                s.next_poll_at, \
+/// O(N × index seeks). `item_count` and `archived_count` come from
+/// the same conditional aggregation.
+pub async fn list_source_status(pool: &SqlitePool) -> AppResult<Vec<ChannelSyncStateStatus>> {
+    let rows = sqlx::query_as::<_, ChannelSyncStateStatus>(
+        "SELECT s.channel_id, s.channel_title, \
+                s.rss_last_polled_at, s.rss_last_success_at, s.rss_last_error, \
+                s.rss_consecutive_errors, s.rss_next_poll_at, \
                 COALESCE(c.item_count, 0) AS item_count, \
-                s.last_sidecar_fallback_at \
-           FROM feed_sources s \
+                COALESCE(c.archived_count, 0) AS archived_count, \
+                s.last_sidecar_fallback_at, \
+                s.backfill_status, s.backfill_last_completed_at, \
+                s.backfill_last_error, s.backfill_consecutive_errors, \
+                s.backfill_next_at \
+           FROM channel_sync_state s \
            LEFT JOIN ( \
-                SELECT kind, source_id, COUNT(*) AS item_count \
-                  FROM feed_source_items \
-                 GROUP BY kind, source_id \
-           ) c ON c.kind = s.kind AND c.source_id = s.source_id \
-          ORDER BY s.kind ASC, s.source_id ASC",
+                SELECT channel_id, \
+                       SUM(CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END) AS item_count, \
+                       SUM(CASE WHEN is_deleted = 1 THEN 1 ELSE 0 END) AS archived_count \
+                  FROM channel_videos \
+                 GROUP BY channel_id \
+           ) c ON c.channel_id = s.channel_id \
+          ORDER BY s.channel_id ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -683,9 +720,9 @@ mod tests {
     #[tokio::test]
     async fn upsert_and_gc() {
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feed_sources")
+        upsert_channel(&pool, "UC1").await.unwrap();
+        upsert_channel(&pool, "UC1").await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channel_sync_state")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -697,34 +734,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replace_items_trims_to_cap() {
+    async fn rss_upsert_inserts_and_updates() {
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
+        upsert_channel(&pool, "UC1").await.unwrap();
 
-        let items: Vec<ItemRow> = (0..(PER_SOURCE_CAP + 5))
-            .map(|i| mk_item(&format!("v{i}"), 1000 + i))
-            .collect();
-        replace_source_items(&pool, KIND_CHANNEL, "UC1", &items, 9999)
+        let items = vec![mk_item("vA", 100), mk_item("vB", 200)];
+        let stats = upsert_channel_videos_from_rss(&pool, "UC1", &items, 9999)
             .await
             .unwrap();
+        assert_eq!(stats.inserted, 2);
+        assert_eq!(stats.updated, 0);
 
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM feed_source_items WHERE kind='channel' AND source_id='UC1'",
+        // Second pass: same items → all updates, no new inserts. The
+        // last_seen_at bumps; first_seen_at is preserved.
+        let stats = upsert_channel_videos_from_rss(&pool, "UC1", &items, 10_500)
+            .await
+            .unwrap();
+        assert_eq!(stats.inserted, 0);
+        assert_eq!(stats.updated, 2);
+
+        let (first, last): (i64, i64) = sqlx::query_as(
+            "SELECT first_seen_at, last_seen_at FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vA'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(n, PER_SOURCE_CAP);
+        assert_eq!(first, 9999);
+        assert_eq!(last, 10_500);
+    }
 
-        // Oldest (v0..v4) should be gone; newest kept.
-        let kept: Vec<String> = sqlx::query_scalar(
-            "SELECT video_id FROM feed_source_items WHERE kind='channel' AND source_id='UC1' \
-             ORDER BY published_at DESC LIMIT 1",
+    #[tokio::test]
+    async fn rss_upsert_clears_tombstone() {
+        let pool = setup_db().await;
+        upsert_channel(&pool, "UC1").await.unwrap();
+        // Seed a tombstoned row.
+        sqlx::query(
+            "INSERT INTO channel_videos \
+                 (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vTomb', 'title', 100, 100, 'backfill', 1)",
         )
-        .fetch_all(&pool)
+        .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(kept[0], format!("v{}", PER_SOURCE_CAP + 4));
+
+        let items = vec![mk_item("vTomb", 999)];
+        let stats = upsert_channel_videos_from_rss(&pool, "UC1", &items, 200)
+            .await
+            .unwrap();
+        assert_eq!(stats.untombstoned, 1);
+
+        let is_deleted: i64 = sqlx::query_scalar(
+            "SELECT is_deleted FROM channel_videos \
+              WHERE channel_id = 'UC1' AND video_id = 'vTomb'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(is_deleted, 0, "RSS sighting must clear the tombstone");
     }
 
     #[tokio::test]
@@ -732,18 +799,12 @@ mod tests {
         let pool = setup_db().await;
         let child = insert_child(&pool, "kid").await;
 
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        upsert_source(&pool, KIND_CHANNEL, "UC2").await.unwrap();
-        replace_source_items(
-            &pool,
-            KIND_CHANNEL,
-            "UC1",
-            &[mk_item("vA", 100), mk_item("vB", 200)],
-            0,
-        )
-        .await
-        .unwrap();
-        replace_source_items(&pool, KIND_CHANNEL, "UC2", &[mk_item("vC", 300)], 0)
+        upsert_channel(&pool, "UC1").await.unwrap();
+        upsert_channel(&pool, "UC2").await.unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC2", &[mk_item("vC", 300)], 0)
             .await
             .unwrap();
 
@@ -771,23 +832,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feed_for_child_orders_null_published_at_by_fetched_at() {
-        // Regression: sidecar fallback writes items with
-        // `published_at = NULL`. They must still surface near the top
-        // when their `fetched_at` is recent, instead of being sorted
-        // behind every RSS-timestamped item via COALESCE(..., 0).
+    async fn feed_for_child_excludes_tombstoned() {
+        let pool = setup_db().await;
+        let child = insert_child(&pool, "kid").await;
+        upsert_channel(&pool, "UC1").await.unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
+        allow_channel(&pool, child, "UC1").await;
+
+        // Tombstone vB.
+        sqlx::query(
+            "UPDATE channel_videos SET is_deleted = 1 \
+              WHERE channel_id = 'UC1' AND video_id = 'vB'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let feed = feed_for_child(&pool, child, 10).await.unwrap();
+        let ids: Vec<&str> = feed.iter().map(|i| i.video_id.as_str()).collect();
+        assert_eq!(ids, vec!["vA"]);
+    }
+
+    #[tokio::test]
+    async fn feed_for_child_orders_null_published_at_by_last_seen_at() {
         let pool = setup_db().await;
         let child = insert_child(&pool, "kid").await;
 
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        upsert_source(&pool, KIND_CHANNEL, "UC2").await.unwrap();
+        upsert_channel(&pool, "UC1").await.unwrap();
+        upsert_channel(&pool, "UC2").await.unwrap();
 
-        // UC1: an RSS-timestamped item from "long ago".
-        replace_source_items(&pool, KIND_CHANNEL, "UC1", &[mk_item("vOld", 100)], 100)
+        // UC1: RSS item from long ago.
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vOld", 100)], 100)
             .await
             .unwrap();
-        // UC2: a sidecar-style item with NULL published_at, fetched
-        // much more recently than vOld was published.
+        // UC2: sidecar-style item with NULL published_at, fetched
+        // much more recently.
         let sidecar = ItemRow {
             video_id: "vNew".into(),
             title: "title-vNew".into(),
@@ -797,7 +878,7 @@ mod tests {
             published_at: None,
             published_raw: Some("3 days ago".into()),
         };
-        replace_source_items(&pool, KIND_CHANNEL, "UC2", &[sidecar], 10_000)
+        upsert_channel_videos_from_sidecar(&pool, "UC2", &[sidecar], 10_000)
             .await
             .unwrap();
 
@@ -806,30 +887,19 @@ mod tests {
 
         let feed = feed_for_child(&pool, child, 10).await.unwrap();
         let ids: Vec<&str> = feed.iter().map(|i| i.video_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["vNew", "vOld"],
-            "sidecar item (NULL published_at, fetched_at=10000) should rank above RSS item (published_at=100)"
-        );
+        assert_eq!(ids, vec!["vNew", "vOld"]);
     }
 
     #[tokio::test]
     async fn feed_for_child_excludes_hidden_videos() {
         let pool = setup_db().await;
         let child = insert_child(&pool, "kid").await;
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        replace_source_items(
-            &pool,
-            KIND_CHANNEL,
-            "UC1",
-            &[mk_item("vA", 100), mk_item("vB", 200)],
-            0,
-        )
-        .await
-        .unwrap();
+        upsert_channel(&pool, "UC1").await.unwrap();
+        upsert_channel_videos_from_rss(&pool, "UC1", &[mk_item("vA", 100), mk_item("vB", 200)], 0)
+            .await
+            .unwrap();
         allow_channel(&pool, child, "UC1").await;
 
-        // Hide vB; only vA should remain.
         sqlx::query(
             "INSERT INTO hidden_videos (child_account_id, video_id) \
              VALUES (?, 'vB')",
@@ -848,11 +918,8 @@ mod tests {
     async fn claim_due_sources_leases_so_concurrent_claim_skips() {
         let pool = setup_db().await;
         for id in ["UC1", "UC2", "UC3"] {
-            upsert_source(&pool, KIND_CHANNEL, id).await.unwrap();
+            upsert_channel(&pool, id).await.unwrap();
         }
-        // All three have next_poll_at = 0; the first claim takes all,
-        // the second should return nothing because the lease pushed
-        // them into the future.
         let now = 1_000;
         let first = claim_due_sources(&pool, now, 10, 60).await.unwrap();
         assert_eq!(first.len(), 3);
@@ -862,7 +929,6 @@ mod tests {
             "leased rows must not be re-claimed within the lease window"
         );
 
-        // After the lease expires, they reappear.
         let later = now + 120;
         let third = claim_due_sources(&pool, later, 10, 60).await.unwrap();
         assert_eq!(third.len(), 3);
@@ -871,15 +937,15 @@ mod tests {
     #[tokio::test]
     async fn record_success_resets_errors_and_updates_etag() {
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UC1").await.unwrap();
-        record_poll_failure(&pool, KIND_CHANNEL, "UC1", "boom", 100, 50)
+        upsert_channel(&pool, "UC1").await.unwrap();
+        record_poll_failure(&pool, "UC1", "boom", 100, 50)
             .await
             .unwrap();
-        record_poll_failure(&pool, KIND_CHANNEL, "UC1", "boom", 200, 60)
+        record_poll_failure(&pool, "UC1", "boom", 200, 60)
             .await
             .unwrap();
         let errs: i64 = sqlx::query_scalar(
-            "SELECT consecutive_errors FROM feed_sources WHERE kind='channel' AND source_id='UC1'",
+            "SELECT rss_consecutive_errors FROM channel_sync_state WHERE channel_id='UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -889,8 +955,7 @@ mod tests {
         record_poll_success(
             &pool,
             PollSuccess {
-                kind: KIND_CHANNEL,
-                source_id: "UC1",
+                channel_id: "UC1",
                 title: Some("Channel Title"),
                 etag: Some("etag-xyz"),
                 last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT"),
@@ -902,8 +967,8 @@ mod tests {
         .unwrap();
 
         let (errs, etag, title): (i64, Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT consecutive_errors, etag, title \
-               FROM feed_sources WHERE kind='channel' AND source_id='UC1'",
+            "SELECT rss_consecutive_errors, rss_etag, channel_title \
+               FROM channel_sync_state WHERE channel_id='UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -915,38 +980,29 @@ mod tests {
 
     #[tokio::test]
     async fn record_poll_deferred_preserves_consecutive_errors() {
-        // Rate-capped sources land here. The previous design used
-        // `record_poll_skipped`, which clobbered `consecutive_errors`
-        // — wrong for transient throttling because it would mask any
-        // underlying failure history. `record_poll_deferred` must
-        // leave the counter alone.
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UCkeep").await.unwrap();
-        // Pre-seed two prior errors so we can prove they survive.
+        upsert_channel(&pool, "UCkeep").await.unwrap();
         sqlx::query(
-            "UPDATE feed_sources SET consecutive_errors = 2 \
-              WHERE kind = 'channel' AND source_id = 'UCkeep'",
+            "UPDATE channel_sync_state SET rss_consecutive_errors = 2 \
+              WHERE channel_id = 'UCkeep'",
         )
         .execute(&pool)
         .await
         .unwrap();
 
-        record_poll_deferred(&pool, KIND_CHANNEL, "UCkeep", "rate-capped", 999, 50)
+        record_poll_deferred(&pool, "UCkeep", "rate-capped", 999, 50)
             .await
             .unwrap();
 
         let (errs, last_polled, last_err, next): (i64, Option<i64>, Option<String>, i64) =
             sqlx::query_as(
-                "SELECT consecutive_errors, last_polled_at, last_error, next_poll_at \
-                   FROM feed_sources WHERE kind='channel' AND source_id='UCkeep'",
+                "SELECT rss_consecutive_errors, rss_last_polled_at, rss_last_error, rss_next_poll_at \
+                   FROM channel_sync_state WHERE channel_id='UCkeep'",
             )
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(
-            errs, 2,
-            "deferred path must preserve prior consecutive_errors"
-        );
+        assert_eq!(errs, 2);
         assert_eq!(last_polled, Some(50));
         assert_eq!(last_err.as_deref(), Some("rate-capped"));
         assert_eq!(next, 999);
@@ -955,34 +1011,26 @@ mod tests {
     #[tokio::test]
     async fn record_source_dead_pushes_next_poll_and_clears_errors() {
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UCdead").await.unwrap();
-        // Accumulate some failures so we can prove they get cleared.
-        record_poll_failure(&pool, KIND_CHANNEL, "UCdead", "404", 100, 50)
+        upsert_channel(&pool, "UCdead").await.unwrap();
+        record_poll_failure(&pool, "UCdead", "404", 100, 50)
             .await
             .unwrap();
-        record_poll_failure(&pool, KIND_CHANNEL, "UCdead", "404", 200, 60)
+        record_poll_failure(&pool, "UCdead", "404", 200, 60)
             .await
             .unwrap();
 
-        record_source_dead(
-            &pool,
-            KIND_CHANNEL,
-            "UCdead",
-            "channel not found",
-            9_999_999,
-            70,
-        )
-        .await
-        .unwrap();
+        record_source_dead(&pool, "UCdead", "channel not found", 9_999_999, 70)
+            .await
+            .unwrap();
 
         let (errs, next, err): (i64, i64, Option<String>) = sqlx::query_as(
-            "SELECT consecutive_errors, next_poll_at, last_error \
-               FROM feed_sources WHERE kind='channel' AND source_id='UCdead'",
+            "SELECT rss_consecutive_errors, rss_next_poll_at, rss_last_error \
+               FROM channel_sync_state WHERE channel_id='UCdead'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(errs, 0, "dead-channel path must clear the error counter");
+        assert_eq!(errs, 0);
         assert_eq!(next, 9_999_999);
         assert_eq!(err.as_deref(), Some("channel not found"));
     }
@@ -990,25 +1038,23 @@ mod tests {
     #[tokio::test]
     async fn record_sidecar_fallback_persists_timestamp() {
         let pool = setup_db().await;
-        upsert_source(&pool, KIND_CHANNEL, "UCfb").await.unwrap();
-        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCfb", 12345)
+        upsert_channel(&pool, "UCfb").await.unwrap();
+        record_sidecar_fallback_dispatched(&pool, "UCfb", 12345)
             .await
             .unwrap();
         let ts: Option<i64> = sqlx::query_scalar(
-            "SELECT last_sidecar_fallback_at FROM feed_sources \
-              WHERE kind='channel' AND source_id='UCfb'",
+            "SELECT last_sidecar_fallback_at FROM channel_sync_state \
+              WHERE channel_id='UCfb'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(ts, Some(12345));
 
-        // And it round-trips through `claim_due_sources` so the
-        // refresher can read it without an extra SELECT.
         let claimed = claim_due_sources(&pool, 1_000_000, 10, 60).await.unwrap();
         let row = claimed
             .iter()
-            .find(|s| s.source_id == "UCfb")
+            .find(|s| s.channel_id == "UCfb")
             .expect("UCfb is due");
         assert_eq!(row.last_sidecar_fallback_at, Some(12345));
     }
@@ -1016,57 +1062,46 @@ mod tests {
     #[tokio::test]
     async fn capacity_counts_aggregates_in_one_query() {
         let pool = setup_db().await;
-        // Three sources: one overdue, one polled recently, one fell
-        // back recently. Lets us prove every CASE branch fires.
         for id in ["UCq1", "UCq2", "UCq3"] {
-            upsert_source(&pool, KIND_CHANNEL, id).await.unwrap();
+            upsert_channel(&pool, id).await.unwrap();
         }
         let now: i64 = 100_000;
-        // UCq1 is overdue (next_poll_at < now) and was polled an hour ago.
         sqlx::query(
-            "UPDATE feed_sources SET next_poll_at = ?, last_polled_at = ? \
-              WHERE source_id = 'UCq1'",
+            "UPDATE channel_sync_state SET rss_next_poll_at = ?, rss_last_polled_at = ? \
+              WHERE channel_id = 'UCq1'",
         )
         .bind(now - 60)
         .bind(now - 3500)
         .execute(&pool)
         .await
         .unwrap();
-        // UCq2 was polled 10 minutes ago, next poll in the future.
         sqlx::query(
-            "UPDATE feed_sources SET next_poll_at = ?, last_polled_at = ? \
-              WHERE source_id = 'UCq2'",
+            "UPDATE channel_sync_state SET rss_next_poll_at = ?, rss_last_polled_at = ? \
+              WHERE channel_id = 'UCq2'",
         )
         .bind(now + 1800)
         .bind(now - 600)
         .execute(&pool)
         .await
         .unwrap();
-        // UCq3 fell back to the sidecar 10 minutes ago. Push its
-        // next_poll_at forward so it doesn't count as overdue.
-        sqlx::query("UPDATE feed_sources SET next_poll_at = ? WHERE source_id = 'UCq3'")
+        sqlx::query("UPDATE channel_sync_state SET rss_next_poll_at = ? WHERE channel_id = 'UCq3'")
             .bind(now + 3600)
             .execute(&pool)
             .await
             .unwrap();
-        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCq3", now - 600)
+        record_sidecar_fallback_dispatched(&pool, "UCq3", now - 600)
             .await
             .unwrap();
 
         let counts = capacity_counts(&pool, now).await.unwrap();
         assert_eq!(counts.total_sources, 3);
-        assert_eq!(counts.queue_depth, 1, "only UCq1 is overdue");
-        // UCq1 and UCq2 were both polled in the last hour. UCq3 has
-        // no last_polled_at set so it doesn't count.
+        assert_eq!(counts.queue_depth, 1);
         assert_eq!(counts.polls_last_hour, 2);
         assert_eq!(counts.sidecar_fallbacks_last_hour, 1);
     }
 
     #[tokio::test]
     async fn capacity_counts_handles_empty_table() {
-        // Empty feed_sources used to produce NULL from the conditional
-        // SUMs; the COALESCE wrappers in the query keep the FromRow
-        // derive happy.
         let pool = setup_db().await;
         let counts = capacity_counts(&pool, 0).await.unwrap();
         assert_eq!(counts.total_sources, 0);
@@ -1079,24 +1114,19 @@ mod tests {
     async fn sidecar_fallbacks_in_last_hour_counts_only_recent() {
         let pool = setup_db().await;
         for id in ["UCa", "UCb", "UCc"] {
-            upsert_source(&pool, KIND_CHANNEL, id).await.unwrap();
+            upsert_channel(&pool, id).await.unwrap();
         }
-        // `now = 10_000`. Window starts at 10_000 - 3600 = 6_400.
-        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCa", 9_500)
+        record_sidecar_fallback_dispatched(&pool, "UCa", 9_500)
             .await
             .unwrap();
-        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCb", 6_500)
+        record_sidecar_fallback_dispatched(&pool, "UCb", 6_500)
             .await
             .unwrap();
-        // UCc fell back well outside the window.
-        record_sidecar_fallback_dispatched(&pool, KIND_CHANNEL, "UCc", 1_000)
+        record_sidecar_fallback_dispatched(&pool, "UCc", 1_000)
             .await
             .unwrap();
 
         let n = sidecar_fallbacks_in_last_hour(&pool, 10_000).await.unwrap();
-        assert_eq!(
-            n, 2,
-            "UCc fell back outside the 1h window and must not count"
-        );
+        assert_eq!(n, 2);
     }
 }

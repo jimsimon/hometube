@@ -19,6 +19,12 @@ use crate::error::{AppError, AppResult};
 /// Default timeout for any single yt-dlp invocation.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default timeout for a channel-archive `--flat-playlist` run. Larger
+/// than [`DEFAULT_TIMEOUT`] because the subprocess paginates through
+/// InnerTube continuations for the entire channel, and very large
+/// channels (10k+ uploads) need a few minutes to drain.
+pub const FLAT_PLAYLIST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// One format/quality entry from yt-dlp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Format {
@@ -304,6 +310,179 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // name still survived yt-dlp's cookiejar rewrite.
     yt_args_guard.persist_cookies_if_safe().await;
     Ok(result)
+}
+
+/// One entry from yt-dlp's `--flat-playlist -j` output for a channel
+/// uploads URL. Each field is what yt-dlp emits per video stub when
+/// paginating the channel; everything except `id` is best-effort
+/// because the flat path doesn't run the full extractor.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FlatPlaylistEntry {
+    /// The video ID. Renamed for parity with the rest of the codebase.
+    #[serde(rename = "id")]
+    pub video_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `upload_date` as yt-dlp prints it: usually `"YYYYMMDD"`. With
+    /// `--extractor-args youtubetab:approximate_date` it can also be a
+    /// looser approximation. Held as raw text so the caller can keep
+    /// it for `published_raw`.
+    #[serde(default)]
+    pub upload_date: Option<String>,
+    /// Optional duration in seconds. Often omitted in flat output.
+    #[serde(default)]
+    pub duration: Option<f64>,
+    /// Optional view count. Often omitted in flat output.
+    #[serde(default)]
+    pub view_count: Option<i64>,
+    /// The channel's title as yt-dlp saw it. Available even though we
+    /// passed `--flat-playlist` because the playlist envelope carries
+    /// channel-level metadata.
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+/// Result of a successful channel-archive backfill run, returned by
+/// [`flat_playlist_channel`].
+#[derive(Debug)]
+pub struct FlatPlaylistResult {
+    pub entries: Vec<FlatPlaylistEntry>,
+}
+
+/// Configuration knobs passed in by the backfill loop. Kept as a
+/// separate struct so the loop can compose them from `app_config`
+/// tunables without growing the function signature.
+#[derive(Debug, Clone, Copy)]
+pub struct FlatPlaylistTunables {
+    /// Subprocess timeout. Defaults to [`FLAT_PLAYLIST_TIMEOUT`].
+    pub timeout: Duration,
+    /// `--sleep-requests` value (seconds between InnerTube
+    /// continuation requests inside the subprocess). 0 disables.
+    pub sleep_requests_s: u32,
+    /// `--sleep-interval` (minimum sleep between any two requests).
+    pub sleep_interval_s: u32,
+    /// `--max-sleep-interval` (upper bound on the random sleep).
+    pub max_sleep_interval_s: u32,
+}
+
+impl Default for FlatPlaylistTunables {
+    fn default() -> Self {
+        Self {
+            timeout: FLAT_PLAYLIST_TIMEOUT,
+            sleep_requests_s: 1,
+            sleep_interval_s: 1,
+            max_sleep_interval_s: 3,
+        }
+    }
+}
+
+/// Drive yt-dlp through a channel's `/videos` tab in `--flat-playlist`
+/// mode, returning every video stub the channel exposes. Uses the same
+/// cookies + PO token + multi-client extractor scaffolding as
+/// [`extract`] so the InnerTube pagination runs inside the hardened
+/// anti-bot envelope. Intra-channel pagination requests are
+/// throttled via yt-dlp's own `--sleep-*` flags.
+///
+/// Returns the full list of entries on success. On failure the error
+/// includes the stderr tail so the caller can classify bot-check
+/// signatures (sign-in / consent / 429 / 403).
+pub async fn flat_playlist_channel(
+    cfg: &Config,
+    channel_id: &str,
+    tunables: &FlatPlaylistTunables,
+) -> AppResult<FlatPlaylistResult> {
+    let url = format!("https://www.youtube.com/channel/{channel_id}/videos");
+
+    let mut cmd = Command::new(&cfg.ytdlp_path);
+    cmd.arg("--flat-playlist")
+        .arg("--skip-download")
+        .arg("--no-warnings")
+        .arg("-j")
+        .arg("--extractor-args")
+        .arg("youtubetab:approximate_date")
+        .arg("--sleep-requests")
+        .arg(tunables.sleep_requests_s.to_string())
+        .arg("--sleep-interval")
+        .arg(tunables.sleep_interval_s.to_string())
+        .arg("--max-sleep-interval")
+        .arg(tunables.max_sleep_interval_s.to_string());
+    let yt_args_guard = append_youtube_args(&mut cmd);
+    cmd.arg(&url);
+    debug!(?cmd, %channel_id, "running yt-dlp --flat-playlist");
+
+    let output = timeout(tunables.timeout, cmd.output())
+        .await
+        .map_err(|_| {
+            AppError::Other(anyhow::anyhow!(
+                "yt-dlp --flat-playlist timed out after {}s",
+                tunables.timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| AppError::Other(anyhow::anyhow!("spawning yt-dlp: {e}")))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    if !output.status.success() {
+        warn!(%channel_id, %stderr, "yt-dlp --flat-playlist failed");
+        return Err(AppError::Other(anyhow::anyhow!(
+            "yt-dlp exited with status {}: {}",
+            output.status,
+            stderr_tail(&stderr)
+        )));
+    }
+
+    // Parse stdout as a sequence of newline-delimited JSON objects.
+    // We deliberately tolerate per-line parse failures so a single
+    // unparseable entry doesn't fail the whole backfill.
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("yt-dlp stdout not UTF-8: {e}")))?;
+    let mut entries = Vec::new();
+    for (lineno, line) in stdout.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<FlatPlaylistEntry>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(err) => {
+                debug!(
+                    %channel_id, lineno, %err,
+                    "skipping unparseable flat-playlist entry"
+                );
+            }
+        }
+    }
+
+    // Fold any rotated session cookies back into the canonical cookie
+    // file, mirroring the `extract` path.
+    yt_args_guard.persist_cookies_if_safe().await;
+
+    debug!(
+        %channel_id,
+        entries = entries.len(),
+        "yt-dlp --flat-playlist completed"
+    );
+    Ok(FlatPlaylistResult { entries })
+}
+
+/// Tail the last ~1 KB of yt-dlp stderr for inclusion in an error
+/// message. Avoids ballooning the error with multi-MB stderr from a
+/// genuinely-broken extractor.
+fn stderr_tail(stderr: &str) -> String {
+    const TAIL: usize = 1024;
+    if stderr.len() <= TAIL {
+        stderr.to_string()
+    } else {
+        let start = stderr.len() - TAIL;
+        // Find the next char boundary so we don't slice mid-UTF-8.
+        let mut s = start;
+        while s < stderr.len() && !stderr.is_char_boundary(s) {
+            s += 1;
+        }
+        format!("…{}", &stderr[s..])
+    }
 }
 
 /// Temp directory for yt-dlp's `--write-pages` output.

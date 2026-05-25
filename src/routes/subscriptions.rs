@@ -123,6 +123,35 @@ pub async fn subscribe(
     .execute(&state.db)
     .await?;
 
+    // Priority hint for the channel backfiller: when a child subscribes
+    // to an allowlisted channel that's still waiting for its first
+    // backfill, bump its place in the queue. No-op for channels that
+    // have already been backfilled (they stay on their 30-day cycle)
+    // or that aren't tracked yet (subscriptions to non-allowlisted
+    // channels don't trigger sync; the parent allowlist remains the
+    // authority).
+    //
+    // Best-effort — a DB error here doesn't fail the subscription
+    // (the subscription itself is already persisted). We log so a
+    // sustained failure surfaces in the operator's diagnostics
+    // instead of being silently swallowed.
+    if let Err(err) = sqlx::query(
+        "UPDATE channel_sync_state SET backfill_next_at = 0 \
+          WHERE channel_id = ? \
+            AND backfill_status = 'pending' \
+            AND backfill_last_completed_at IS NULL",
+    )
+    .bind(&info.id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(
+            channel_id = %info.id,
+            %err,
+            "subscribe priority-hint UPDATE failed (subscription itself succeeded)"
+        );
+    }
+
     let row = fetch_one(&state, current.id, &info.id).await?;
     Ok(Json(row))
 }

@@ -18,18 +18,26 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
-use crate::services::access::can_child_view;
-use crate::services::youtube::{ChannelInfo, ChannelVideoItem, YoutubeClient};
+use crate::routes::search::{decode_page_token, encode_page_token, PageCursor};
+// Note: `can_child_view` is no longer needed here — `list_videos`
+// applies its blocked/hidden filters inline in the main SQL query
+// (which simultaneously fixes the prior pagination bug). Channel-level
+// access is still gated by `enforce_channel_access`.
+use crate::services::youtube::{ChannelInfo, ChannelVideoItem, ThumbnailInfo};
 use crate::state::AppState;
 
 /// Default page size when paging through a channel's videos.
 const PAGE_SIZE: u32 = 30;
 
-/// `GET /api/channels/:channelId` — return channel metadata if the
-/// child is allowed to see this channel.
+/// `GET /api/channels/:channelId` — return channel metadata for an
+/// allowed channel, served entirely from `channel_sync_state`. Zero
+/// YouTube calls — the metadata was either forwarded from the parent
+/// search response at allowlist time or filled in by the sidecar
+/// fallback on raw-paste adds.
 pub async fn get_channel(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -37,12 +45,49 @@ pub async fn get_channel(
 ) -> AppResult<Json<ChannelInfo>> {
     enforce_channel_access(&state, current.id, &channel_id).await?;
 
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let info = yt
-        .get_channel(&channel_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    Ok(Json(info))
+    /// Columns selected from `channel_sync_state` for the header
+    /// metadata response. Aliased to satisfy clippy's
+    /// `type_complexity` lint.
+    type HeaderRow = (String, Option<String>, Option<String>, Option<String>);
+    let row: Option<HeaderRow> = sqlx::query_as(
+        "SELECT channel_id, channel_title, channel_thumbnail_url, description \
+           FROM channel_sync_state WHERE channel_id = ?",
+    )
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (id, title, thumbnail_url, description) = row.ok_or(AppError::NotFound)?;
+
+    // video_count is computed live so it matches what the child
+    // actually sees (excludes tombstones).
+    let video_count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM channel_videos \
+           WHERE channel_id = ? AND is_deleted = 0",
+    )
+    .bind(&channel_id)
+    .fetch_one(&state.db)
+    .await
+    .ok();
+
+    let mut thumbnails: HashMap<String, ThumbnailInfo> = HashMap::new();
+    if let Some(url) = thumbnail_url {
+        thumbnails.insert(
+            "default".into(),
+            ThumbnailInfo {
+                url,
+                width: None,
+                height: None,
+            },
+        );
+    }
+
+    Ok(Json(ChannelInfo {
+        id,
+        title: title.unwrap_or_default(),
+        description: description.unwrap_or_default(),
+        thumbnails,
+        video_count,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,14 +108,32 @@ pub struct ChannelVideosPage {
 
 /// `GET /api/channels/:channelId/videos`.
 ///
-/// Pulls a page of the channel's recent uploads (via the discovery
-/// sidecar), then drops anything the child isn't allowed to see
-/// (blocked or not on the allowlist). The `most_viewed` sort applies
-/// a stable secondary sort by `view_count` — but the sidecar's
-/// channel-videos response doesn't expose view counts, so we treat
-/// the `latest` ordering as authoritative and only re-order when a
-/// real view-count source is available. For now, `most_viewed` is
-/// accepted but degrades gracefully to `latest`.
+/// Pulls a page of the channel's archive directly from `channel_videos`
+/// (no YouTube round-trip per request). Offset-based pagination via
+/// the shared `PageCursor` type; the response shape (`items` +
+/// `next_page_token`) matches the previous sidecar-backed version
+/// for frontend compatibility.
+///
+/// `sort=most_viewed` orders by `view_count DESC NULLS LAST` (populated
+/// by the yt-dlp backfill); RSS-only rows with NULL view_count sort to
+/// the bottom via `COALESCE(view_count, -1)`. The default `latest` sort
+/// is by `published_at DESC, last_seen_at DESC`.
+///
+/// **Access control** lives in the SQL: blocked + hidden videos are
+/// excluded by `NOT EXISTS` subqueries in the main query, mirroring
+/// `feed_for_child`. We previously filtered post-fetch via
+/// `can_child_view`, which had two bugs:
+///
+/// 1. **N+1 queries** — up to 4 round-trips per row × `PAGE_SIZE`
+///    rows = ~120 queries per page.
+/// 2. **Broken pagination** — `next_page_token` was emitted iff the
+///    *filtered* page was full, so any blocked/hidden video silently
+///    truncated the listing (`items.len() < PAGE_SIZE` ⇒ no more
+///    pages, even when thousands more were available).
+///
+/// `enforce_channel_access` at the top of the handler still gates
+/// channel-level access; per-video allowlist is implicit since we
+/// only read from this channel's rows.
 pub async fn list_videos(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -79,35 +142,120 @@ pub async fn list_videos(
 ) -> AppResult<Json<ChannelVideosPage>> {
     enforce_channel_access(&state, current.id, &channel_id).await?;
 
-    let yt = YoutubeClient::from_db(&state.db).await?;
-    let page = yt
-        .list_channel_videos(&channel_id, PAGE_SIZE, q.page_token.as_deref())
-        .await?;
+    let cursor = q
+        .page_token
+        .as_deref()
+        .and_then(decode_page_token)
+        .map(|c| c.offset)
+        .unwrap_or(0);
 
-    // Filter through access control.
-    let mut items = Vec::with_capacity(page.items.len());
-    for it in page.items {
-        let allowed = can_child_view(
-            &state.db,
-            current.id,
-            &it.video_id,
-            it.channel_id.as_deref().or(Some(channel_id.as_str())),
-        )
-        .await
-        .unwrap_or(false);
-        if allowed {
-            items.push(it);
+    // Whitelist `sort` so typos surface as a clear 400 instead of
+    // silently degrading to `latest` with no warning. The values
+    // accepted here must match the CASE expression in the SQL below.
+    let sort = match q.sort.as_deref().unwrap_or("latest") {
+        "latest" | "most_viewed" => q.sort.as_deref().unwrap_or("latest").to_string(),
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown sort '{other}' — accepted values: latest, most_viewed"
+            )));
         }
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        video_id: String,
+        title: String,
+        channel_id: Option<String>,
+        channel_title: Option<String>,
+        thumbnail_url: Option<String>,
+        published_at: Option<i64>,
+        #[allow(dead_code)]
+        duration_s: Option<i64>,
+        #[allow(dead_code)]
+        view_count: Option<i64>,
     }
 
-    // The plan exposes a `sort` parameter — we honour `latest` directly.
-    // `most_viewed` is treated as a no-op secondary sort (kept for API
-    // forward-compatibility).
-    let _ = q.sort;
+    // Single query: filter tombstones + blocked + hidden inline so
+    // `LIMIT n` returns at most `n` actually-renderable rows. The
+    // `NOT EXISTS` pattern is the same one `feed_for_child` uses
+    // (`src/services/feed_cache.rs:feed_for_child`).
+    //
+    // The ORDER BY uses a CASE on the requested sort so we don't have
+    // to fork two queries:
+    //   - `most_viewed` → sort by view_count DESC (nulls last via
+    //     COALESCE(-1)), then published_at DESC as a tiebreaker.
+    //   - anything else → sort by published_at DESC, last_seen_at DESC.
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT cv.video_id, cv.title, cv.channel_id, cv.channel_title, cv.thumbnail_url, \
+                cv.published_at, cv.duration_s, cv.view_count \
+           FROM channel_videos cv \
+          WHERE cv.channel_id = ?1 \
+            AND cv.is_deleted = 0 \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM blocked_videos b \
+                 WHERE b.child_account_id = ?2 AND b.video_id = cv.video_id) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM hidden_videos h \
+                 WHERE h.child_account_id = ?2 AND h.video_id = cv.video_id) \
+          ORDER BY \
+              CASE WHEN ?3 = 'most_viewed' THEN COALESCE(cv.view_count, -1) ELSE 0 END DESC, \
+              cv.published_at DESC, \
+              cv.last_seen_at DESC \
+          LIMIT ?4 OFFSET ?5",
+    )
+    .bind(&channel_id)
+    .bind(current.id)
+    .bind(&sort)
+    .bind(PAGE_SIZE as i64)
+    .bind(cursor)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Capture the row count BEFORE adapting, so pagination is driven
+    // by what the DB returned (post-filter) rather than by what we
+    // hand back to the client.
+    let fetched = rows.len() as u32;
+    let items: Vec<ChannelVideoItem> = rows
+        .into_iter()
+        .map(|r| ChannelVideoItem {
+            video_id: r.video_id,
+            title: r.title,
+            channel_id: r.channel_id,
+            channel_title: r.channel_title,
+            thumbnails: r
+                .thumbnail_url
+                .map(|url| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "default".to_string(),
+                        ThumbnailInfo {
+                            url,
+                            width: None,
+                            height: None,
+                        },
+                    );
+                    m
+                })
+                .unwrap_or_default(),
+            published_at: r.published_at.map(|s| s.to_string()),
+            position: None,
+        })
+        .collect();
+
+    // Emit a next_page_token whenever the DB filled the page. The
+    // server has already applied is_deleted / blocked / hidden filters
+    // in SQL, so a full page from the DB really is a full client page.
+    let next_page_token = if fetched >= PAGE_SIZE {
+        Some(encode_page_token(&PageCursor {
+            offset: cursor + PAGE_SIZE as i64,
+        }))
+    } else {
+        None
+    };
 
     Ok(Json(ChannelVideosPage {
         items,
-        next_page_token: page.next_page_token,
+        next_page_token,
     }))
 }
 

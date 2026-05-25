@@ -192,17 +192,11 @@ pub async fn seed_feed_item(
     .execute(&state.db)
     .await?;
 
-    crate::services::feed_cache::upsert_source(
-        &state.db,
-        crate::services::feed_cache::KIND_CHANNEL,
-        &body.channel_id,
-    )
-    .await?;
+    crate::services::feed_cache::upsert_channel(&state.db, &body.channel_id).await?;
 
     let now = chrono::Utc::now().timestamp();
-    crate::services::feed_cache::replace_source_items(
+    crate::services::feed_cache::upsert_channel_videos_from_rss(
         &state.db,
-        crate::services::feed_cache::KIND_CHANNEL,
         &body.channel_id,
         &[crate::services::feed_cache::ItemRow {
             video_id: body.video_id,

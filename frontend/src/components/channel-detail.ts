@@ -58,9 +58,15 @@ export class ChannelDetail extends LitElement {
       margin: 0;
       font-size: 1.4rem;
     }
-    .meta .stats {
+    .meta .description {
       color: var(--wa-color-text-quiet);
       font-size: 0.9rem;
+      margin: 0.25rem 0 0;
+      max-width: 60ch;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
     .controls {
       display: flex;
@@ -180,10 +186,8 @@ export class ChannelDetail extends LitElement {
           : html`<div class="avatar" aria-hidden="true"></div>`}
         <div class="meta">
           <h1>${this.info?.title ?? "Channel"}</h1>
-          ${this.info?.subscriber_count != null
-            ? html`<div class="stats">
-                ${this.info.subscriber_count.toLocaleString()} subscribers
-              </div>`
+          ${this.info?.description
+            ? html`<p class="description">${this.info.description}</p>`
             : null}
         </div>
         <hometube-subscribe-button channel-id=${this.channelId}></hometube-subscribe-button>

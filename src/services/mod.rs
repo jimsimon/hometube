@@ -13,6 +13,7 @@
 //!   yt-dlp / cache-cleanup handlers
 
 pub mod access;
+pub mod channel_backfill;
 pub mod cron;
 pub mod dash;
 pub mod feed_cache;
@@ -22,6 +23,7 @@ pub mod notifications;
 pub mod segment_ranges;
 pub mod segment_store;
 pub mod setup;
+pub mod thumbnail_store;
 pub mod video_cache;
 pub mod youtube;
 pub mod youtube_rss;

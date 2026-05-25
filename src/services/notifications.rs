@@ -28,10 +28,17 @@ use crate::error::AppResult;
 pub const TYPE_YTDLP_FAILURE: &str = "ytdlp_failure";
 pub const TYPE_NEW_SEARCH_TERM: &str = "new_search_term";
 pub const TYPE_SYSTEM_UPDATE: &str = "system_update";
+pub const TYPE_CHANNEL_BACKFILL_ERROR: &str = "channel_backfill_error";
 
 /// Dedupe window for the in-process recent-failures cache used by
 /// [`dispatch_ytdlp_failure_deduped`].
 const YTDLP_FAILURE_DEDUP: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Dedupe window for the in-process recent-shelve cache used by
+/// [`dispatch_channel_backfill_error_deduped`]. Mirrors yt-dlp's
+/// 24-hour window so the parent notification bell doesn't churn while
+/// the operator is investigating.
+const CHANNEL_BACKFILL_ERROR_DEDUP: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One day in seconds — used by the per-day dedup helpers.
 const ONE_DAY_SECS: i64 = 24 * 60 * 60;
@@ -347,6 +354,58 @@ async fn should_dispatch_ytdlp_failure(video_id: &str) -> bool {
         }
     }
     guard.insert(video_id.to_string(), now);
+    true
+}
+
+/// Dispatch a channel-backfill shelve notification, deduped against an
+/// in-process cache so a single bad channel doesn't spam parents on
+/// every retry tick.
+///
+/// Called only when the backfill loop transitions a channel to
+/// `backfill_status='shelved'` after 5 consecutive failures — not on
+/// every failure. Deduped per `channel_id` per
+/// [`CHANNEL_BACKFILL_ERROR_DEDUP`] window so an operator who clears
+/// the shelved state and watches it re-shelve doesn't see two pings.
+pub async fn dispatch_channel_backfill_error_deduped(
+    pool: &SqlitePool,
+    channel_id: &str,
+    channel_title: Option<&str>,
+    error_message: &str,
+) -> AppResult<()> {
+    if !should_dispatch_channel_backfill_error(channel_id).await {
+        return Ok(());
+    }
+    let display = channel_title.unwrap_or(channel_id);
+    let payload = serde_json::json!({
+        "channel_id": channel_id,
+        "channel_title": channel_title,
+        "error": error_message,
+    });
+    broadcast(
+        pool,
+        TYPE_CHANNEL_BACKFILL_ERROR,
+        "Channel backfill failed",
+        &format!(
+            "Could not refresh the video archive for \"{display}\" after repeated attempts. \
+             The channel has been shelved until you clear it from the parent settings page."
+        ),
+        &payload,
+    )
+    .await
+}
+
+async fn should_dispatch_channel_backfill_error(channel_id: &str) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().await;
+    let now = Instant::now();
+    guard.retain(|_, ts| now.duration_since(*ts) < CHANNEL_BACKFILL_ERROR_DEDUP);
+    if let Some(prev) = guard.get(channel_id) {
+        if now.duration_since(*prev) < CHANNEL_BACKFILL_ERROR_DEDUP {
+            return false;
+        }
+    }
+    guard.insert(channel_id.to_string(), now);
     true
 }
 

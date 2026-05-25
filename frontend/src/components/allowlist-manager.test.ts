@@ -401,4 +401,69 @@ describe("<hometube-allowlist-manager>", () => {
     );
     expect(deleteCalls.length).toBe(1);
   });
+
+  it("forwards channel header metadata in the add-channel POST body", async () => {
+    // The body-data path on the backend prefers caller-supplied
+    // metadata to the sidecar `/channels/:id` call. This test asserts
+    // that the channel-branch of `addItemForKind` actually sends those
+    // fields, with the critical detail that for channel-kind
+    // SearchItem results the channel's display name sits in
+    // `item.title` (NOT `item.channel_title`).
+    mockFetch({
+      "allowlist/channels": [],
+      "allowlist/videos": [],
+      "parent/search": {
+        items: [
+          {
+            id: "UCabc",
+            kind: "channel",
+            title: "Mark Rober",
+            description: "About glitter bombs",
+            channel_title: null, // null for channel-kind results
+            thumbnails: { high: { url: "https://img.test/mark.jpg" } },
+          },
+        ],
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(1);
+
+      // Drive the search → result-render flow.
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "mark";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
+
+      // Click the Add button on the rendered search result.
+      const buttons = el.shadowRoot!.querySelectorAll("button, wa-button");
+      const addBtn = Array.from(buttons).find((b) =>
+        (b.textContent ?? "").trim().toLowerCase().includes("add"),
+      ) as HTMLElement | undefined;
+      expect(addBtn, "expected an Add button on the rendered result").toBeDefined();
+      addBtn!.click();
+      await flushAsync(el);
+
+      // The POST to /allowlist/channels must include the new body fields.
+      const channelPosts = fetchSpy.mock.calls.filter(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          (c[0] as string).includes("/allowlist/channels") &&
+          !(c[0] as string).match(/\/allowlist\/channels\/[^/]+$/) &&
+          (c[1] as RequestInit | undefined)?.method === "POST",
+      );
+      expect(channelPosts.length).toBe(1);
+      const init = channelPosts[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect(body.channel_id).toBe("UCabc");
+      // The channel name MUST come from item.title (channel-kind
+      // SearchItem) — channel_title is for video-kind results only.
+      expect(body.channel_title).toBe("Mark Rober");
+      expect(body.channel_thumbnail_url).toBe("https://img.test/mark.jpg");
+      expect(body.description).toBe("About glitter bombs");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

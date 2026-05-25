@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use hometube::{config, db, state};
 
+use hometube::services::channel_backfill;
 use hometube::services::cron::{seed_default_jobs, seed_ytdlp_info, Scheduler};
 use hometube::services::dash;
 use hometube::services::feed_refresher;
@@ -85,18 +86,24 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Backfill the feed_sources cache with every currently-allowlisted
-    // channel. New rows get `next_poll_at = 0` so the refresher
-    // schedules them on its next tick. Idempotent — re-runs every
-    // startup are no-ops.
-    if let Err(err) = backfill_feed_sources(&pool).await {
-        warn!(%err, "failed to backfill feed_sources from allowlist");
+    // Seed channel_sync_state for every currently-allowlisted channel
+    // and GC any orphan rows. New rows get `rss_next_poll_at = 0` and
+    // `backfill_next_at = 0` so both background loops pick them up on
+    // their next ticks. Idempotent.
+    if let Err(err) = channel_backfill::reconcile_with_allowlist(&pool).await {
+        warn!(%err, "failed to reconcile channel_sync_state with allowlist");
     }
 
-    // Spawn the new-videos feed refresher. Runs forever; loops on
-    // `feed_sources.next_poll_at` and writes results into the
-    // `feed_source_items` cache that backs `/api/feed/new-videos`.
+    // Spawn the freshness loop (RSS → InnerTube sidecar fallback).
+    // Loops on `channel_sync_state.rss_next_poll_at` and writes results
+    // into `channel_videos` which backs `/api/feed/new-videos`.
     feed_refresher::spawn(pool.clone());
+
+    // Spawn the channel-history backfill loop. Loops on
+    // `channel_sync_state.backfill_next_at` and reconciles the full
+    // archive via yt-dlp `--flat-playlist` (default: 1 channel/hour,
+    // monthly re-backfill).
+    channel_backfill::spawn(pool.clone(), cfg.clone());
 
     let mut app_state = state::AppState::new(cfg.clone(), pool, cookie_key);
     if let Some(sched) = scheduler {
@@ -155,24 +162,6 @@ async fn ensure_cookie_key(pool: &SqlitePool) -> anyhow::Result<Key> {
     set_config_value(pool, KEY_COOKIE_SECRET, &encoded).await?;
     info!("generated new cookie signing key");
     Ok(Key::from(&bytes[..]))
-}
-
-/// Insert a `feed_sources` row for every distinct
-/// `allowlisted_channels.channel_id` so the background refresher has
-/// something to poll on a fresh database / after the schema migration.
-async fn backfill_feed_sources(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-    // The trailing `WHERE true` disambiguates the UPSERT's `ON CONFLICT`
-    // from a potential JOIN `ON` clause in the SELECT. Without it SQLite
-    // reports `near "DO": syntax error`. See https://www.sqlite.org/lang_upsert.html
-    // ("Parsing Ambiguity").
-    sqlx::query(
-        "INSERT INTO feed_sources (kind, source_id, next_poll_at) \
-         SELECT 'channel', channel_id, 0 FROM allowlisted_channels WHERE true \
-         ON CONFLICT(kind, source_id) DO NOTHING",
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 /// Seed `metadata_cache_ttl_hours` with the default if the parent

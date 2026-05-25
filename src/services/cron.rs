@@ -428,14 +428,43 @@ async fn run_ytdlp_update(pool: &SqlitePool, cfg: &Config) -> AppResult<String> 
 }
 
 async fn run_cache_cleanup(pool: &SqlitePool) -> AppResult<(String, String)> {
-    crate::services::video_cache::cleanup_segment_cache(pool).await
+    let (msg, mut detail) = crate::services::video_cache::cleanup_segment_cache(pool).await?;
+
+    // Also evict the thumbnail cache by LRU. The thumbnail cache is a
+    // separate disk pool (one file per video) populated by
+    // `GET /api/proxy/thumbnail/:videoId` on miss + the backfill
+    // prefetch tail-call; its eviction budget is independent of the
+    // segment cache's so a busy thumbnail cache can't push out hot
+    // DASH segments.
+    let max_bytes = crate::services::thumbnail_store::configured_max_bytes(pool).await;
+    match crate::services::thumbnail_store::cleanup_lru(pool, max_bytes).await {
+        Ok((0, 0)) => {
+            detail.push_str("Thumbnail cache under cap; no evictions.\n");
+        }
+        Ok((evicted, bytes)) => {
+            detail.push_str(&format!(
+                "Thumbnail cache: evicted {evicted} entries ({} KB) by LRU.\n",
+                bytes / 1024
+            ));
+        }
+        Err(err) => {
+            tracing::warn!(%err, "thumbnail_cache cleanup failed");
+            detail.push_str(&format!("Thumbnail cache cleanup failed: {err}\n"));
+        }
+    }
+
+    Ok((msg, detail))
 }
 
-/// Drop `feed_sources` rows whose source is no longer allowlisted by
-/// any child. Items cascade via foreign key.
+/// Drop `channel_sync_state` rows (and cascade `channel_videos`) for
+/// channels no longer allowlisted by any child. Also calls
+/// `channel_backfill::reconcile_with_allowlist` so newly-allowlisted
+/// channels missing a sync_state row get one — this catches anything
+/// the route-level wiring may have missed (e.g. a direct SQL insert).
 async fn run_feed_gc(pool: &SqlitePool) -> AppResult<String> {
     let removed = crate::services::feed_cache::gc_orphan_sources(pool).await?;
-    Ok(format!("removed {removed} orphan feed source(s)"))
+    crate::services::channel_backfill::reconcile_with_allowlist(pool).await?;
+    Ok(format!("removed {removed} orphan channel(s)"))
 }
 
 async fn notify_parents_ytdlp_failure(pool: &SqlitePool, err: &str) -> AppResult<()> {

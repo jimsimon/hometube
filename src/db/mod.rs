@@ -7,8 +7,6 @@ use sqlx::{
 use std::str::FromStr;
 use tracing::info;
 
-pub mod queries;
-
 /// Open a connection pool to the SQLite database, enabling WAL journaling
 /// and foreign keys.
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {

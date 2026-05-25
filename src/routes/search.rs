@@ -77,19 +77,21 @@ pub struct ChildSearchQuery {
     pub limit: Option<u32>,
 }
 
-/// Decoded form of `page_token`.
+/// Decoded form of `page_token`. Shared with `channels::list_videos`
+/// via the `pub(crate)` visibility so the two paginated endpoints
+/// produce the same opaque-token shape.
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct PageCursor {
+pub(crate) struct PageCursor {
     /// Number of rows already returned in earlier pages.
-    offset: i64,
+    pub(crate) offset: i64,
 }
 
-fn decode_page_token(token: &str) -> Option<PageCursor> {
+pub(crate) fn decode_page_token(token: &str) -> Option<PageCursor> {
     let decoded = URL_SAFE_NO_PAD.decode(token.as_bytes()).ok()?;
     serde_json::from_slice(&decoded).ok()
 }
 
-fn encode_page_token(cursor: &PageCursor) -> String {
+pub(crate) fn encode_page_token(cursor: &PageCursor) -> String {
     let json = serde_json::to_vec(cursor).unwrap_or_else(|_| b"{}".to_vec());
     URL_SAFE_NO_PAD.encode(json)
 }
@@ -311,13 +313,13 @@ async fn search_videos(
     //
     //   1. allowlisted_videos       — direct per-video allowlist
     //   2. watch_history            — videos already proven viewable
-    //   3. feed_source_items via    — videos surfaced through an
-    //      allowlisted_channels       allowlisted channel's recent uploads
+    //   3. channel_videos via       — videos surfaced through an
+    //      allowlisted_channels       allowlisted channel's archive
     //
     // (3) is necessary because a child whose access derives *only*
     // from a channel allowlist would otherwise be unable to search
-    // for those videos at all. `feed_source_items` caches the ~20
-    // most-recent videos per allowlisted source.
+    // for those videos at all. `channel_videos` holds the full
+    // archive populated by RSS + yt-dlp backfill.
     //
     // We use UNION ALL + GROUP BY rather than UNION because UNION
     // dedups only on full-row equality — buckets 1–2 have no
@@ -349,13 +351,13 @@ async fn search_videos(
                    channel_title, video_thumbnail_url \
               FROM watch_history WHERE child_account_id = ? \
             UNION ALL \
-            SELECT fsi.video_id, fsi.title AS video_title, \
-                   fsi.channel_id, fsi.channel_title, \
-                   fsi.thumbnail_url AS video_thumbnail_url \
-              FROM feed_source_items fsi \
+            SELECT cv.video_id, cv.title AS video_title, \
+                   cv.channel_id, cv.channel_title, \
+                   cv.thumbnail_url AS video_thumbnail_url \
+              FROM channel_videos cv \
               INNER JOIN allowlisted_channels ac \
-                ON ac.channel_id = fsi.source_id AND fsi.kind = 'channel' \
-              WHERE ac.child_account_id = ? \
+                ON ac.channel_id = cv.channel_id \
+              WHERE ac.child_account_id = ? AND cv.is_deleted = 0 \
          ) \
          WHERE video_title LIKE ? ESCAPE '\\' \
          GROUP BY video_id \
