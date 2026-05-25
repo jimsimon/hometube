@@ -1,65 +1,94 @@
 # HomeTube
 
+[![CI](https://github.com/jimsimon/hometube/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jimsimon/hometube/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/jimsimon/hometube?sort=semver)](https://github.com/jimsimon/hometube/releases/latest)
+[![Docker image](https://img.shields.io/badge/ghcr.io-hometube-blue?logo=docker)](https://github.com/jimsimon/hometube/pkgs/container/hometube)
+[![Last commit](https://img.shields.io/github/last-commit/jimsimon/hometube)](https://github.com/jimsimon/hometube/commits/main)
+[![Open issues](https://img.shields.io/github/issues/jimsimon/hometube)](https://github.com/jimsimon/hometube/issues)
+[![Renovate enabled](https://img.shields.io/badge/renovate-enabled-brightgreen.svg)](https://docs.renovatebot.com/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![GitHub stars](https://img.shields.io/github/stars/jimsimon/hometube?style=social)](https://github.com/jimsimon/hometube/stargazers)
 
 A self-hosted YouTube frontend for kids that gives parents fine-grained
-control over what content their children can access, while syncing
-children's activity (likes, subscriptions) back to their real YouTube
-accounts.
+control over what content their children can access — allowlisted
+channels and videos, no ads, no comments, no algorithmic
+recommendations, and no Google account required for the children.
 
 ## Status
 
-Beta. Phases 0–19 of the implementation plan are complete: the app is
-feature-complete for self-hosting, and the remaining work is hardening
-+ release engineering.
+Beta. The core implementation plan is complete and the app is
+feature-complete for self-hosting; ongoing work is hardening, polish,
+and incremental features tracked through PRs.
 
 ## Highlights
 
 - **Parent-controlled allowlists** of channels and individual videos,
-  with parental preview before allowlisting
-- **Profile switcher with PIN protection** for parent accounts
-- **Two-way YouTube sync** — likes and subscriptions round-trip to the
-  child's real Google account
-- **Daily-limit enforcement** with per-day-of-week schedules + audio
-  fade-out wind-down
+  with a parental preview screen before allowlisting
+- **PIN-based authentication** — no Google account required for
+  parents or children; profile switching into a parent requires the
+  parent PIN
 - **No ads, no comments, no algorithmic recommendations** by design
-- **Sleep timer + wind-down overlay** — fades out audio and pauses
-  playback at expiry
+- **Per-child Liked Videos** — children can like videos from a child
+  profile and revisit them on a dedicated page (local-only; nothing is
+  sent to YouTube)
+- **Per-child Hidden Videos** — kids can hide individual videos from
+  their feeds without losing the allowlist entry
+- **Continue Watching + Watch Again rows** on the child dashboard
+- **Channel archive sync** — full-history backfill of allowlisted
+  channels with on-disk thumbnail caching, rate-limited and shelved on
+  repeated errors
+- **RSS-driven New Videos feed** — channel uploads are picked up by a
+  background refresher (RSS first, sidecar fallback) so the child feed
+  stays fresh without per-page yt-dlp calls
+- **Sleep timer + wind-down overlay** — fades audio out and pauses
+  playback when the timer expires
 - **Captions + audio-only mode** — server-side WebVTT conversion via
   yt-dlp; one-tap toggle to listen without video
+- **Chromecast support** plus multi-language audio and 360° video
+  playback
 - **Watch-activity dashboard** — daily / weekly / monthly summary,
-  bar-chart of last-30-day totals, top channels, full history, and
-  search log
+  bar-chart of last-30-day totals, top channels, full watch history,
+  and search log
+- **Offline downloads** — OPFS-backed local storage for trips and
+  patchy Wi-Fi (Chromium-only Background Fetch where supported)
 - **Parent notifications** — bell + dropdown for yt-dlp failures,
-  sync errors, and system updates
-- **Server-side caching** — yt-dlp metadata + on-disk DASH segment cache
-  with LRU eviction and parent-tunable size
-- **Self-hosted, single-binary deployment** behind a single Docker
-  image
+  sidecar errors, and system updates, with optional forwarding to a
+  self-hosted notification service
+- **Server-side caching** — yt-dlp metadata + on-disk DASH segment
+  cache with LRU eviction, per-video clear, eviction audit log, and a
+  parent-tunable size budget
+- **Self-hosted, three-container deployment** — one Docker Compose
+  stack, no third-party cloud dependencies
 
 ## Architecture
 
 - **Backend**: Rust + Axum + SQLite (sqlx) + askama templates + yt-dlp
-- **Frontend**: Lit web components + Web Awesome + vidstack player,
+- **Frontend**: Lit web components + Web Awesome + Shaka Player,
   bundled with Vite
 - **Routing**: Multi-page app — Axum serves HTML, components hydrate
   per-page
+- **Discovery sidecar**: a small Node service wrapping
+  [`youtubei.js`](https://github.com/LuanRT/YouTube.js) for search,
+  channel lookups, and video metadata. Replaces the YouTube Data API
+  entirely, so there is no Google Cloud project to create and no API
+  quota to manage.
+- **PO-token sidecar**: `bgutil-ytdlp-pot-provider` runs alongside
+  yt-dlp to bypass YouTube's bot-detection challenges.
 - **Proxy**: `/api/proxy/segment`, `/api/proxy/audio`, and
   `/api/proxy/thumbnail/:videoId` are gated behind a per-account /
   per-IP token bucket (200 req/min, refilled continuously) to keep the
-  server's egress predictable
+  server's egress predictable.
+- **Persistent state** is split across three independent directories
+  so each can live on different storage:
+  - `data/database/` — SQLite (small, fsync-heavy; SSD recommended)
+  - `data/tools/` — yt-dlp binary + `cookies.txt`
+  - `data/cache/` — DASH segment cache + thumbnail cache (large,
+    regeneratable)
 
-The implementation plan (architecture diagrams, design decisions, and
-phase-by-phase TODOs) lives under [`plans/`](plans/):
-
-- [`plans/1778451852595-cosmic-panda.md`](plans/1778451852595-cosmic-panda.md)
-  — the original 20-phase implementation plan.
-- [`plans/1778483706981-followup-gaps.md`](plans/1778483706981-followup-gaps.md)
-  — follow-up tasks (T-1 through T-11) that close partial-implementation
-  gaps and divergences from the original plan.
-
-See the `Architecture` section of the source code's inline doc comments
-for a tour of the major modules.
+The original implementation plan (architecture diagrams, design
+decisions, phase-by-phase TODOs) and follow-up gap-closure plan live
+under [`plans/`](plans/). See the `Architecture` section of the source
+code's inline doc comments for a tour of the major modules.
 
 ## Development
 
@@ -75,6 +104,7 @@ Requirements:
 ```bash
 nvm use
 cd frontend && npm install && cd ..
+cd sidecar/discovery && npm install && cd ../..
 tilt up
 ```
 
@@ -86,36 +116,40 @@ App runs at <http://localhost:3000>.
 cd docker && docker compose up -d
 ```
 
-This starts two containers:
-- **app** — the HomeTube server on port 3000
-- **pot-server** — a PO (Proof-of-Origin) token server that helps yt-dlp
-  bypass YouTube's bot detection. Runs automatically in the background;
-  no configuration needed.
+The Compose stack runs three containers:
 
-Then open <http://localhost:3000> and follow the setup wizard.
+- **app** — the HomeTube server, listening on container port 3000 and
+  mapped to host port `30000` by default (override with
+  `HOMETUBE_PORT`)
+- **discovery** — the youtubei.js sidecar; not exposed to the host,
+  reached only by `app` on the internal Docker network
+- **pot-server** — `bgutil-ytdlp-pot-provider`; helps yt-dlp clear
+  YouTube's bot-detection challenges. No configuration needed.
 
-See [`docs/deployment.md`](docs/deployment.md) for a full deploy
-walkthrough, backups, and reverse-proxy notes, and
-[`docs/google-cloud-setup.md`](docs/google-cloud-setup.md) for the
-step-by-step on creating the Google Cloud project that the setup
-wizard asks for.
+All three services are required. The stack also supports TrueNAS Scale
+(ElectricEel 24.10+) as a Custom App; see the comments at the top of
+`docker/docker-compose.yml` for the dataset layout.
+
+Then open <http://localhost:30000> (or whatever you set `HOMETUBE_PORT`
+to) and follow the setup wizard — it asks for a parent name and PIN,
+nothing else.
+
+See [`docs/deployment.md`](docs/deployment.md) for the full deploy
+walkthrough, healthcheck details, backup notes, and reverse-proxy
+guidance.
 
 ## Known limitations
 
 - **yt-dlp dependency** — Stream extraction may break temporarily when
-  YouTube updates. The daily auto-update cron job mitigates this, but
+  YouTube updates. The daily auto-update cron mitigates this, but
   brief outages may occur. Failed extractions surface in the parent
   notification bell.
-- **YouTube Data API quotas** — 10,000 units/day per project. With
-  ~3 children on the default hourly sync schedule, expect 720–1,440
-  units/day; well within the limit but tight if you also use the
-  parent search heavily.
 - **Video proxy bandwidth** — All bytes flow through the server. On a
   LAN this is a non-issue; remote use requires upstream bandwidth
   (~5–8 Mbps per 1080p stream).
-- **Offline downloads** — OPFS storage varies by browser/device; Safari
-  in private browsing disables OPFS entirely. Background Fetch is
-  Chromium-only.
+- **Offline downloads** — OPFS storage availability varies by
+  browser/device; Safari in private browsing disables OPFS entirely.
+  Background Fetch is Chromium-only.
 - **Single family** — One instance = one family. No multi-tenancy.
 
 ## License
