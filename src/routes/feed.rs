@@ -249,6 +249,13 @@ async fn lookup_channel_ids_for_videos(
     if video_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
+    // sqlx doesn't support binding a slice to `IN (?)` directly with
+    // SQLite, so build the placeholder list manually. Inputs are
+    // video_ids we just read out of our own DB, so there's nothing to
+    // sanitise — but we still parameterise rather than interpolate.
+    // The query string only ever interpolates `?` placeholders (a
+    // fixed alphabet of one character with no user input), so wrapping
+    // in `AssertSqlSafe` is sound for sqlx 0.9's `SqlSafeStr` bound.
     let placeholders = std::iter::repeat_n("?", video_ids.len())
         .collect::<Vec<_>>()
         .join(",");
@@ -256,7 +263,7 @@ async fn lookup_channel_ids_for_videos(
         "SELECT video_id, channel_id FROM channel_videos \
          WHERE video_id IN ({placeholders})"
     );
-    let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+    let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(sql));
     for id in video_ids {
         q = q.bind(*id);
     }

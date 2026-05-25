@@ -88,7 +88,16 @@ pub struct ProfileSummary {
     pub has_pin: bool,
 }
 
-const COLS: &str = "id, display_name, avatar_url, account_type, pin_hash, created_at, updated_at";
+/// Column list used by every `accounts` SELECT in this module. Defined
+/// as a macro (instead of a `const &str`) so it can be spliced into
+/// query literals via `concat!`, yielding `&'static str` SQL strings
+/// that satisfy sqlx 0.9's `SqlSafeStr` bound without any runtime
+/// `format!` allocation.
+macro_rules! account_cols {
+    () => {
+        "id, display_name, avatar_url, account_type, pin_hash, created_at, updated_at"
+    };
+}
 
 fn map_account(row: AccountRow) -> Account {
     let AccountRow {
@@ -124,11 +133,14 @@ struct AccountRow {
 
 /// Find an account by primary key.
 pub async fn find_by_id(pool: &SqlitePool, id: i64) -> AppResult<Option<Account>> {
-    let row: Option<AccountRow> =
-        sqlx::query_as(&format!("SELECT {COLS} FROM accounts WHERE id = ?"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<AccountRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        account_cols!(),
+        " FROM accounts WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(map_account))
 }
 
@@ -194,9 +206,11 @@ pub async fn insert_local(
 
 /// List every account in the database (parents first, then by created_at).
 pub async fn list_all(pool: &SqlitePool) -> AppResult<Vec<Account>> {
-    let rows: Vec<AccountRow> = sqlx::query_as(&format!(
-        "SELECT {COLS} FROM accounts ORDER BY \
-         CASE account_type WHEN 'parent' THEN 0 ELSE 1 END, created_at ASC"
+    let rows: Vec<AccountRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        account_cols!(),
+        " FROM accounts ORDER BY \
+         CASE account_type WHEN 'parent' THEN 0 ELSE 1 END, created_at ASC",
     ))
     .fetch_all(pool)
     .await?;

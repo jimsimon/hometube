@@ -232,7 +232,10 @@ async fn upsert_channel_videos(
         // SQLite's parameter limit is 999 by default; freshness
         // batches are always far below this (RSS=15, sidecar=30).
         // Build the IN clause dynamically so we still bind each
-        // video_id (no string interpolation).
+        // video_id (no string interpolation). The string only ever
+        // interpolates `?` placeholders (a fixed alphabet of one
+        // character with no user input), so wrapping in
+        // `AssertSqlSafe` is sound for sqlx 0.9's `SqlSafeStr` bound.
         let placeholders = std::iter::repeat_n("?", items.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -240,7 +243,7 @@ async fn upsert_channel_videos(
             "SELECT video_id, is_deleted FROM channel_videos \
               WHERE channel_id = ? AND video_id IN ({placeholders})"
         );
-        let mut q = sqlx::query_as::<_, (String, i64)>(&sql).bind(channel_id);
+        let mut q = sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(sql)).bind(channel_id);
         for item in items {
             q = q.bind(&item.video_id);
         }

@@ -139,7 +139,11 @@ pub async fn reset(State(state): State<AppState>) -> AppResult<StatusCode> {
         .execute(&state.db)
         .await;
     for (table,) in &tables {
-        let _ = sqlx::query(&format!("DELETE FROM [{table}]"))
+        // `table` is enumerated from `sqlite_master` and is therefore
+        // a database-defined identifier (not user input). `AssertSqlSafe`
+        // is required because sqlx 0.9's `SqlSafeStr` only accepts
+        // `&'static str` by default.
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM [{table}]")))
             .execute(&state.db)
             .await;
     }
