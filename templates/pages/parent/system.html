@@ -7,46 +7,114 @@
   <header class="page-header">
     <h1>System</h1>
     <p class="subtitle">
-      Manage scheduled jobs, the yt-dlp binary, cookies, and the on-disk
-      segment cache.
+      Manage scheduled jobs, the yt-dlp binary, cookies, channel sync, the
+      on-disk segment cache, and parent notifications.
     </p>
   </header>
 
-  <div class="page-section" aria-labelledby="ytdlp-heading">
-    <h2 id="ytdlp-heading">yt-dlp</h2>
-    <hometube-ytdlp-status-card></hometube-ytdlp-status-card>
-  </div>
+  <!--
+    Each tab maps one of the previous `<div class="page-section">` blocks
+    onto a `<wa-tab-panel>`. Panel names are stable identifiers used by
+    the deep-link `?tab=` query (see inline script below).
+  -->
+  <!--
+    `slot="nav"` is required by `<wa-tab-group>` to place the tab
+    triggers in the nav strip rather than treating them as panel
+    content. Matches the convention in `templates/pages/parent/home.html`.
+  -->
+  <wa-tab-group id="parent-system-tabs" placement="top" active="ytdlp">
+    <wa-tab slot="nav" panel="ytdlp">yt-dlp</wa-tab>
+    <wa-tab slot="nav" panel="jobs">Scheduled Jobs</wa-tab>
+    <wa-tab slot="nav" panel="cache">Cache Management</wa-tab>
+    <wa-tab slot="nav" panel="channels">Channel Management</wa-tab>
+    <wa-tab slot="nav" panel="notifications">Notifications</wa-tab>
 
-  <div class="page-section" aria-labelledby="cookies-heading">
-    <h2 id="cookies-heading">yt-dlp Cookies</h2>
-    <hometube-ytdlp-cookies-card></hometube-ytdlp-cookies-card>
-  </div>
+    <wa-tab-panel name="ytdlp">
+      <div class="page-section" aria-labelledby="ytdlp-heading">
+        <h2 id="ytdlp-heading">yt-dlp</h2>
+        <hometube-ytdlp-status-card></hometube-ytdlp-status-card>
+      </div>
 
-  <div class="page-section" aria-labelledby="cron-heading">
-    <h2 id="cron-heading">Scheduled jobs</h2>
-    <hometube-cron-jobs-list></hometube-cron-jobs-list>
-  </div>
+      <div class="page-section" aria-labelledby="cookies-heading">
+        <h2 id="cookies-heading">yt-dlp Cookies</h2>
+        <hometube-ytdlp-cookies-card></hometube-ytdlp-cookies-card>
+      </div>
+    </wa-tab-panel>
 
-  <div class="page-section" aria-labelledby="cache-heading">
-    <h2 id="cache-heading">Cache Management</h2>
-    <hometube-cache-manager></hometube-cache-manager>
-  </div>
+    <wa-tab-panel name="jobs">
+      <div class="page-section" aria-labelledby="cron-heading">
+        <h2 id="cron-heading">Scheduled Jobs</h2>
+        <hometube-cron-jobs-list></hometube-cron-jobs-list>
+      </div>
+    </wa-tab-panel>
 
-  <div class="page-section" aria-labelledby="feed-refresher-heading">
-    <h2 id="feed-refresher-heading">New-videos refresher</h2>
-    <hometube-feed-refresher-settings></hometube-feed-refresher-settings>
-  </div>
+    <wa-tab-panel name="cache">
+      <div class="page-section" aria-labelledby="cache-heading">
+        <h2 id="cache-heading">Cache Management</h2>
+        <hometube-cache-manager></hometube-cache-manager>
+      </div>
+    </wa-tab-panel>
 
-  <div class="page-section" aria-labelledby="channel-backfill-heading">
-    <h2 id="channel-backfill-heading">Channel archive backfill</h2>
-    <hometube-channel-backfill-settings></hometube-channel-backfill-settings>
-  </div>
+    <wa-tab-panel name="channels">
+      <div class="page-section" aria-labelledby="feed-refresher-heading">
+        <h2 id="feed-refresher-heading">New-videos refresher</h2>
+        <hometube-feed-refresher-settings></hometube-feed-refresher-settings>
+      </div>
 
-  <div class="page-section" aria-labelledby="notifications-heading">
-    <h2 id="notifications-heading">Notifications</h2>
-    <hometube-notification-forwarder-settings></hometube-notification-forwarder-settings>
-  </div>
+      <div class="page-section" aria-labelledby="channel-backfill-heading">
+        <h2 id="channel-backfill-heading">Channel archive backfill</h2>
+        <hometube-channel-backfill-settings></hometube-channel-backfill-settings>
+      </div>
+    </wa-tab-panel>
+
+    <wa-tab-panel name="notifications">
+      <div class="page-section" aria-labelledby="notifications-heading">
+        <h2 id="notifications-heading">Notifications</h2>
+        <hometube-notification-forwarder-settings></hometube-notification-forwarder-settings>
+      </div>
+    </wa-tab-panel>
+  </wa-tab-group>
 </section>
+
+<script type="module">
+  // Sync the active tab with a `?tab=` query parameter so bookmarks
+  // and page reloads land back on the same tab the operator was using.
+  // Names here must match the `panel` attributes above.
+  const validTabs = new Set(["ytdlp", "jobs", "cache", "channels", "notifications"]);
+  const group = document.getElementById("parent-system-tabs");
+  // Bail silently if the element is missing (e.g. the page is being
+  // rendered in a degraded mode without the tab group, or the id was
+  // renamed without updating this script). Throwing here would break
+  // the whole page for a feature that's only a nicety.
+  if (group) {
+    const initial = new URLSearchParams(window.location.search).get("tab");
+    if (initial && validTabs.has(initial)) {
+      // `wa-tab-group` reads `active` reactively; setting it after
+      // upgrade switches the panel without firing a navigation.
+      group.setAttribute("active", initial);
+    }
+
+    group.addEventListener("wa-tab-show", (event) => {
+      // `event.detail.name` is the documented `wa-tab-show` payload
+      // shape, but we read defensively in case the upstream event
+      // schema ever changes: a missing/renamed key would otherwise
+      // silently break the `?tab=` deep-link without any error.
+      const name = event?.detail?.name;
+      if (typeof name !== "string") {
+        console.warn(
+          "parent-system-tabs: wa-tab-show event missing detail.name; skipping URL sync",
+          event,
+        );
+        return;
+      }
+      if (!validTabs.has(name)) return;
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("tab") === name) return;
+      url.searchParams.set("tab", name);
+      window.history.replaceState({}, "", url);
+    });
+  }
+</script>
 {% endblock %}
 
 {% block page_scripts %}
