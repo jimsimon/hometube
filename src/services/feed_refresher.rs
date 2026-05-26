@@ -462,7 +462,14 @@ pub async fn run(pool: SqlitePool) {
     // at all, rather than silently fall back to a client with no
     // timeout that could hang one of the few inflight slots forever.
     let http = match Client::builder()
-        .user_agent("hometube/0.1 (+rss)")
+        // YouTube's RSS edge is hostile to non-browser User-Agents and
+        // intermittently responds with 404/500 to bot-style identifiers
+        // even for channels whose Atom feed is otherwise served fine.
+        // Use a generic browser UA to reduce spurious failures.
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
         .timeout(Duration::from_secs(30))
         .build()
     {
@@ -960,10 +967,17 @@ pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
         _ => {}
     }
 
-    // Tokenise as 2 or 3 words so "a few seconds" / "a couple hours"
-    // are handled alongside "3 days" / "an hour".
+    // Tokenise. Three accepted shapes:
+    //   1. Long form, 2 tokens:  "3 days", "an hour"
+    //   2. Long form, 3 tokens:  "a few seconds", "a couple of hours"
+    //   3. Compact form, 1 token: "3d", "2w", "10mo", "1y" — what
+    //      current InnerTube / youtubei.js emits.
     let toks: Vec<&str> = body.split_whitespace().collect();
     let (count_tok, unit_tok): (&str, &str) = match toks.as_slice() {
+        [single] => match split_compact_token(single) {
+            Some(pair) => pair,
+            None => return None,
+        },
         [c, u] => (*c, *u),
         ["a", "few", u] => ("few", *u),
         ["a", "couple", u] | ["a", "couple", "of", u] => ("couple", *u),
@@ -998,6 +1012,43 @@ pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
         return None;
     }
     Some(now - offset)
+}
+
+/// Split a glued compact relative-time token like `"3d"`, `"10mo"`,
+/// `"1y"` into `(count, long_unit)` so the long-form match arm in
+/// `parse_relative_to_unix` can resolve the unit without growing
+/// further. Returns `None` if `token` is not in `<digits><suffix>`
+/// shape with a recognised suffix.
+///
+/// Supported suffixes (matching YouTube/InnerTube output):
+/// `s` second, `m` minute, `h` hour, `d` day, `w` week, `mo` month,
+/// `y` year. The two-letter `mo` is deliberately distinct from `m`
+/// (YouTube uses exactly this disambiguation; we follow it).
+fn split_compact_token(token: &str) -> Option<(&str, &'static str)> {
+    // Find the boundary between the leading digit run and the unit
+    // suffix. Using char_indices keeps this byte-safe even though
+    // all expected inputs are ASCII.
+    let digits_end = token
+        .char_indices()
+        .find_map(|(i, c)| if c.is_ascii_digit() { None } else { Some(i) })
+        .unwrap_or(token.len());
+    if digits_end == 0 || digits_end == token.len() {
+        return None;
+    }
+    let (count, suffix) = token.split_at(digits_end);
+    // Map back to the long forms so the existing `match` arms handle
+    // the unit lookup without duplicating the seconds-per-unit table.
+    let long_unit = match suffix {
+        "s" => "seconds",
+        "m" => "minutes",
+        "h" => "hours",
+        "d" => "days",
+        "w" => "weeks",
+        "mo" => "months",
+        "y" => "years",
+        _ => return None,
+    };
+    Some((count, long_unit))
 }
 
 #[cfg(test)]
@@ -1114,6 +1165,77 @@ mod relative_parser_tests {
         // None (callers fall back to fetched_at) than emit a deeply
         // negative timestamp that would pin the row to the far past.
         assert_eq!(parse_relative_to_unix("4294967295 years ago", NOW), None);
+    }
+
+    /// Current InnerTube / youtubei.js output uses compact glued
+    /// tokens (`2d ago`, `3mo ago`, `1y ago`, …). Each of these used
+    /// to silently fall through to `None`, leaving sidecar-sourced
+    /// rows ordered by `fetched_at` (effectively "now") regardless
+    /// of how old the upload actually was.
+    #[test]
+    fn parses_compact_youtube_abbreviations() {
+        assert_eq!(parse_relative_to_unix("30s ago", NOW), Some(NOW - 30));
+        assert_eq!(parse_relative_to_unix("5m ago", NOW), Some(NOW - 5 * 60));
+        assert_eq!(parse_relative_to_unix("2h ago", NOW), Some(NOW - 2 * 3_600));
+        assert_eq!(parse_relative_to_unix("2d ago", NOW), Some(NOW - 2 * 86_400));
+        assert_eq!(parse_relative_to_unix("9d ago", NOW), Some(NOW - 9 * 86_400));
+        assert_eq!(
+            parse_relative_to_unix("3w ago", NOW),
+            Some(NOW - 3 * 7 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("4mo ago", NOW),
+            Some(NOW - 4 * 30 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("11mo ago", NOW),
+            Some(NOW - 11 * 30 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("1y ago", NOW),
+            Some(NOW - 365 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("13y ago", NOW),
+            Some(NOW - 13 * 365 * 86_400)
+        );
+    }
+
+    /// The two-letter `mo` must not be confused with the single-letter
+    /// `m` (minute). YouTube specifically uses this disambiguation,
+    /// so getting it wrong would silently mis-date every monthly
+    /// upload by a factor of 43,200.
+    #[test]
+    fn compact_m_vs_mo_distinguished() {
+        assert_eq!(parse_relative_to_unix("3m ago", NOW), Some(NOW - 3 * 60));
+        assert_eq!(
+            parse_relative_to_unix("3mo ago", NOW),
+            Some(NOW - 3 * 30 * 86_400)
+        );
+    }
+
+    /// Compact tokens with no recognised suffix, or no leading digits,
+    /// must still fail closed.
+    #[test]
+    fn compact_unknown_suffix_returns_none() {
+        assert_eq!(parse_relative_to_unix("3z ago", NOW), None);
+        assert_eq!(parse_relative_to_unix("d ago", NOW), None);
+        assert_eq!(parse_relative_to_unix("mo ago", NOW), None);
+    }
+
+    /// Prefix stripping ("Streamed", "Premiered") still applies to
+    /// compact-form bodies — InnerTube emits e.g. "Streamed 2d ago"
+    /// for past livestreams.
+    #[test]
+    fn compact_with_streamed_premiered_prefix() {
+        assert_eq!(
+            parse_relative_to_unix("Streamed 2d ago", NOW),
+            Some(NOW - 2 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("Premiered 3mo ago", NOW),
+            Some(NOW - 3 * 30 * 86_400)
+        );
     }
 }
 
