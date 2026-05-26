@@ -957,17 +957,35 @@ fn parse_upload_date(entry: &FlatPlaylistEntry) -> (Option<i64>, Option<String>)
 pub async fn reconcile_with_allowlist(pool: &SqlitePool) -> AppResult<()> {
     let mut tx = pool.begin().await?;
 
-    // 1. Seed rows for any newly-allowlisted channel. Existing rows
-    //    are untouched (ON CONFLICT DO NOTHING). The trailing
-    //    `WHERE true` disambiguates the UPSERT's `ON CONFLICT` from
-    //    a potential JOIN `ON` clause — see
-    //    https://www.sqlite.org/lang_upsert.html ("Parsing Ambiguity").
+    // 1. Seed rows for any newly-allowlisted channel, carrying over
+    //    `channel_title` / `channel_thumbnail_url` from the allowlist
+    //    so the admin diagnostics view (and the channel page header)
+    //    have a name to display before the first sidecar run.
+    //
+    //    A channel can appear in `allowlisted_channels` once per child,
+    //    so we `GROUP BY channel_id` and pick any non-null title /
+    //    thumbnail via `MAX(...)` (titles for the same channel should
+    //    match across children; if they ever disagree, picking
+    //    deterministically is good enough for a diagnostics surface).
+    //
+    //    On conflict we `COALESCE` the existing value with the
+    //    incoming one so we backfill rows whose metadata was NULL
+    //    (e.g. seeded by an older version of this function before it
+    //    propagated titles) without clobbering rows that already have
+    //    a richer title from a sidecar refresh.
     sqlx::query(
         "INSERT INTO channel_sync_state \
-             (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
-         SELECT DISTINCT channel_id, 'pending', 0, 0 \
-           FROM allowlisted_channels WHERE true \
-         ON CONFLICT(channel_id) DO NOTHING",
+             (channel_id, channel_title, channel_thumbnail_url, \
+              backfill_status, backfill_next_at, rss_next_poll_at) \
+         SELECT channel_id, MAX(channel_title), MAX(channel_thumbnail_url), \
+                'pending', 0, 0 \
+           FROM allowlisted_channels \
+          GROUP BY channel_id \
+         ON CONFLICT(channel_id) DO UPDATE SET \
+              channel_title         = COALESCE(channel_sync_state.channel_title, \
+                                               excluded.channel_title), \
+              channel_thumbnail_url = COALESCE(channel_sync_state.channel_thumbnail_url, \
+                                               excluded.channel_thumbnail_url)",
     )
     .execute(&mut *tx)
     .await?;
@@ -1151,6 +1169,76 @@ mod tests {
         assert_eq!(
             vn, 0,
             "channel_videos cascade-deleted with channel_sync_state"
+        );
+    }
+
+    /// `reconcile_with_allowlist` should carry `channel_title` over
+    /// from `allowlisted_channels` so the admin diagnostics view can
+    /// render channel names, and should backfill the title on rows
+    /// that an older version of the function left NULL.
+    #[tokio::test]
+    async fn reconcile_propagates_channel_title() {
+        let pool = setup_db().await;
+        allow_channel(&pool, "UC1").await;
+
+        // Pre-create a `channel_sync_state` row the way the older
+        // (title-less) seed path used to: NULL title, NULL thumbnail.
+        // This simulates a long-lived row in a real deployment.
+        sqlx::query(
+            "INSERT INTO channel_sync_state (channel_id, backfill_status, \
+                                             backfill_next_at, rss_next_poll_at) \
+             VALUES ('UC1', 'pending', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reconcile_with_allowlist(&pool).await.unwrap();
+
+        let title: Option<String> = sqlx::query_scalar(
+            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            title.as_deref(),
+            Some("X"),
+            "reconcile should have backfilled the NULL title from allowlisted_channels"
+        );
+
+        // Seeding a brand-new channel should also pick up the title in
+        // the same call.
+        allow_channel(&pool, "UC2").await;
+        reconcile_with_allowlist(&pool).await.unwrap();
+        let title2: Option<String> = sqlx::query_scalar(
+            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC2'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(title2.as_deref(), Some("X"));
+
+        // An existing non-NULL title (e.g. set by a sidecar refresh)
+        // must not be clobbered by reconcile.
+        sqlx::query(
+            "UPDATE channel_sync_state SET channel_title = 'Sidecar Title' \
+              WHERE channel_id = 'UC1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        reconcile_with_allowlist(&pool).await.unwrap();
+        let title3: Option<String> = sqlx::query_scalar(
+            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            title3.as_deref(),
+            Some("Sidecar Title"),
+            "reconcile must not clobber a richer title with the allowlist title"
         );
     }
 
