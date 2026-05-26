@@ -472,7 +472,20 @@ export class ChannelBackfillSettings extends LitElement {
       </div>
 
       <div class="card" style="margin-top: 1rem;">
-        <h3>Per-channel state</h3>
+        <h3>Channel backfill status</h3>
+        <p class="help">
+          Background sync of each allowlisted channel's full upload history via
+          yt-dlp. Runs automatically on the schedule above; this table shows
+          where every channel sits in that loop and lets you kick off an
+          immediate run for one channel.
+        </p>
+        <p class="help" style="color: var(--color-warning, #c97a00);">
+          <strong>Heads up:</strong> "Run now" issues a yt-dlp request to
+          YouTube. Triggering many channels in quick succession can trip
+          YouTube's anti-bot defences and temporarily block the server's IP
+          from RSS and metadata endpoints. Use it sparingly — one channel at
+          a time, with a few minutes between runs.
+        </p>
         ${this.rows.length === 0
           ? html`<p>No allowlisted channels.</p>`
           : html`
