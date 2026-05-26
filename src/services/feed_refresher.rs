@@ -451,10 +451,6 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Background refresher loop. Exposed (and hidden from rustdoc) only
-/// so integration tests can spawn it directly and abort the resulting
-/// `JoinHandle` rather than going through [`spawn`] (which discards
-/// the handle). Production callers should use [`spawn`].
 /// Default `User-Agent` for the feed refresher's HTTP client. A generic
 /// recent Chrome-on-Linux string is used because YouTube's RSS edge
 /// intermittently responds with 404/500 to bot-style identifiers
@@ -485,6 +481,10 @@ fn rss_user_agent() -> String {
         .unwrap_or_else(|| DEFAULT_RSS_USER_AGENT.to_string())
 }
 
+/// Background refresher loop. Exposed (and hidden from rustdoc) only
+/// so integration tests can spawn it directly and abort the resulting
+/// `JoinHandle` rather than going through [`spawn`] (which discards
+/// the handle). Production callers should use [`spawn`].
 #[doc(hidden)]
 pub async fn run(pool: SqlitePool) {
     // Builder failure is treated as fatal for the refresher: if we
