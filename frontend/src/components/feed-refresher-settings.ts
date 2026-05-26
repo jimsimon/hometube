@@ -63,15 +63,24 @@ const RANGES: Record<NumericKey, [number, number]> = {
   sidecar_fallback_max_per_hour: [0, 10_000],
 };
 
-interface FeedSourceStatus {
-  kind: string;
-  source_id: string;
-  title: string | null;
-  last_polled_at: number | null;
-  last_success_at: number | null;
-  last_error: string | null;
-  consecutive_errors: number;
-  next_poll_at: number;
+/**
+ * One row of `/api/admin/channel-sync-state`. Renamed from the legacy
+ * `FeedSourceStatus` when migration 020 consolidated `feed_sources`
+ * into `channel_sync_state` and dropped the polymorphic `kind` /
+ * `source_id` columns — every source is an RSS channel now.
+ *
+ * Only the freshness-tier (`rss_*`) fields and `item_count` /
+ * `last_sidecar_fallback_at` are surfaced here; the backfill-tier
+ * fields on the same row are owned by `<hometube-channel-backfill-settings>`.
+ */
+interface ChannelSyncStateStatus {
+  channel_id: string;
+  channel_title: string | null;
+  rss_last_polled_at: number | null;
+  rss_last_success_at: number | null;
+  rss_last_error: string | null;
+  rss_consecutive_errors: number;
+  rss_next_poll_at: number;
   item_count: number;
   last_sidecar_fallback_at: number | null;
 }
@@ -90,7 +99,7 @@ interface RefresherCapacity {
 export class FeedRefresherSettings extends LitElement {
   @state() private settings: RefresherSettings | null = null;
   @state() private capacity: RefresherCapacity | null = null;
-  @state() private sources: FeedSourceStatus[] = [];
+  @state() private sources: ChannelSyncStateStatus[] = [];
   @state() private busy = false;
   @state() private status = "";
 
@@ -287,7 +296,7 @@ export class FeedRefresherSettings extends LitElement {
       const [settings, capacity, sources] = await Promise.all([
         api.get<RefresherSettings>("/api/admin/feed-refresher/settings"),
         api.get<RefresherCapacity>("/api/admin/feed-refresher/capacity"),
-        api.get<FeedSourceStatus[]>("/api/admin/feed-sources"),
+        api.get<ChannelSyncStateStatus[]>("/api/admin/channel-sync-state"),
       ]);
       this.settings = settings;
       this.capacity = capacity;
@@ -556,19 +565,19 @@ export class FeedRefresherSettings extends LitElement {
                     (s) => html`
                       <tr>
                         <td>
-                          <div>${s.title ?? s.source_id}</div>
-                          <div class="hint">${s.kind}: <code>${s.source_id}</code></div>
+                          <div>${s.channel_title ?? s.channel_id}</div>
+                          <div class="hint"><code>${s.channel_id}</code></div>
                         </td>
                         <td>${s.item_count}</td>
-                        <td>${this.fmtTimestamp(s.last_polled_at)}</td>
-                        <td>${this.fmtTimestamp(s.last_success_at)}</td>
+                        <td>${this.fmtTimestamp(s.rss_last_polled_at)}</td>
+                        <td>${this.fmtTimestamp(s.rss_last_success_at)}</td>
                         <td>${this.fmtTimestamp(s.last_sidecar_fallback_at)}</td>
-                        <td>${this.fmtTimestamp(s.next_poll_at)}</td>
+                        <td>${this.fmtTimestamp(s.rss_next_poll_at)}</td>
                         <td>
-                          ${s.last_error
-                            ? html`<span class="error" title=${s.last_error}>
-                                ${s.consecutive_errors}
-                                error${s.consecutive_errors === 1 ? "" : "s"}
+                          ${s.rss_last_error
+                            ? html`<span class="error" title=${s.rss_last_error}>
+                                ${s.rss_consecutive_errors}
+                                error${s.rss_consecutive_errors === 1 ? "" : "s"}
                               </span>`
                             : html`<span class="ok">OK</span>`}
                         </td>
