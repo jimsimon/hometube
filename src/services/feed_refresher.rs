@@ -455,6 +455,36 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
 /// so integration tests can spawn it directly and abort the resulting
 /// `JoinHandle` rather than going through [`spawn`] (which discards
 /// the handle). Production callers should use [`spawn`].
+/// Default `User-Agent` for the feed refresher's HTTP client. A generic
+/// recent Chrome-on-Linux string is used because YouTube's RSS edge
+/// intermittently responds with 404/500 to bot-style identifiers
+/// (`hometube/0.1` etc.) even for channels whose Atom feed is
+/// otherwise served fine.
+///
+/// The string is pinned to a specific Chrome major and will eventually
+/// look outdated to YouTube; `HOMETUBE_RSS_USER_AGENT` (read by
+/// `rss_user_agent`) lets an operator override it without a code
+/// change when that day comes. Keep this in step with whatever
+/// version a current desktop Chrome reports for its UA — a few
+/// majors stale is fine, decades stale is not.
+const DEFAULT_RSS_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/// Resolve the User-Agent for the feed refresher's HTTP client.
+///
+/// Reads `HOMETUBE_RSS_USER_AGENT` from the process environment and
+/// falls back to [`DEFAULT_RSS_USER_AGENT`]. The env var is read once
+/// at refresher startup (this function is called from `run` before
+/// the long-lived `Client` is built), so changes require a restart —
+/// matching how the rest of the service handles config that isn't
+/// stored in `app_config`.
+fn rss_user_agent() -> String {
+    std::env::var("HOMETUBE_RSS_USER_AGENT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RSS_USER_AGENT.to_string())
+}
+
 #[doc(hidden)]
 pub async fn run(pool: SqlitePool) {
     // Builder failure is treated as fatal for the refresher: if we
@@ -462,14 +492,7 @@ pub async fn run(pool: SqlitePool) {
     // at all, rather than silently fall back to a client with no
     // timeout that could hang one of the few inflight slots forever.
     let http = match Client::builder()
-        // YouTube's RSS edge is hostile to non-browser User-Agents and
-        // intermittently responds with 404/500 to bot-style identifiers
-        // even for channels whose Atom feed is otherwise served fine.
-        // Use a generic browser UA to reduce spurious failures.
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
+        .user_agent(rss_user_agent())
         .timeout(Duration::from_secs(30))
         .build()
     {
@@ -974,10 +997,7 @@ pub(crate) fn parse_relative_to_unix(raw: &str, now: i64) -> Option<i64> {
     //      current InnerTube / youtubei.js emits.
     let toks: Vec<&str> = body.split_whitespace().collect();
     let (count_tok, unit_tok): (&str, &str) = match toks.as_slice() {
-        [single] => match split_compact_token(single) {
-            Some(pair) => pair,
-            None => return None,
-        },
+        [single] => split_compact_token(single)?,
         [c, u] => (*c, *u),
         ["a", "few", u] => ("few", *u),
         ["a", "couple", u] | ["a", "couple", "of", u] => ("couple", *u),
@@ -1177,8 +1197,14 @@ mod relative_parser_tests {
         assert_eq!(parse_relative_to_unix("30s ago", NOW), Some(NOW - 30));
         assert_eq!(parse_relative_to_unix("5m ago", NOW), Some(NOW - 5 * 60));
         assert_eq!(parse_relative_to_unix("2h ago", NOW), Some(NOW - 2 * 3_600));
-        assert_eq!(parse_relative_to_unix("2d ago", NOW), Some(NOW - 2 * 86_400));
-        assert_eq!(parse_relative_to_unix("9d ago", NOW), Some(NOW - 9 * 86_400));
+        assert_eq!(
+            parse_relative_to_unix("2d ago", NOW),
+            Some(NOW - 2 * 86_400)
+        );
+        assert_eq!(
+            parse_relative_to_unix("9d ago", NOW),
+            Some(NOW - 9 * 86_400)
+        );
         assert_eq!(
             parse_relative_to_unix("3w ago", NOW),
             Some(NOW - 3 * 7 * 86_400)

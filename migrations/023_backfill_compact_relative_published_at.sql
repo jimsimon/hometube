@@ -189,10 +189,11 @@ WHERE channel_videos.channel_id = b.channel_id
   AND CAST(substr(b.body, 1, length(b.body) - 1) AS INTEGER) > 0
   AND CAST(substr(b.body, 1, length(b.body) - 1) AS INTEGER) * 3600 < unixepoch();
 
--- Minutes ('m'). Must run after the 'mo' arm above; the LIKE '%m'
--- pattern matches strings ending in 'm', which "3mo" does *not*
--- (it ends in 'o'), so this arm naturally skips already-healed
--- month rows.
+-- Minutes ('m'). The LIKE '%m' pattern matches strings ending in 'm';
+-- a body like "3mo" ends in 'o' so it would never match here even
+-- without the explicit `NOT LIKE '%mo'` guard. The guard is still
+-- included as defense-in-depth: it makes the m/mo disambiguation
+-- explicit at this site and keeps the arms safe to reorder.
 UPDATE channel_videos
 SET published_at = unixepoch() - (
     CAST(substr(b.body, 1, length(b.body) - 1) AS INTEGER) * 60
@@ -202,6 +203,7 @@ WHERE channel_videos.channel_id = b.channel_id
   AND channel_videos.video_id   = b.video_id
   AND channel_videos.published_at IS NULL
   AND b.body LIKE '%m'
+  AND b.body NOT LIKE '%mo'
   AND length(b.body) > 1
   AND substr(b.body, 1, length(b.body) - 1) GLOB '[0-9]*'
   AND printf('%d', CAST(substr(b.body, 1, length(b.body) - 1) AS INTEGER))

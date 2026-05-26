@@ -973,11 +973,18 @@ pub async fn reconcile_with_allowlist(pool: &SqlitePool) -> AppResult<()> {
     //    (e.g. seeded by an older version of this function before it
     //    propagated titles) without clobbering rows that already have
     //    a richer title from a sidecar refresh.
+    // `MAX(...)` over sibling allowlist rows for the same channel
+    // resolves the (rare) case where two children allowlisted the same
+    // channel with subtly different display strings — picking the
+    // lexicographically-largest under the default BINARY collation is
+    // arbitrary but deterministic. Wrapping in `TRIM(...)` first
+    // normalises trailing-whitespace divergences so a stray `"Algol "`
+    // can't sort above `"Algol"` and end up as the canonical title.
     sqlx::query(
         "INSERT INTO channel_sync_state \
              (channel_id, channel_title, channel_thumbnail_url, \
               backfill_status, backfill_next_at, rss_next_poll_at) \
-         SELECT channel_id, MAX(channel_title), MAX(channel_thumbnail_url), \
+         SELECT channel_id, MAX(TRIM(channel_title)), MAX(TRIM(channel_thumbnail_url)), \
                 'pending', 0, 0 \
            FROM allowlisted_channels \
           GROUP BY channel_id \
