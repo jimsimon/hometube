@@ -148,17 +148,21 @@ pub async fn history(
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let before = q.before.unwrap_or(i64::MAX);
 
+    // Title / thumbnail / channel metadata now live on the canonical
+    // `videos` + `channels` tables (migrations 024/025). LEFT JOIN
+    // them so usage rows for videos we haven't seen elsewhere still
+    // return (with NULL metadata).
     let rows: Vec<HistoryEntry> = sqlx::query_as(
         "SELECT u.video_id, \
-                w.video_title as video_title, \
-                w.video_thumbnail_url as video_thumbnail_url, \
-                w.channel_title as channel_title, \
+                v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title AS channel_title, \
                 u.started_at, \
                 u.ended_at, \
                 u.duration_seconds \
          FROM usage_log u \
-         LEFT JOIN watch_history w \
-                ON w.child_account_id = u.child_account_id AND w.video_id = u.video_id \
+         LEFT JOIN videos v ON v.video_id = u.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
          WHERE u.child_account_id = ? AND u.started_at < ? \
          ORDER BY u.started_at DESC \
          LIMIT ?",
@@ -189,15 +193,27 @@ pub async fn top_channels(
     let window = period_seconds(Some(&period));
     let since = Utc::now().timestamp() - window;
 
+    // Group by `v.channel_id` (the actual identity) rather than the
+    // display title — otherwise every video with no joined `videos`
+    // row, or no joined `channels` row, collapses into a single NULL
+    // bucket that aggregates time across multiple unrelated channels.
+    // `MAX(ch.channel_title)` is defensive: `channel_id → channel_title`
+    // is functionally a 1:1 today (one `channels` row per id, joined by
+    // PK), but SQLite doesn't enforce SQL's "selected columns must be
+    // aggregated or grouped" rule, so an unaggregated bare reference
+    // would silently pick an implementation-defined value if that
+    // ever stops holding. Rows with no resolvable channel are excluded
+    // — they're not meaningful in the "top channels" UI.
     let rows: Vec<TopChannel> = sqlx::query_as(
-        "SELECT w.channel_title as channel_title, \
-                COALESCE(SUM(COALESCE(u.duration_seconds, 0)), 0) as total_seconds, \
-                COUNT(DISTINCT u.video_id) as videos_watched \
+        "SELECT MAX(ch.channel_title) AS channel_title, \
+                COALESCE(SUM(COALESCE(u.duration_seconds, 0)), 0) AS total_seconds, \
+                COUNT(DISTINCT u.video_id) AS videos_watched \
          FROM usage_log u \
-         LEFT JOIN watch_history w \
-                ON w.child_account_id = u.child_account_id AND w.video_id = u.video_id \
+         JOIN videos v ON v.video_id = u.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
          WHERE u.child_account_id = ? AND u.started_at >= ? \
-         GROUP BY w.channel_title \
+           AND v.channel_id IS NOT NULL \
+         GROUP BY v.channel_id \
          ORDER BY total_seconds DESC \
          LIMIT 20",
     )

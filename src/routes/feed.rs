@@ -80,11 +80,16 @@ pub async fn continue_watching(
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<ContinueWatchingItem>>> {
     let rows: Vec<ContinueWatchingItem> = sqlx::query_as(
-        "SELECT video_id, video_title, video_thumbnail_url, channel_title, \
-                duration_seconds, progress_seconds, last_watched_at, channel_id \
-         FROM watch_history \
-         WHERE child_account_id = ? \
-         ORDER BY last_watched_at DESC \
+        "SELECT wh.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title, \
+                v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
+                v.channel_id \
+         FROM watch_history wh \
+         JOIN videos v ON v.video_id = wh.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE wh.child_account_id = ? \
+         ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
     )
     .bind(current.id)
@@ -100,11 +105,12 @@ pub async fn continue_watching(
 
 /// Common pipeline for `continue-watching` and `watch-again`:
 ///
-/// 1. Resolve `channel_id` for legacy NULL-channel rows in a single
-///    batched query against `channel_videos`.
+/// 1. Resolve `channel_id` for rows whose `videos.channel_id` is still
+///    NULL via a single batched query against `channel_videos` — see
+///    [`lookup_channel_ids_for_videos`] for when this can happen.
 /// 2. Apply `keep` (the per-feed completion predicate).
 /// 3. Per-row access check via `can_child_view`, passing the (possibly
-///    legacy-resolved) channel_id so channel-allowlisted videos still
+///    fallback-resolved) channel_id so channel-allowlisted videos still
 ///    surface.
 ///
 /// Per-row access checks are intentional — the access rules involve
@@ -122,26 +128,26 @@ where
     T: WatchHistoryRow,
     F: Fn(&T) -> bool,
 {
-    // Build the legacy-lookup set from rows that both (a) pass the
+    // Build the fallback-lookup set from rows that both (a) pass the
     // per-feed predicate and (b) are missing a stored channel_id. No
     // point asking channel_videos about rows we'll drop anyway.
-    let legacy_ids: Vec<&str> = rows
+    let unresolved_ids: Vec<&str> = rows
         .iter()
         .filter(|r| keep(r) && r.channel_id().is_none())
         .map(|r| r.video_id())
         .collect();
-    let legacy_map = match lookup_channel_ids_for_videos(db, &legacy_ids).await {
+    let unresolved_map = match lookup_channel_ids_for_videos(db, &unresolved_ids).await {
         Ok(map) => map,
         Err(err) => {
             // Don't fail the whole row over a transient cache lookup
-            // problem — fall back to "no legacy resolution" so freshly
+            // problem — fall back to "no fallback resolution" so freshly
             // upserted rows (which have channel_id stored directly) and
             // individually-allowlisted videos still surface. But do log
             // it: silently reverting to the pre-fix broken behaviour is
             // exactly what bit us before.
             tracing::warn!(
                 error = %err,
-                "watch_history feed: channel_videos lookup failed; legacy NULL-channel rows may be hidden"
+                "watch_history feed: channel_videos lookup failed; rows with unresolved channel ids may be hidden"
             );
             std::collections::HashMap::new()
         }
@@ -154,7 +160,7 @@ where
         }
         let channel_id = row
             .channel_id()
-            .or_else(|| legacy_map.get(row.video_id()).map(String::as_str));
+            .or_else(|| unresolved_map.get(row.video_id()).map(String::as_str));
         if can_child_view(db, child_id, row.video_id(), channel_id)
             .await
             .unwrap_or(false)
@@ -219,11 +225,16 @@ pub async fn watch_again(
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<WatchAgainItem>>> {
     let rows: Vec<WatchAgainItem> = sqlx::query_as(
-        "SELECT video_id, video_title, video_thumbnail_url, channel_title, \
-                duration_seconds, progress_seconds, last_watched_at, channel_id \
-         FROM watch_history \
-         WHERE child_account_id = ? \
-         ORDER BY last_watched_at DESC \
+        "SELECT wh.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title, \
+                v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
+                v.channel_id \
+         FROM watch_history wh \
+         JOIN videos v ON v.video_id = wh.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE wh.child_account_id = ? \
+         ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
     )
     .bind(current.id)
@@ -237,11 +248,28 @@ pub async fn watch_again(
     .await
 }
 
-/// Best-effort batched `video_id → channel_id` lookup for
-/// `watch_history` rows that were written before the `channel_id`
-/// column existed (migration 014). Reads from `channel_videos`, the
-/// unified archive populated by RSS + sidecar + yt-dlp backfill.
-/// Returns an empty map when there are no legacy rows to resolve.
+/// Best-effort batched `video_id → channel_id` lookup for rows whose
+/// `videos.channel_id` is still NULL. This happens when a stub
+/// `videos` row was created (e.g. by `models::video::upsert_stub` from
+/// a hand-allowlist add or imported-history import) before any
+/// enriching upsert ran, and a separate writer has since landed a row
+/// in `channel_videos` carrying the resolved `channel_id`. The hot
+/// path (RSS-discovered videos) populates `videos.channel_id`
+/// synchronously via `models::video::upsert`, so this fallback fires
+/// only on those stub-first sequences. Reads from `channel_videos`,
+/// the unified archive populated by RSS + sidecar + yt-dlp backfill.
+/// Returns an empty map when there are no unresolved rows, or when
+/// none of the unresolved videos have a `channel_videos` row to
+/// resolve against.
+///
+/// **Lazy backfill**: when this lookup *does* resolve a channel_id,
+/// we opportunistically write it back to `videos.channel_id` so the
+/// next call sees a populated `v.channel_id` and skips this fallback
+/// path entirely for the same `video_id`. This bounds the asymptotic
+/// cost: even if a child has a large stub-only history, each row pays
+/// this lookup at most once. The write-back failure is logged but
+/// non-fatal — surfacing the resolved id to *this* request is the
+/// primary contract; persisting it is a cache warm-up.
 async fn lookup_channel_ids_for_videos(
     db: &sqlx::SqlitePool,
     video_ids: &[&str],
@@ -259,20 +287,170 @@ async fn lookup_channel_ids_for_videos(
     let placeholders = std::iter::repeat_n("?", video_ids.len())
         .collect::<Vec<_>>()
         .join(",");
+    // Aggregate cross-listed videos in SQL with `MAX(channel_id)` so
+    // the resolved channel is deterministic. Without `GROUP BY` +
+    // `MAX`, a video that appears under multiple channels in
+    // `channel_videos` would return multiple rows here, and the
+    // downstream `HashMap::entry(...).or_insert(...)` would pick a
+    // hash-state-dependent channel — flipping request-to-request and
+    // confusing the access check that consumes the map. We use
+    // `MAX(channel_id)` to match migration 025 step 2's tie-break for
+    // the parallel "rebuild `videos.channel_id` from
+    // `channel_videos`" UPDATE, so the in-memory map and the on-disk
+    // value converge to the same channel for the same video. The
+    // `NOT NULL` guard preserves the existing semantics of skipping
+    // rows that haven't resolved a channel yet.
     let sql = format!(
-        "SELECT video_id, channel_id FROM channel_videos \
-         WHERE video_id IN ({placeholders})"
+        "SELECT video_id, MAX(channel_id) AS channel_id \
+           FROM channel_videos \
+          WHERE video_id IN ({placeholders}) \
+            AND channel_id IS NOT NULL \
+          GROUP BY video_id"
     );
     let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(sql));
     for id in video_ids {
         q = q.bind(*id);
     }
     let rows = q.fetch_all(db).await?;
-    let mut map = std::collections::HashMap::with_capacity(rows.len());
-    for (video_id, channel_id) in rows {
-        map.entry(video_id).or_insert(channel_id);
+    // `GROUP BY video_id` already guarantees one row per video_id,
+    // so `extend` is correct (no `or_insert` needed); the HashMap is
+    // a convenient lookup shape for the caller, not a dedupe tool.
+    let map: std::collections::HashMap<String, String> = rows.into_iter().collect();
+
+    // Opportunistic write-back: persist each resolved channel_id onto
+    // the canonical `videos` row so the next feed call sees it
+    // populated and skips this fallback. The `WHERE channel_id IS
+    // NULL` guard makes this idempotent and ensures we don't clobber
+    // a value some other writer (heartbeat, RSS) raced ahead of us
+    // to set. Failure here is best-effort: the caller already has the
+    // map we computed above, so a transient DB issue at write-back
+    // time degrades to "do this lookup again next call" rather than
+    // a 500 on an otherwise-serviceable read.
+    //
+    // Implementation: a single chunked CTE+UPDATE statement rather
+    // than N per-row UPDATEs. A cold call on a stub-only history
+    // would otherwise be O(N) round-trips through the pool;
+    // collapsing to one statement per chunk keeps the first-call
+    // cost bounded by a single network / WAL roundtrip. We use the
+    // `WITH src(vid, cid) AS (VALUES (?,?), …)` form because SQLite
+    // does not accept the `… FROM (VALUES …) AS src(vid, cid)` shape
+    // (no column-list aliases on subquery/VALUES table aliases) —
+    // CTE column lists are the supported way to name VALUES columns.
+    if !map.is_empty() {
+        backfill_video_channel_ids(db, &map).await;
     }
+
     Ok(map)
+}
+
+/// Persist a batch of resolved `(video_id, channel_id)` pairs back to
+/// `videos.channel_id` in a single chunked statement.
+///
+/// Separated from `lookup_channel_ids_for_videos` so the SQL building
+/// and the chunking logic have a focused unit-testable surface, and
+/// so future callers that resolve `channel_id` by other means (e.g.
+/// a future sidecar) can reuse the same idempotent write-back path.
+///
+/// **Idempotency**: the `WHERE videos.channel_id IS NULL` guard makes
+/// it safe to call this with stale data — a concurrent writer that
+/// already populated the row wins and we no-op.
+///
+/// **Error handling**: best-effort. A transient failure (lock,
+/// timeout) is `debug!`-logged because the caller has already computed
+/// the in-memory map that the live request needs; the write-back
+/// exists purely to amortise future lookups. A parse-error-shaped
+/// failure escalates to `warn!`-once-per-process because that means
+/// the helper is permanently broken (e.g. a future SQLite/syntax
+/// regression) rather than a transient blip — exactly the case where
+/// `debug!` alone hides the failure. The next call still re-tries
+/// either way; the escalation is purely operator-visibility.
+async fn backfill_video_channel_ids(
+    db: &sqlx::SqlitePool,
+    map: &std::collections::HashMap<String, String>,
+) {
+    use crate::services::sql_helpers;
+    // Two binds per row (video_id, channel_id) — chunk so we never
+    // exceed the bind-parameter ceiling even on pathologically large
+    // maps. In practice `map.len()` is bounded by the caller's LIMIT
+    // (≤ 50 today), so the loop body executes once; the chunking is
+    // belt-and-braces for future callers that resolve larger batches.
+    const COLS: usize = 2;
+    let chunk_size = (sql_helpers::MAX_BIND_PARAMS / COLS).max(1);
+    // Sort by (video_id, channel_id) so chunk boundaries are
+    // deterministic across calls. The map's iteration order is
+    // hash-state-dependent, which would make repeat calls (e.g. two
+    // concurrent feed requests resolving the same set of stubs)
+    // partition into different chunks — harmless for correctness
+    // (each chunk's WHERE-IS-NULL guard is idempotent), but it
+    // muddies debugging when an operator inspects which chunk
+    // emitted a warn. The cross-listed-channel determinism that
+    // matters for the *resolved channel id* is already enforced
+    // upstream by the `MAX(channel_id)` aggregation in
+    // `lookup_channel_ids_for_videos` (matches migration 025 step
+    // 2's tie-break), so this sort is purely about chunk stability.
+    let mut entries: Vec<(&String, &String)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+    for chunk in entries.chunks(chunk_size) {
+        // CTE-with-column-list form: `WITH src(vid, cid) AS
+        // (VALUES (?,?), …) UPDATE videos SET channel_id = (SELECT
+        // cid FROM src WHERE src.vid = videos.video_id) WHERE
+        // videos.video_id IN (SELECT vid FROM src) AND
+        // videos.channel_id IS NULL`. SQLite accepts CTE column
+        // lists but rejects column-list aliases on subquery/VALUES
+        // table aliases (a SQLite-wide limitation, not version-
+        // dependent), so the correlated-subquery form is the
+        // portable way to do a bulk UPDATE keyed by an inline table.
+        let sql = format!(
+            "WITH src(vid, cid) AS (VALUES {placeholders}) \
+             UPDATE videos \
+                SET channel_id = (SELECT cid FROM src WHERE src.vid = videos.video_id) \
+              WHERE videos.video_id IN (SELECT vid FROM src) \
+                AND videos.channel_id IS NULL",
+            placeholders = sql_helpers::row_placeholders(chunk.len(), COLS)
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for (video_id, channel_id) in chunk {
+            // Bind order matches the `(vid, cid)` column list above.
+            q = q.bind(*video_id).bind(*channel_id);
+        }
+        if let Err(err) = q.execute(db).await {
+            let msg = err.to_string();
+            // Heuristic: SQLite parse errors surface as "near ...:
+            // syntax error" or "no such column" or "ambiguous
+            // column". These are not transient; the helper will keep
+            // returning the same error on every call until the SQL
+            // is patched, so emit at `warn!` once (per process) so
+            // it shows up in normal log streams rather than being
+            // buried under `debug!`. Transient failures (busy,
+            // locked, timeout) stay at `debug!` because every
+            // subsequent call recovers and noisy warns would
+            // overwhelm operators.
+            let permanent = msg.contains("syntax error")
+                || msg.contains("no such column")
+                || msg.contains("no such table")
+                || msg.contains("ambiguous column");
+            if permanent {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        chunk_len = chunk.len(),
+                        error = %err,
+                        "lazy videos.channel_id backfill failed with a parse-shaped error; \
+                         this indicates a permanent SQL/schema regression and will not \
+                         self-recover. Subsequent failures will be debug!-logged to avoid \
+                         flooding."
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    chunk_len = chunk.len(),
+                    error = %err,
+                    "lazy videos.channel_id backfill chunk failed; will retry on next feed call"
+                );
+            }
+        }
+    }
 }
 
 /// Whether a saved (`progress_seconds`, `duration_seconds`) pair should
@@ -859,10 +1037,13 @@ async fn up_next_from_channel(
     // Read from the local archive populated by RSS + sidecar + yt-dlp
     // backfill — no YouTube round-trip on the request path.
     let rows: Vec<UpNextRow> = sqlx::query_as(
-        "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-           FROM channel_videos \
-          WHERE channel_id = ? AND is_deleted = 0 \
-          ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC \
+        "SELECT cv.video_id, v.title, cv.channel_id, ch.channel_title, \
+                v.thumbnail_url \
+           FROM channel_videos cv \
+           JOIN videos v ON v.video_id = cv.video_id \
+           LEFT JOIN channels ch ON ch.channel_id = cv.channel_id \
+          WHERE cv.channel_id = ? AND cv.is_deleted = 0 \
+          ORDER BY COALESCE(cv.published_at, cv.last_seen_at) DESC, cv.last_seen_at DESC \
           LIMIT 25",
     )
     .bind(channel_id)
@@ -922,10 +1103,13 @@ async fn up_next_from_new_videos(
     let mut buckets: Vec<Vec<UpNextItem>> = Vec::new();
     for channel_id in &channels {
         let rows: Vec<UpNextRow> = sqlx::query_as(
-            "SELECT video_id, title, channel_id, channel_title, thumbnail_url \
-               FROM channel_videos \
-              WHERE channel_id = ? AND is_deleted = 0 \
-              ORDER BY COALESCE(published_at, last_seen_at) DESC, last_seen_at DESC \
+            "SELECT cv.video_id, v.title, cv.channel_id, ch.channel_title, \
+                    v.thumbnail_url \
+               FROM channel_videos cv \
+               JOIN videos v ON v.video_id = cv.video_id \
+               LEFT JOIN channels ch ON ch.channel_id = cv.channel_id \
+              WHERE cv.channel_id = ? AND cv.is_deleted = 0 \
+              ORDER BY COALESCE(cv.published_at, cv.last_seen_at) DESC, cv.last_seen_at DESC \
               LIMIT 5",
         )
         .bind(channel_id)

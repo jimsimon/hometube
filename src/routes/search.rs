@@ -29,6 +29,40 @@ const DEFAULT_LIMIT: u32 = 20;
 /// Hard cap to keep result payloads small.
 const MAX_LIMIT: u32 = 50;
 
+/// Child-search query. Extracted to a `const` so the test below can
+/// statically assert the inner select uses plain `UNION` (which
+/// dedupes by `video_id`) and not `UNION ALL` (which would fan
+/// duplicates out to the outer JOIN and produce visible duplicate
+/// hits in the response). The `WHERE … LIKE ?2 ESCAPE '\\'` form
+/// escapes the LIKE wildcards the caller percent-escapes upstream;
+/// the `ESCAPE '\\'` clause is required so a literal `%` or `_` in
+/// the user's query string doesn't widen the match.
+///
+/// Param bind contract (1-indexed via `?N` references for clarity):
+/// `?1` = child_account_id (applied to all three inner subqueries),
+/// `?2` = LIKE pattern (caller-prepared, includes `%` wildcards),
+/// `?3` = LIMIT, `?4` = OFFSET. Do not reorder bindings without
+/// updating the `?N` references in the SQL.
+const CHILD_SEARCH_SQL: &str = "\
+    SELECT v.video_id, v.title AS video_title, \
+           v.channel_id, ch.channel_title, \
+           v.thumbnail_url AS video_thumbnail_url \
+    FROM ( \
+       SELECT video_id FROM allowlisted_videos WHERE child_account_id = ?1 \
+       UNION \
+       SELECT video_id FROM watch_history       WHERE child_account_id = ?1 \
+       UNION \
+       SELECT cv.video_id \
+         FROM channel_videos cv \
+         INNER JOIN allowlisted_channels ac ON ac.channel_id = cv.channel_id \
+         WHERE ac.child_account_id = ?1 AND cv.is_deleted = 0 \
+    ) src \
+    JOIN videos v ON v.video_id = src.video_id \
+    LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+    WHERE v.title LIKE ?2 ESCAPE '\\' \
+    ORDER BY v.title \
+    LIMIT ?3 OFFSET ?4";
+
 #[derive(Debug, Deserialize)]
 pub struct ParentSearchQuery {
     pub q: String,
@@ -270,11 +304,29 @@ async fn search_channels(
     //
     // We UNION on the (channel_id, channel_title, thumbnail) shape so
     // the result is naturally deduplicated.
+    // `allowlisted_channels` is now slim (FK only); pull metadata from
+    // `channels`. `child_subscriptions` still carries its own
+    // denormalised columns (out of scope for this refactor).
+    //
+    // Allowlisted channels missing a `channels.channel_title` are
+    // intentionally excluded from search via `INNER JOIN channels`:
+    // a `LEFT JOIN` + `COALESCE(..., '')` would still silently drop
+    // them at the outer `LIKE` step (an empty string can never match a
+    // non-empty pattern), but the inner-join form makes the exclusion
+    // explicit and saves the COALESCE. The allowlist POST handler
+    // upserts `channels` synchronously, and migration 025 seeds a row
+    // for every allowlisted channel — so in practice this affects no
+    // rows. If it ever does, the fix is to populate `channels`, not to
+    // surface a blank-title row that the user can't search by name.
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT channel_id, channel_title, channel_thumbnail_url FROM ( \
-            SELECT channel_id, channel_title, channel_thumbnail_url \
-              FROM allowlisted_channels \
-              WHERE child_account_id = ? \
+            SELECT ac.channel_id, \
+                   ch.channel_title AS channel_title, \
+                   ch.channel_thumbnail_url \
+              FROM allowlisted_channels ac \
+              JOIN channels ch ON ch.channel_id = ac.channel_id \
+              WHERE ac.child_account_id = ? \
+                AND ch.channel_title IS NOT NULL \
             UNION \
             SELECT channel_id, channel_title, channel_thumbnail_url \
               FROM child_subscriptions \
@@ -321,12 +373,16 @@ async fn search_videos(
     // for those videos at all. `channel_videos` holds the full
     // archive populated by RSS + yt-dlp backfill.
     //
-    // We use UNION ALL + GROUP BY rather than UNION because UNION
-    // dedups only on full-row equality — buckets 1–2 have no
-    // `channel_id` while bucket 3 does. GROUP BY video_id collapses
-    // them; MAX(channel_id) prefers the bucket-3 form (real id beats
-    // NULL under MAX), giving `can_child_view` the data it needs to
-    // exercise the channel-allowlist branch.
+    // We now project the inner UNION over `video_id` only (a single
+    // column), then JOIN to `videos`/`channels` outside for the
+    // canonical metadata. With one column in the projection, plain
+    // `UNION` correctly dedupes by `video_id` — there's no NULL-vs-
+    // real `channel_id` distinction inside the inner select to
+    // preserve. The earlier `UNION ALL + GROUP BY + MAX(channel_id)`
+    // shape (preserved in older revisions of this comment) was a
+    // workaround for a multi-column projection; under the current
+    // single-column shape plain `UNION` is both simpler and
+    // correct.
     type SearchRow = (
         String,
         String,
@@ -334,45 +390,26 @@ async fn search_videos(
         Option<String>,
         Option<String>,
     );
-    let rows: Vec<SearchRow> = sqlx::query_as(
-        "SELECT video_id, \
-                MAX(video_title) AS video_title, \
-                MAX(channel_id) AS channel_id, \
-                MAX(channel_title) AS channel_title, \
-                MAX(video_thumbnail_url) AS video_thumbnail_url \
-         FROM ( \
-            SELECT video_id, video_title, \
-                   NULL AS channel_id, \
-                   channel_title, video_thumbnail_url \
-              FROM allowlisted_videos WHERE child_account_id = ? \
-            UNION ALL \
-            SELECT video_id, video_title, \
-                   NULL AS channel_id, \
-                   channel_title, video_thumbnail_url \
-              FROM watch_history WHERE child_account_id = ? \
-            UNION ALL \
-            SELECT cv.video_id, cv.title AS video_title, \
-                   cv.channel_id, cv.channel_title, \
-                   cv.thumbnail_url AS video_thumbnail_url \
-              FROM channel_videos cv \
-              INNER JOIN allowlisted_channels ac \
-                ON ac.channel_id = cv.channel_id \
-              WHERE ac.child_account_id = ? AND cv.is_deleted = 0 \
-         ) \
-         WHERE video_title LIKE ? ESCAPE '\\' \
-         GROUP BY video_id \
-         ORDER BY video_title \
-         LIMIT ? OFFSET ?",
-    )
-    .bind(child_id)
-    .bind(child_id)
-    .bind(child_id)
-    .bind(pattern)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    // Three sources of reachable videos (per-child allowlist, watch
+    // history, and the channel-allowlist archive) get UNIONed; we then
+    // join the resulting `video_id`s against `videos` + `channels` so
+    // the title/thumbnail/channel-title come from the canonical store.
+    //
+    // CONTRACT: the inner `UNION` (NOT `UNION ALL`) deduplicates by
+    // `video_id`, which is what the outer `JOIN videos v` relies on to
+    // produce exactly one row per match. A `video_id` that appears in
+    // both `allowlisted_videos` and `watch_history` (common case) must
+    // not fan out to two response rows. Do NOT swap `UNION` for
+    // `UNION ALL` here without also wrapping the outer select in
+    // `DISTINCT` / `GROUP BY v.video_id`.
+    let rows: Vec<SearchRow> = sqlx::query_as(CHILD_SEARCH_SQL)
+        .bind(child_id)
+        .bind(pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     Ok(rows
         .into_iter()
@@ -401,4 +438,30 @@ pub fn pick_thumb_url(thumbs: &std::collections::HashMap<String, ThumbnailInfo>)
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_search_sql_uses_plain_union_not_union_all() {
+        // Regression guard: `UNION ALL` in the inner subselect would
+        // fan duplicates (e.g. a video in both `allowlisted_videos`
+        // and `watch_history`) out to the outer JOIN and produce
+        // duplicate response rows. Plain `UNION` dedupes by the
+        // single-column `video_id` projection. Catch a future
+        // regression statically rather than via a hard-to-reproduce
+        // integration test against duplicate fixtures.
+        assert!(
+            !CHILD_SEARCH_SQL.contains("UNION ALL"),
+            "child_search SQL must use UNION, not UNION ALL; see docstring"
+        );
+        // Sanity: still contains a UNION at all (so a refactor that
+        // dropped the dedupe entirely also flips this red).
+        assert!(
+            CHILD_SEARCH_SQL.contains("UNION"),
+            "child_search SQL must contain UNION for cross-source dedupe"
+        );
+    }
 }

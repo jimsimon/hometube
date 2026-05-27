@@ -225,25 +225,15 @@ async fn child_channel_detail_served_from_local_state() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Allowlist the channel.
+    // Allowlist the channel (which seeds the canonical `channels` row).
+    common::allowlist_channel(&app.pool, child_id, parent_id, "UCmocked", Some("Mocked")).await;
+    // Now layer the richer header metadata onto `channels`. This is
+    // what production does via `feed_cache::upsert_channel_with_metadata`
+    // inside the allowlist POST handler.
     sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCmocked', 'Mocked', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    // Seed channel_sync_state directly (production wires this up via
-    // `feed_cache::upsert_channel_with_metadata` inside add_channel).
-    sqlx::query(
-        "INSERT INTO channel_sync_state \
-            (channel_id, channel_title, channel_thumbnail_url, description, \
-             backfill_status, backfill_next_at, rss_next_poll_at) \
-         VALUES ('UCmocked', 'Mocked Channel', 'https://t/x.jpg', 'About', \
-                 'pending', 0, 0)",
+        "UPDATE channels SET channel_title = 'Mocked Channel', \
+             channel_thumbnail_url = 'https://t/x.jpg', description = 'About' \
+          WHERE channel_id = 'UCmocked'",
     )
     .execute(&app.pool)
     .await
@@ -266,38 +256,35 @@ async fn child_channel_videos_with_mocked_discovery() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCvids', 'Vids Channel', ?)",
+    common::allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "UCvids",
+        Some("Vids Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
+    .await;
     // Allowlist the video that will appear.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'pl-vid-1', 'V', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "pl-vid-1",
+        Some("V"),
+        Some("UCvids"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    // Seed channel_videos directly with one row.
-    sqlx::query(
-        "INSERT INTO channel_videos \
-            (channel_id, video_id, title, channel_title, thumbnail_url, \
-             published_at, first_seen_at, last_seen_at, source) \
-         VALUES ('UCvids', 'pl-vid-1', 'V', 'Vids Channel', 'https://t/x.jpg', \
-                 1700000000, 1, 1, 'rss')",
+    .await;
+    // Seed channel_videos archive row.
+    common::seed_channel_video(
+        &app.pool,
+        "UCvids",
+        Some("Vids Channel"),
+        "pl-vid-1",
+        Some("V"),
+        Some(1700000000),
+        "rss",
     )
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/channels/UCvids/videos").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -360,15 +347,7 @@ async fn subscribe_and_list_visibility() {
     assert_eq!(arr[0]["visible"], false);
 
     // Now allowlist the channel.
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCvis', 'V', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_channel(&app.pool, child_id, parent_id, "UCvis", Some("V")).await;
 
     let res = app.server.get("/api/subscriptions").await;
     let body: serde_json::Value = res.json();
@@ -390,15 +369,14 @@ async fn new_videos_feed_with_mocked_discovery() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCfeed', 'Feed Channel', ?)",
+    common::allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "UCfeed",
+        Some("Feed Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     hometube::services::feed_cache::upsert_channel(&app.pool, "UCfeed")
         .await
@@ -470,15 +448,7 @@ async fn up_next_from_channel_with_mocked_discovery() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCnext', 'Next', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_channel(&app.pool, child_id, parent_id, "UCnext", Some("Next")).await;
 
     hometube::services::feed_cache::upsert_channel(&app.pool, "UCnext")
         .await

@@ -136,7 +136,7 @@ pub async fn subscribe(
     // sustained failure surfaces in the operator's diagnostics
     // instead of being silently swallowed.
     if let Err(err) = sqlx::query(
-        "UPDATE channel_sync_state SET backfill_next_at = 0 \
+        "UPDATE channels SET backfill_next_at = 0 \
           WHERE channel_id = ? \
             AND backfill_status = 'pending' \
             AND backfill_last_completed_at IS NULL",

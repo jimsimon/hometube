@@ -203,13 +203,22 @@ async fn child_home_page_renders_video_grid_with_data() {
 
     // Seed some allowlisted videos.
     for i in 0..3 {
+        let vid = format!("vid-{i}");
+        let title = format!("Video {i}");
         sqlx::query(
-            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, video_thumbnail_url, added_by) \
-             VALUES (?, ?, ?, 'http://thumb.test/v.jpg', ?)",
+            "INSERT INTO videos (video_id, title, thumbnail_url) VALUES (?, ?, 'http://thumb.test/v.jpg') \
+             ON CONFLICT(video_id) DO NOTHING",
+        )
+        .bind(&vid)
+        .bind(&title)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO allowlisted_videos (child_account_id, video_id, added_by) VALUES (?, ?, ?)",
         )
         .bind(child_id)
-        .bind(format!("vid-{i}"))
-        .bind(format!("Video {i}"))
+        .bind(&vid)
         .bind(parent_id)
         .execute(&app.pool)
         .await

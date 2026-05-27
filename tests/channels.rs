@@ -10,7 +10,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::boot_with_parent_and_child;
+use common::{allowlist_channel, boot_with_parent_and_child, seed_blocked, seed_channel_video};
 use hometube::models::account::AccountType;
 
 #[tokio::test]
@@ -33,15 +33,7 @@ async fn allowlisted_channel_passes_access_gate() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'chan-ok', 'Cool', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "chan-ok", Some("Cool")).await;
 
     // After the access gate, the handler tries to call YouTube. We
     // can't reach a real response without a network call — but we can
@@ -77,39 +69,44 @@ async fn get_channel_serves_local_header_metadata() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
+    allowlist_channel(&app.pool, child_id, parent_id, "UCmeta", Some("Meta")).await;
+    // Override the canonical channel row with the richer metadata this
+    // test asserts on.
     sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCmeta', 'Meta', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "INSERT INTO channel_sync_state \
-            (channel_id, channel_title, channel_thumbnail_url, description, \
-             backfill_status, backfill_next_at, rss_next_poll_at) \
-         VALUES ('UCmeta', 'Meta Channel', 'https://yt3.googleusercontent.com/x.jpg', \
-                 'A description.', 'pending', 0, 0)",
+        "UPDATE channels SET channel_title = 'Meta Channel', \
+             channel_thumbnail_url = 'https://yt3.googleusercontent.com/x.jpg', \
+             description = 'A description.' \
+          WHERE channel_id = 'UCmeta'",
     )
     .execute(&app.pool)
     .await
     .unwrap();
 
     // Seed two videos, one tombstoned, so video_count = 1.
-    sqlx::query(
-        "INSERT INTO channel_videos \
-            (channel_id, video_id, title, channel_title, published_at, \
-             first_seen_at, last_seen_at, source, is_deleted) \
-         VALUES \
-            ('UCmeta', 'vA', 'A', 'Meta', 1700000000, 1, 1, 'rss', 0), \
-            ('UCmeta', 'vB', 'B', 'Meta', 1700000001, 1, 1, 'backfill', 1)",
+    seed_channel_video(
+        &app.pool,
+        "UCmeta",
+        Some("Meta Channel"),
+        "vA",
+        Some("A"),
+        Some(1700000000),
+        "rss",
     )
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
+    seed_channel_video(
+        &app.pool,
+        "UCmeta",
+        Some("Meta Channel"),
+        "vB",
+        Some("B"),
+        Some(1700000001),
+        "backfill",
+    )
+    .await;
+    sqlx::query("UPDATE channel_videos SET is_deleted = 1 WHERE video_id = 'vB'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
 
     let res = app.server.get("/api/channels/UCmeta").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -133,17 +130,28 @@ async fn get_channel_returns_404_when_no_sync_state_row() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    // Allowlist the channel so the access gate passes, but skip the
-    // channel_sync_state row.
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCmissing', 'Missing', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    // Allowlist the channel so the access gate passes, then drop the
+    // header columns from `channels` (the row itself stays so the FK
+    // from `allowlisted_channels` remains satisfied). The handler
+    // checks `channel_title IS NULL` shape via fetch_optional — but
+    // get_channel returns NotFound only when the row is fully missing,
+    // so we test that path by removing the row with FKs turned off
+    // on the same connection that runs the DELETE.
+    allowlist_channel(&app.pool, child_id, parent_id, "UCmissing", Some("Missing")).await;
+    let mut conn = app.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM channels WHERE channel_id = 'UCmissing'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
 
     let res = app.server.get("/api/channels/UCmissing").await;
     assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
@@ -158,15 +166,7 @@ async fn list_videos_rejects_unknown_sort_parameter() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCsort', 'Sortable', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "UCsort", Some("Sortable")).await;
 
     let res = app
         .server
@@ -190,24 +190,35 @@ async fn list_videos_accepts_most_viewed_sort() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCviews', 'Viewed', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "UCviews", Some("Viewed")).await;
 
     // Seed two videos with different view counts.
+    seed_channel_video(
+        &app.pool,
+        "UCviews",
+        Some("Viewed"),
+        "low-views",
+        Some("Low"),
+        Some(1700000000),
+        "backfill",
+    )
+    .await;
+    seed_channel_video(
+        &app.pool,
+        "UCviews",
+        Some("Viewed"),
+        "high-views",
+        Some("High"),
+        Some(1700000001),
+        "backfill",
+    )
+    .await;
     sqlx::query(
-        "INSERT INTO channel_videos \
-            (channel_id, video_id, title, channel_title, view_count, published_at, \
-             first_seen_at, last_seen_at, source) \
-         VALUES \
-            ('UCviews', 'low-views', 'Low', 'Viewed', 10, 1700000000, 1, 1, 'backfill'), \
-            ('UCviews', 'high-views', 'High', 'Viewed', 1000000, 1700000001, 1, 1, 'backfill')",
+        "UPDATE channel_videos SET view_count = CASE video_id \
+                                    WHEN 'low-views' THEN 10 \
+                                    WHEN 'high-views' THEN 1000000 \
+                                  END \
+          WHERE channel_id = 'UCviews'",
     )
     .execute(&app.pool)
     .await
@@ -236,47 +247,28 @@ async fn list_videos_pagination_survives_blocked_row_in_first_page() {
     let parent_id = app.parent_id.unwrap();
 
     // Allowlist the channel so the access gate passes.
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCpaged', 'Paged', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "UCpaged", Some("Paged")).await;
 
     // Seed 60 channel_videos rows so we have at least 2 full pages
-    // (PAGE_SIZE is 30).
+    // (PAGE_SIZE is 30). Newer i ⇒ later published_at, so v0059 is
+    // first in the default `latest` ordering and v0000 is last.
     for i in 0..60 {
         let video_id = format!("vid-{i:04}");
-        sqlx::query(
-            "INSERT INTO channel_videos \
-                (channel_id, video_id, title, channel_title, published_at, \
-                 first_seen_at, last_seen_at, source) \
-             VALUES ('UCpaged', ?, ?, 'Paged', ?, 1, 1, 'rss')",
+        seed_channel_video(
+            &app.pool,
+            "UCpaged",
+            Some("Paged"),
+            &video_id,
+            Some(&format!("Video {i}")),
+            Some(2_000_000_000_i64 - i as i64),
+            "rss",
         )
-        .bind(&video_id)
-        // Newer i ⇒ later published_at, so v0059 is first in the
-        // default `latest` ordering and v0000 is last.
-        .bind(format!("Video {i}"))
-        .bind(2_000_000_000_i64 - i as i64)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+        .await;
     }
 
     // Block one video from the first page so the filter actually does
     // something.
-    sqlx::query(
-        "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by) \
-         VALUES (?, 'vid-0010', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    seed_blocked(&app.pool, child_id, parent_id, "vid-0010", Some("Video 10")).await;
 
     // First page: must emit a next_page_token even though one of the
     // 31st-priority videos was filtered.

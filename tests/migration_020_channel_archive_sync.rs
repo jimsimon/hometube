@@ -205,10 +205,11 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
         i64,            // rss_consecutive_errors
         Option<String>, // rss_last_error
     );
+    // Migration 025 renamed channel_sync_state to channels.
     let states: Vec<SyncStateRow> = sqlx::query_as(
         "SELECT channel_id, channel_title, channel_thumbnail_url, rss_etag, \
                 rss_last_success_at, rss_consecutive_errors, rss_last_error \
-           FROM channel_sync_state ORDER BY channel_id",
+           FROM channels ORDER BY channel_id",
     )
     .fetch_all(&pool)
     .await
@@ -244,10 +245,14 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
         String, // published_raw (via COALESCE)
         i64,    // is_deleted
     );
+    // Migration 024 moved `title` off `channel_videos` onto `videos`.
     let videos: Vec<VideoRow> = sqlx::query_as(
-        "SELECT channel_id, video_id, title, source, first_seen_at, last_seen_at, \
-                COALESCE(published_raw, ''), is_deleted \
-           FROM channel_videos ORDER BY channel_id, video_id",
+        "SELECT cv.channel_id, cv.video_id, v.title, cv.source, \
+                cv.first_seen_at, cv.last_seen_at, \
+                COALESCE(cv.published_raw, ''), cv.is_deleted \
+           FROM channel_videos cv \
+           JOIN videos v ON v.video_id = cv.video_id \
+          ORDER BY cv.channel_id, cv.video_id",
     )
     .fetch_all(&pool)
     .await
@@ -278,7 +283,7 @@ async fn migration_020_preserves_feed_source_items_into_channel_videos() {
     //     on its next tick.
     let backfill: Vec<(String, String, i64)> = sqlx::query_as(
         "SELECT channel_id, backfill_status, backfill_next_at \
-           FROM channel_sync_state ORDER BY channel_id",
+           FROM channels ORDER BY channel_id",
     )
     .fetch_all(&pool)
     .await

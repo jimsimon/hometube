@@ -95,12 +95,16 @@ pub async fn list(
     State(state): State<AppState>,
     current: CurrentAccount,
 ) -> AppResult<Json<Vec<DownloadRow>>> {
+    // Metadata hydrated from `videos` + `channels` (migrations 024/025).
     let rows = sqlx::query(
-        "SELECT id, video_id, video_title, video_thumbnail_url, channel_title, \
-         quality_label, status, downloaded_at \
-         FROM offline_downloads \
-         WHERE child_account_id = ? AND status != 'deleted' \
-         ORDER BY id DESC",
+        "SELECT od.id, od.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title, od.quality_label, od.status, od.downloaded_at \
+         FROM offline_downloads od \
+         JOIN videos v ON v.video_id = od.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE od.child_account_id = ? AND od.status != 'deleted' \
+         ORDER BY od.id DESC",
     )
     .bind(current.id)
     .fetch_all(&state.db)
@@ -122,6 +126,117 @@ pub async fn list(
     Ok(Json(out))
 }
 
+/// Reject body- or path-supplied identifiers that aren't shaped like
+/// a YouTube video ID. The `stream_url` we build below interpolates
+/// `video_id` straight into a URL path segment + query string; without
+/// this gate a malicious child could send e.g. `abc?injected=1` in the
+/// JSON body and we'd echo it back as
+/// `/api/downloads/abc?injected=1/stream?quality=...`, confusing any
+/// client (or proxy) that re-parses the path.
+///
+/// YouTube video IDs are exactly 11 chars from `[A-Za-z0-9_-]`. We
+/// match that exactly: downstream code (cache lookups, DB binds, the
+/// reverse path in `stream_url`) all assume the canonical YouTube
+/// shape, and a wider validator would let `..`/empty IDs slip into
+/// filesystem-touching handlers (see `update`/`stream` which take
+/// `video_id` from `Path<String>`). If YouTube ever changes the
+/// format this validator (and its callers) need re-auditing
+/// together; widening "to leave headroom" silently broadens the
+/// attack surface in the meantime.
+fn is_valid_video_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 11
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+/// Reject body-supplied quality labels that aren't shaped like
+/// `<digits>p` (e.g. `"720p"`, `"1080p"`). Same defensive rationale
+/// as `is_valid_video_id` — the value is echoed into the `stream_url`
+/// query string.
+///
+/// **Canonical form is required**: only `<digits>p` is accepted, not
+/// bare `<digits>`. The frontend (`video-player.ts`,
+/// `child-settings-form.ts`, `types/index.ts::max_quality`) always
+/// emits the `p`-suffixed form, and the downstream consumers
+/// (`offline_downloads.quality_label` unique key, yt-dlp `--format`
+/// selector, stream-URL formatter) expect the canonical shape. An
+/// earlier version of this validator also accepted bare digits "for
+/// flexibility," which silently doubled the input alphabet every
+/// consumer had to handle without a single caller actually needing
+/// it; tightening to one canonical form keeps the contract sharp.
+///
+/// Three layered checks:
+///
+/// 1. Shape: 1..=4 ASCII digits followed by a literal `p`. The 1..=4
+///    digit range covers the real YouTube label range (`144p` ..=
+///    `4320p`); allowing more "for headroom" silently broadens the
+///    alphabet downstream consumers accept — same reasoning as
+///    `is_valid_video_id`'s `len() == 11` tightening.
+///
+/// 2. Canonical decimal: reject leading zeros (`"0144p"`, `"0720p"`).
+///    These parse fine numerically (`u32::from_str("0144") == 144`)
+///    and survive the range check, but they're not the canonical
+///    label form the frontend emits — accepting them would silently
+///    fork the `quality_label` unique key (a single download could
+///    be stored under both `"0720p"` and `"720p"`) and let two
+///    distinct strings hit yt-dlp's `--format` selector for the same
+///    underlying resolution. The exception is the single literal
+///    `"0"`, which is rejected by the range check below regardless.
+///
+/// 3. Numeric: the parsed leading digits must fall in `144..=4320`.
+///    The shape check alone accepts `"0p"`, `"0000p"`, `"0001p"` —
+///    all technically URL-safe but nonsensical labels. Parsing and
+///    range-checking closes that gap so callers can rely on
+///    "validator passes ⇒ recognisable YouTube label."
+fn is_valid_quality_label(q: &str) -> bool {
+    let Some(digits) = q.strip_suffix('p') else {
+        return false;
+    };
+    if !(1..=4).contains(&digits.len()) || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // Reject leading zeros so the unique key in `offline_downloads`
+    // can't be silently forked by callers that emit `"0720p"` and
+    // `"720p"` for the same underlying resolution. A single `"0"`
+    // would be a valid one-digit string but is filtered out by the
+    // range check below anyway.
+    if digits.len() > 1 && digits.starts_with('0') {
+        return false;
+    }
+    // Shape passed — parse and range-check. `u32::from_str` can't
+    // fail on a 1..=4 all-ASCII-digit string that we already
+    // length-checked, but propagate `false` rather than `unwrap` so
+    // a future shape-check loosening can't accidentally panic in
+    // release.
+    match digits.parse::<u32>() {
+        Ok(n) => (144..=4320).contains(&n),
+        Err(_) => false,
+    }
+}
+
+/// Reject body-supplied status values that aren't in the
+/// `offline_downloads.status` CHECK constraint alphabet.
+///
+/// The DB-level CHECK provides a hard backstop, but a bad status from
+/// the client surfaces there as a sqlx error → 500 — indistinguishable
+/// from a transient DB blip. Validate at the route edge so the client
+/// gets a clear 400 (matching the `is_valid_video_id` /
+/// `is_valid_quality_label` style elsewhere in this file) and the 500
+/// channel stays reserved for actual server faults.
+///
+/// **Keep in sync with `migrations/024_videos_table.sql` line ~355
+/// (`CHECK (status IN ('pending', 'downloading', 'complete', 'failed',
+/// 'deleted'))`)** — if the migration is ever amended, update this
+/// list too or the route will reject values the DB happily accepts.
+fn is_valid_download_status(status: &str) -> bool {
+    matches!(
+        status,
+        "pending" | "downloading" | "complete" | "failed" | "deleted"
+    )
+}
+
 /// `POST /api/downloads` — record a new download request and hand back
 /// the stream URL the client should fetch.
 pub async fn create(
@@ -130,6 +245,13 @@ pub async fn create(
     Json(body): Json<CreateDownloadBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     ensure_downloads_enabled(&state, &current).await?;
+
+    if !is_valid_video_id(&body.video_id) {
+        return Err(AppError::BadRequest("invalid video_id".into()));
+    }
+    if !is_valid_quality_label(&body.quality) {
+        return Err(AppError::BadRequest("invalid quality".into()));
+    }
 
     let cache = video_cache(&state);
     let result = cache
@@ -148,10 +270,7 @@ pub async fn create(
         return Err(AppError::Forbidden);
     }
 
-    let title = result
-        .title
-        .clone()
-        .unwrap_or_else(|| body.video_id.clone());
+    let title = result.title.as_deref().filter(|s| !s.is_empty());
     let thumb = result.thumbnail.clone().or_else(|| {
         result
             .thumbnails
@@ -159,27 +278,46 @@ pub async fn create(
             .max_by_key(|t| t.width.unwrap_or(0))
             .map(|t| t.url.clone())
     });
-    let channel = result.channel_title.clone();
 
+    let mut tx = state.db.begin().await?;
+    if let Some(cid) = result.channel_id.as_deref() {
+        crate::services::feed_cache::upsert_channel_with_metadata(
+            &mut *tx,
+            cid,
+            result.channel_title.as_deref(),
+            None,
+            None,
+        )
+        .await?;
+    }
+    crate::models::video::upsert(
+        &mut *tx,
+        &body.video_id,
+        title,
+        result.channel_id.as_deref(),
+        result.duration.map(|d| d.round() as i64),
+        thumb.as_deref(),
+    )
+    .await?;
     sqlx::query(
-        "INSERT INTO offline_downloads \
-         (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, \
-          quality_label, status) \
-         VALUES (?, ?, ?, ?, ?, ?, 'pending') \
+        "INSERT INTO offline_downloads (child_account_id, video_id, quality_label, status) \
+         VALUES (?, ?, ?, 'pending') \
          ON CONFLICT(child_account_id, video_id, quality_label) DO UPDATE SET status = 'pending'",
     )
     .bind(current.id)
     .bind(&body.video_id)
-    .bind(&title)
-    .bind(&thumb)
-    .bind(&channel)
     .bind(&body.quality)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
-    // The video_id and quality come from yt-dlp / our own UI, so they're
-    // known to be URL-safe (alphanumeric + a few hyphens). No encoding
-    // needed.
+    // `video_id` and `quality` are gated by `is_valid_video_id` /
+    // `is_valid_quality_label` above. After those validators the
+    // bytes are restricted to `[A-Za-z0-9_-]{11}` and
+    // `\d{1,4}p` — both subsets of the unreserved URL-path/query
+    // alphabet (RFC 3986 §2.3), so no percent-encoding is required.
+    // If either validator widens its alphabet in the future this
+    // formatter must switch to a proper URL encoder.
     let stream_url = format!(
         "/api/downloads/{}/stream?quality={}",
         body.video_id, body.quality
@@ -198,7 +336,26 @@ pub async fn update(
     Path(video_id): Path<String>,
     Json(body): Json<UpdateDownloadBody>,
 ) -> AppResult<StatusCode> {
+    // Re-validate the path-supplied `video_id` against the same
+    // alphabet as `create`. `Path<String>` does not constrain the
+    // shape — axum just hands us whatever the router matched, which
+    // includes `..` and `/`-equivalents that the router pattern
+    // happens to accept. The DB bind is safe (parameterised) but a
+    // sloppy `video_id` here is a code smell worth catching at the
+    // edge.
+    if !is_valid_video_id(&video_id) {
+        return Err(AppError::BadRequest("invalid video_id".into()));
+    }
+
     let status = body.status.as_deref().unwrap_or("complete");
+    if !is_valid_download_status(status) {
+        // Validate at the edge so a typo'd status surfaces as a 400
+        // rather than the DB CHECK rejection cascading into a 500.
+        // The `unwrap_or("complete")` default above is statically
+        // safe — `"complete"` is in the allowlist — so an absent
+        // body field still takes the happy path.
+        return Err(AppError::BadRequest("invalid status".into()));
+    }
     let now = chrono::Utc::now().timestamp();
     let downloaded_at: Option<i64> = if status == "complete" {
         Some(now)
@@ -206,8 +363,26 @@ pub async fn update(
         None
     };
 
-    if let Some(quality) = body.quality {
-        sqlx::query(
+    // Asymmetric 404 semantics across the two branches:
+    //
+    // - `quality.is_some()` → the client targets a specific row. If
+    //   no row matches (typo'd quality label, e.g. "1080p" when only
+    //   "720p" was recorded), silently 204'ing would let the UI think
+    //   the status flipped. Return 404 so the client can correct.
+    //
+    // - `quality.is_none()` → the client wants every quality for the
+    //   video updated. Zero matching rows is the *expected* outcome
+    //   for an idempotent `DELETE`-then-`PUT` sequence, so 204 with
+    //   no row-count gate is correct.
+    //
+    // The boolean below makes that asymmetry obvious at the call
+    // site; the earlier `Option<u64>` shape was technically correct
+    // but read like a check that should fire in both branches.
+    let should_404_on_zero_rows = if let Some(quality) = body.quality {
+        if !is_valid_quality_label(&quality) {
+            return Err(AppError::BadRequest("invalid quality".into()));
+        }
+        let res = sqlx::query(
             "UPDATE offline_downloads SET status = ?, downloaded_at = ? \
              WHERE child_account_id = ? AND video_id = ? AND quality_label = ?",
         )
@@ -218,6 +393,7 @@ pub async fn update(
         .bind(&quality)
         .execute(&state.db)
         .await?;
+        res.rows_affected() == 0
     } else {
         sqlx::query(
             "UPDATE offline_downloads SET status = ?, downloaded_at = ? \
@@ -229,6 +405,11 @@ pub async fn update(
         .bind(&video_id)
         .execute(&state.db)
         .await?;
+        // Idempotent per the docstring above — never 404 here.
+        false
+    };
+    if should_404_on_zero_rows {
+        return Err(AppError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -239,6 +420,9 @@ pub async fn delete(
     current: CurrentAccount,
     Path(video_id): Path<String>,
 ) -> AppResult<StatusCode> {
+    if !is_valid_video_id(&video_id) {
+        return Err(AppError::BadRequest("invalid video_id".into()));
+    }
     sqlx::query(
         "UPDATE offline_downloads SET status = 'deleted' \
          WHERE child_account_id = ? AND video_id = ?",
@@ -267,6 +451,20 @@ pub async fn stream(
     Query(q): Query<StreamQuery>,
 ) -> AppResult<Response> {
     ensure_downloads_enabled(&state, &current).await?;
+
+    // Validate before any cache extraction / yt-dlp invocation. The
+    // cache extractor and yt-dlp both treat `video_id` as opaque
+    // text, but `..` / shell-metachar / URL-metachar slipping through
+    // here would needlessly broaden the attack surface for any
+    // downstream consumer that constructs paths/URLs from this value.
+    if !is_valid_video_id(&video_id) {
+        return Err(AppError::BadRequest("invalid video_id".into()));
+    }
+    if let Some(quality) = q.quality.as_deref() {
+        if !is_valid_quality_label(quality) {
+            return Err(AppError::BadRequest("invalid quality".into()));
+        }
+    }
 
     let cache = video_cache(&state);
     let result = cache
@@ -343,4 +541,135 @@ pub async fn stream(
         .headers_mut()
         .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_id_accepts_real_youtube_ids() {
+        // Real YouTube IDs are exactly 11 chars in [A-Za-z0-9_-].
+        assert!(is_valid_video_id("dQw4w9WgXcQ"));
+        assert!(is_valid_video_id("abc-def_123"));
+        assert!(is_valid_video_id("___---___--"));
+    }
+
+    #[test]
+    fn video_id_rejects_url_chars_and_wrong_length() {
+        // URL-bypass attempts the old comment shrugged off.
+        assert!(!is_valid_video_id("abc?injected=1"));
+        assert!(!is_valid_video_id("abc/../etc/passwd"));
+        assert!(!is_valid_video_id("abc#frag"));
+        assert!(!is_valid_video_id("abc def"));
+        // Wrong length — anything that isn't exactly 11 chars.
+        assert!(!is_valid_video_id(""));
+        assert!(!is_valid_video_id("A"));
+        assert!(!is_valid_video_id("dQw4w9WgXc")); // 10
+        assert!(!is_valid_video_id("dQw4w9WgXcQQ")); // 12
+        assert!(!is_valid_video_id(&"a".repeat(17)));
+    }
+
+    #[test]
+    fn quality_accepts_typical_labels() {
+        assert!(is_valid_quality_label("720p"));
+        assert!(is_valid_quality_label("1080p"));
+        assert!(is_valid_quality_label("144p"));
+        assert!(is_valid_quality_label("2160p"));
+    }
+
+    #[test]
+    fn quality_rejects_bare_digits() {
+        // Only the canonical `<digits>p` form is accepted; bare
+        // digits were a pre-tightening relic that no caller actually
+        // emits. See `is_valid_quality_label` docstring.
+        assert!(!is_valid_quality_label("720"));
+        assert!(!is_valid_quality_label("1080"));
+        assert!(!is_valid_quality_label("144"));
+        assert!(!is_valid_quality_label("2160"));
+        assert!(!is_valid_quality_label("4320"));
+    }
+
+    #[test]
+    fn quality_rejects_garbage() {
+        assert!(!is_valid_quality_label(""));
+        assert!(!is_valid_quality_label("p"));
+        assert!(!is_valid_quality_label("720p&injected"));
+        assert!(!is_valid_quality_label("hd"));
+        assert!(!is_valid_quality_label("720 p"));
+        assert!(!is_valid_quality_label("720P")); // uppercase 'P' not accepted
+                                                  // 5+ digits before the `p`: outside the 144p..=4320p YouTube
+                                                  // range. Rejecting "for headroom" silently broadens the
+                                                  // alphabet downstream.
+        assert!(!is_valid_quality_label("12345p"));
+        assert!(!is_valid_quality_label("123456p"));
+    }
+
+    #[test]
+    fn quality_rejects_out_of_range_shape_passers() {
+        // Pass the shape check (1..=4 digits + 'p') but fall outside
+        // the real YouTube range (144p..=4320p). The docstring
+        // promises we reject these; gate via numeric range not just
+        // shape.
+        assert!(!is_valid_quality_label("0p"));
+        assert!(!is_valid_quality_label("0000p"));
+        assert!(!is_valid_quality_label("0001p"));
+        assert!(!is_valid_quality_label("143p")); // just below 144
+        assert!(!is_valid_quality_label("4321p")); // just above 4320
+        assert!(!is_valid_quality_label("9999p"));
+    }
+
+    #[test]
+    fn quality_accepts_real_youtube_range() {
+        // Boundaries of the documented 144p..=4320p YouTube range.
+        assert!(is_valid_quality_label("144p"));
+        // 4320p (8K) is the largest real YouTube format and must
+        // continue to pass the validator.
+        assert!(is_valid_quality_label("4320p"));
+        // Spot-check common middle values.
+        assert!(is_valid_quality_label("240p"));
+        assert!(is_valid_quality_label("360p"));
+        assert!(is_valid_quality_label("480p"));
+        assert!(is_valid_quality_label("720p"));
+        assert!(is_valid_quality_label("1080p"));
+        assert!(is_valid_quality_label("1440p"));
+        assert!(is_valid_quality_label("2160p"));
+    }
+
+    #[test]
+    fn quality_rejects_leading_zero_decimals() {
+        // Canonical-form gate. `u32::from_str("0144") == 144` parses
+        // fine and survives the range check, but `"0144p"` is not
+        // the canonical label the frontend emits — accepting it
+        // would silently fork the `offline_downloads.quality_label`
+        // unique key. The single literal `"0"` is rejected by the
+        // range check (covered separately) regardless.
+        assert!(!is_valid_quality_label("0144p"));
+        assert!(!is_valid_quality_label("0720p"));
+        assert!(!is_valid_quality_label("01080p"));
+        // Sanity: the non-leading-zero canonical forms still pass.
+        assert!(is_valid_quality_label("144p"));
+        assert!(is_valid_quality_label("720p"));
+    }
+
+    #[test]
+    fn status_allowlist_matches_db_check() {
+        // The exact alphabet of `migrations/024_videos_table.sql`
+        // CHECK constraint. If this drifts the route will reject
+        // values the DB would happily accept (or vice versa).
+        for s in ["pending", "downloading", "complete", "failed", "deleted"] {
+            assert!(is_valid_download_status(s), "status {s} should pass");
+        }
+        for s in [
+            "",
+            "running",
+            "succeeded",
+            "queued",
+            "Complete",
+            "COMPLETE",
+            "banana",
+        ] {
+            assert!(!is_valid_download_status(s), "status {s} should fail");
+        }
+    }
 }

@@ -41,6 +41,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::AppResult;
+use crate::services::sql_helpers;
 use crate::services::ytdlp::{self, FlatPlaylistEntry, FlatPlaylistTunables};
 
 // ---------------------------------------------------------------------------
@@ -400,7 +401,7 @@ async fn claim_one_due(pool: &SqlitePool, now: i64) -> AppResult<Option<String>>
     //    than spacing them out by an hour.
     let mut tx = pool.begin().await?;
     let row: Option<(String,)> = sqlx::query_as(
-        "SELECT channel_id FROM channel_sync_state \
+        "SELECT channel_id FROM channels \
           WHERE ( \
                 backfill_status = 'pending' \
                 OR (backfill_status = 'running' \
@@ -423,7 +424,7 @@ async fn claim_one_due(pool: &SqlitePool, now: i64) -> AppResult<Option<String>>
         return Ok(None);
     };
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              backfill_status              = 'running', \
              backfill_last_started_at     = ?, \
              backfill_last_attempted_at   = ?, \
@@ -625,11 +626,7 @@ pub async fn apply_backfill_entries(
     let mut new_count: i64 = 0;
     for entry in entries {
         let (published_at, published_raw) = parse_upload_date(entry);
-        let title = entry
-            .title
-            .clone()
-            .unwrap_or_else(|| entry.video_id.clone());
-        let thumbnail_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", entry.video_id);
+        let title = entry.title.as_deref().filter(|s| !s.is_empty());
         let duration_s: Option<i64> = entry.duration.map(|d| d.round() as i64);
 
         // Detect insert vs update via the pre-fetched HashSet — no
@@ -640,33 +637,50 @@ pub async fn apply_backfill_entries(
             new_video_ids.push(entry.video_id.clone());
         }
 
+        // Upsert canonical metadata into `videos` first; `channel_videos`
+        // is now FK-only for title/duration/thumbnail (migration 024).
+        //
+        // We pass `None` for thumbnail_url here on purpose. The yt-dlp
+        // flat playlist doesn't expose a per-video thumbnail, and the
+        // templated `https://i.ytimg.com/vi/{id}/hqdefault.jpg` URL we
+        // used to fabricate carries no information beyond the
+        // `video_id` — but `models::video::upsert`'s conflict clause
+        // is `COALESCE(NULLIF(excluded, ''), stored)` (excluded wins
+        // when non-empty), so passing the template URL would silently
+        // downgrade a higher-resolution thumbnail (e.g.
+        // `maxresdefault.jpg`) stored by a heartbeat or RSS path on a
+        // re-backfill pass. Leaving the slot empty preserves whatever
+        // richer thumbnail is already there; for genuinely-new
+        // uploads (`new_video_ids`) the caller's thumbnail-prefetch
+        // path fabricates the URL itself when needed.
+        crate::models::video::upsert(
+            &mut *tx,
+            &entry.video_id,
+            title,
+            Some(channel_id),
+            duration_s,
+            None,
+        )
+        .await?;
+
         sqlx::query(
             "INSERT INTO channel_videos \
-                 (channel_id, video_id, title, channel_title, published_at, published_raw, \
-                  duration_s, view_count, thumbnail_url, \
-                  first_seen_at, last_seen_at, source, is_deleted) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, 'backfill', 0) \
+                 (channel_id, video_id, published_at, published_raw, \
+                  view_count, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 'backfill', 0) \
              ON CONFLICT(channel_id, video_id) DO UPDATE SET \
-                 title          = excluded.title, \
-                 channel_title  = COALESCE(excluded.channel_title, channel_videos.channel_title), \
-                 published_at   = COALESCE(channel_videos.published_at, excluded.published_at), \
-                 published_raw  = COALESCE(channel_videos.published_raw, excluded.published_raw), \
-                 duration_s     = COALESCE(excluded.duration_s, channel_videos.duration_s), \
-                 view_count     = COALESCE(excluded.view_count, channel_videos.view_count), \
-                 thumbnail_url  = COALESCE(channel_videos.thumbnail_url, excluded.thumbnail_url), \
-                 last_seen_at   = excluded.last_seen_at, \
-                 source         = 'backfill', \
-                 is_deleted     = 0",
+                 published_at  = COALESCE(channel_videos.published_at, excluded.published_at), \
+                 published_raw = COALESCE(channel_videos.published_raw, excluded.published_raw), \
+                 view_count    = COALESCE(excluded.view_count, channel_videos.view_count), \
+                 last_seen_at  = excluded.last_seen_at, \
+                 source        = 'backfill', \
+                 is_deleted    = 0",
         )
         .bind(channel_id)
         .bind(&entry.video_id)
-        .bind(&title)
-        .bind(&entry.channel)
         .bind(published_at)
         .bind(&published_raw)
-        .bind(duration_s)
         .bind(entry.view_count)
-        .bind(&thumbnail_url)
         .bind(started_at)
         .execute(&mut *tx)
         .await?;
@@ -691,11 +705,37 @@ pub async fn apply_backfill_entries(
     sqlx::query("CREATE TEMP TABLE _backfill_observed (video_id TEXT PRIMARY KEY) WITHOUT ROWID")
         .execute(&mut *tx)
         .await?;
-    for vid in &observed_ids {
-        sqlx::query("INSERT OR IGNORE INTO _backfill_observed(video_id) VALUES (?)")
-            .bind(vid)
-            .execute(&mut *tx)
-            .await?;
+    // Chunked multi-VALUES INSERT instead of one statement per row.
+    // For a 10k-video channel the per-row form was ~10k round-trips
+    // through sqlx (bind + await + future construction each time);
+    // chunking collapses that to a handful of round-trips while
+    // staying safely under SQLite's default 999-parameter limit
+    // (`SQLITE_MAX_VARIABLE_NUMBER`). The VALUES clause is built by
+    // the shared `sql_helpers::row_placeholders`, which only emits
+    // `?` characters — wrapping in `AssertSqlSafe` is sound for sqlx
+    // 0.9's `SqlSafeStr` bound because the helper signature is
+    // `(usize, usize) -> String` with no string-typed inputs, removing
+    // any opportunity for a future edit to interpolate dynamic content
+    // into the SQL.
+    //
+    // Chunk size is computed from `cols` so a future caller binding
+    // wider rows can't silently produce a statement that exceeds the
+    // bind-parameter ceiling and fails at runtime. Here `cols = 1`, so
+    // the cap is `MAX_BIND_PARAMS` itself; the `.max(1)` floor is a
+    // belt-and-braces guard against a hypothetical `cols >
+    // MAX_BIND_PARAMS` future caller.
+    const COLS: usize = 1;
+    let chunk_size = (sql_helpers::MAX_BIND_PARAMS / COLS).max(1);
+    for chunk in observed_ids.chunks(chunk_size) {
+        let sql = format!(
+            "INSERT OR IGNORE INTO _backfill_observed(video_id) VALUES {}",
+            sql_helpers::row_placeholders(chunk.len(), COLS)
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for vid in chunk {
+            q = q.bind(vid);
+        }
+        q.execute(&mut *tx).await?;
     }
     let removed_result = sqlx::query(
         "UPDATE channel_videos \
@@ -736,7 +776,7 @@ pub async fn apply_backfill_entries(
     let next_at = unix_now() + jittered_interval(bcfg.re_backfill_interval, 0.05);
     let observed_total = entries.len() as i64;
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              backfill_status                  = 'pending', \
              backfill_last_completed_at       = ?, \
              backfill_last_error              = NULL, \
@@ -778,7 +818,7 @@ async fn record_failure(
     // likely a renamed/deleted channel that was on someone's allowlist.
     if is_not_found_error(err_msg) {
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status            = 'shelved', \
                  backfill_last_error        = ?, \
                  backfill_lease_expires_at  = NULL, \
@@ -794,25 +834,24 @@ async fn record_failure(
         return Ok(());
     }
 
-    let (consecutive_errors,): (i64,) = sqlx::query_as(
-        "SELECT backfill_consecutive_errors FROM channel_sync_state WHERE channel_id = ?",
-    )
-    .bind(channel_id)
-    .fetch_one(pool)
-    .await?;
+    let (consecutive_errors,): (i64,) =
+        sqlx::query_as("SELECT backfill_consecutive_errors FROM channels WHERE channel_id = ?")
+            .bind(channel_id)
+            .fetch_one(pool)
+            .await?;
     let attempt = consecutive_errors + 1;
     let limit = bcfg.max_consecutive_errors_before_shelve;
 
     if attempt >= limit {
         // Shelve and (optionally) notify.
         let channel_title: Option<String> =
-            sqlx::query_scalar("SELECT channel_title FROM channel_sync_state WHERE channel_id = ?")
+            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = ?")
                 .bind(channel_id)
                 .fetch_optional(pool)
                 .await?
                 .flatten();
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status              = 'shelved', \
                  backfill_last_error          = ?, \
                  backfill_consecutive_errors  = ?, \
@@ -845,7 +884,7 @@ async fn record_failure(
         let backoff = backoff_for_attempt(attempt, bcfg.min_gap_between_channels);
         let next_at = unix_now() + backoff;
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status              = 'pending', \
                  backfill_last_error          = ?, \
                  backfill_consecutive_errors  = ?, \
@@ -950,7 +989,7 @@ fn parse_upload_date(entry: &FlatPlaylistEntry) -> (Option<i64>, Option<String>)
 // Public API for routes / tests / cron
 // ---------------------------------------------------------------------------
 
-/// Seed `channel_sync_state` rows for every channel in `allowlisted_channels`,
+/// Seed `channels` rows for every channel in `allowlisted_channels`,
 /// then GC any rows / `channel_videos` for channels no longer allowlisted
 /// by any child. Idempotent — safe to call at startup and from the
 /// `feed_gc` cron.
@@ -980,19 +1019,24 @@ pub async fn reconcile_with_allowlist(pool: &SqlitePool) -> AppResult<()> {
     // arbitrary but deterministic. Wrapping in `TRIM(...)` first
     // normalises trailing-whitespace divergences so a stray `"Algol "`
     // can't sort above `"Algol"` and end up as the canonical title.
+    // `allowlisted_channels` no longer carries title/thumbnail
+    // (migration 025) — `channels` is the single source, and the
+    // allowlist POST path upserts the metadata directly via
+    // `feed_cache::upsert_channel_with_metadata`. Reconcile only
+    // ensures every allowlisted channel has *some* `channels` row so
+    // the backfill loop can claim it; rename propagation is the
+    // freshness/backfill loops' job.
+    //
+    // The trailing `WHERE true` is required by SQLite to disambiguate
+    // `ON CONFLICT` (upsert) from `ON` (join) when an INSERT...SELECT
+    // immediately precedes it.
     sqlx::query(
-        "INSERT INTO channel_sync_state \
-             (channel_id, channel_title, channel_thumbnail_url, \
-              backfill_status, backfill_next_at, rss_next_poll_at) \
-         SELECT channel_id, MAX(TRIM(channel_title)), MAX(TRIM(channel_thumbnail_url)), \
-                'pending', 0, 0 \
+        "INSERT INTO channels \
+             (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
+         SELECT DISTINCT channel_id, 'pending', 0, 0 \
            FROM allowlisted_channels \
-          GROUP BY channel_id \
-         ON CONFLICT(channel_id) DO UPDATE SET \
-              channel_title         = COALESCE(channel_sync_state.channel_title, \
-                                               excluded.channel_title), \
-              channel_thumbnail_url = COALESCE(channel_sync_state.channel_thumbnail_url, \
-                                               excluded.channel_thumbnail_url)",
+          WHERE true \
+         ON CONFLICT(channel_id) DO NOTHING",
     )
     .execute(&mut *tx)
     .await?;
@@ -1006,7 +1050,7 @@ pub async fn reconcile_with_allowlist(pool: &SqlitePool) -> AppResult<()> {
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "DELETE FROM channel_sync_state \
+        "DELETE FROM channels \
           WHERE channel_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
     )
     .execute(&mut *tx)
@@ -1018,10 +1062,10 @@ pub async fn reconcile_with_allowlist(pool: &SqlitePool) -> AppResult<()> {
 
 /// Set `backfill_next_at = 0` for a single channel, bumping it to the
 /// front of the queue. Used by the admin "Run now" route. No-op if the
-/// channel isn't in `channel_sync_state` or is currently `running`.
+/// channel isn't in `channels` or is currently `running`.
 pub async fn enqueue_run_now(pool: &SqlitePool, channel_id: &str) -> AppResult<u64> {
     let res = sqlx::query(
-        "UPDATE channel_sync_state SET backfill_next_at = 0 \
+        "UPDATE channels SET backfill_next_at = 0 \
           WHERE channel_id = ? \
             AND backfill_status IN ('pending', 'failed', 'complete')",
     )
@@ -1036,7 +1080,7 @@ pub async fn enqueue_run_now(pool: &SqlitePool, channel_id: &str) -> AppResult<u
 /// whatever caused the channel to be shelved.
 pub async fn unshelve(pool: &SqlitePool, channel_id: &str) -> AppResult<u64> {
     let res = sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              backfill_status              = 'pending', \
              backfill_last_error          = NULL, \
              backfill_consecutive_errors  = 0, \
@@ -1121,10 +1165,19 @@ mod tests {
                 .await
                 .unwrap()
         };
+        // Seed the parent `channels` row first (FK).
+        crate::services::feed_cache::upsert_channel_with_metadata(
+            pool,
+            channel_id,
+            Some("X"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         sqlx::query(
-            "INSERT INTO allowlisted_channels \
-                (child_account_id, channel_id, channel_title, added_by) \
-             VALUES (?, ?, 'X', ?)",
+            "INSERT INTO allowlisted_channels (child_account_id, channel_id, added_by) \
+             VALUES (?, ?, ?)",
         )
         .bind(child_id)
         .bind(channel_id)
@@ -1141,7 +1194,7 @@ mod tests {
         allow_channel(&pool, "UC2").await;
 
         reconcile_with_allowlist(&pool).await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channel_sync_state")
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1153,17 +1206,22 @@ mod tests {
             .await
             .unwrap();
         // Also seed a video for UC2 so we can prove the cascade.
+        // `channel_videos` no longer carries `title`; seed `videos`
+        // first to satisfy the FK.
+        crate::models::video::upsert_stub(&pool, "vGone")
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO channel_videos \
-                 (channel_id, video_id, title, first_seen_at, last_seen_at, source) \
-             VALUES ('UC2', 'vGone', 'X', 1, 1, 'rss')",
+                 (channel_id, video_id, first_seen_at, last_seen_at, source) \
+             VALUES ('UC2', 'vGone', 1, 1, 'rss')",
         )
         .execute(&pool)
         .await
         .unwrap();
 
         reconcile_with_allowlist(&pool).await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channel_sync_state")
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1173,26 +1231,27 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            vn, 0,
-            "channel_videos cascade-deleted with channel_sync_state"
-        );
+        assert_eq!(vn, 0, "channel_videos cascade-deleted with channels");
     }
 
-    /// `reconcile_with_allowlist` should carry `channel_title` over
-    /// from `allowlisted_channels` so the admin diagnostics view can
-    /// render channel names, and should backfill the title on rows
-    /// that an older version of the function left NULL.
+    /// Migration 025 moved channel title/thumbnail off `allowlisted_channels`
+    /// onto the canonical `channels` row, so `reconcile_with_allowlist`
+    /// no longer has anywhere to copy them from. The allowlist POST
+    /// handler upserts `channels` directly via
+    /// `feed_cache::upsert_channel_with_metadata`; reconcile only
+    /// ensures every allowlisted channel has *some* `channels` row
+    /// (seeded if necessary) and GC's orphans.
     #[tokio::test]
+    #[ignore = "reconcile no longer propagates channel_title (moved off allowlisted_channels by migration 025)"]
     async fn reconcile_propagates_channel_title() {
         let pool = setup_db().await;
         allow_channel(&pool, "UC1").await;
 
-        // Pre-create a `channel_sync_state` row the way the older
+        // Pre-create a `channels` row the way the older
         // (title-less) seed path used to: NULL title, NULL thumbnail.
         // This simulates a long-lived row in a real deployment.
         sqlx::query(
-            "INSERT INTO channel_sync_state (channel_id, backfill_status, \
+            "INSERT INTO channels (channel_id, backfill_status, \
                                              backfill_next_at, rss_next_poll_at) \
              VALUES ('UC1', 'pending', 0, 0)",
         )
@@ -1202,12 +1261,11 @@ mod tests {
 
         reconcile_with_allowlist(&pool).await.unwrap();
 
-        let title: Option<String> = sqlx::query_scalar(
-            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let title: Option<String> =
+            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             title.as_deref(),
             Some("X"),
@@ -1218,30 +1276,28 @@ mod tests {
         // the same call.
         allow_channel(&pool, "UC2").await;
         reconcile_with_allowlist(&pool).await.unwrap();
-        let title2: Option<String> = sqlx::query_scalar(
-            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC2'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let title2: Option<String> =
+            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(title2.as_deref(), Some("X"));
 
         // An existing non-NULL title (e.g. set by a sidecar refresh)
         // must not be clobbered by reconcile.
         sqlx::query(
-            "UPDATE channel_sync_state SET channel_title = 'Sidecar Title' \
+            "UPDATE channels SET channel_title = 'Sidecar Title' \
               WHERE channel_id = 'UC1'",
         )
         .execute(&pool)
         .await
         .unwrap();
         reconcile_with_allowlist(&pool).await.unwrap();
-        let title3: Option<String> = sqlx::query_scalar(
-            "SELECT channel_title FROM channel_sync_state WHERE channel_id = 'UC1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let title3: Option<String> =
+            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             title3.as_deref(),
             Some("Sidecar Title"),
@@ -1257,7 +1313,7 @@ mod tests {
         // Push the channel's next_at far into the future to simulate a
         // freshly-backfilled channel.
         sqlx::query(
-            "UPDATE channel_sync_state SET backfill_next_at = 9_999_999, \
+            "UPDATE channels SET backfill_next_at = 9_999_999, \
                                             backfill_last_completed_at = 1 \
               WHERE channel_id = 'UC1'",
         )
@@ -1267,12 +1323,11 @@ mod tests {
 
         let updated = enqueue_run_now(&pool, "UC1").await.unwrap();
         assert_eq!(updated, 1);
-        let next: i64 = sqlx::query_scalar(
-            "SELECT backfill_next_at FROM channel_sync_state WHERE channel_id = 'UC1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let next: i64 =
+            sqlx::query_scalar("SELECT backfill_next_at FROM channels WHERE channel_id = 'UC1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(next, 0, "run-now must set backfill_next_at = 0");
     }
 
@@ -1282,7 +1337,7 @@ mod tests {
         allow_channel(&pool, "UC1").await;
         reconcile_with_allowlist(&pool).await.unwrap();
         sqlx::query(
-            "UPDATE channel_sync_state SET backfill_status = 'running', backfill_next_at = 100 \
+            "UPDATE channels SET backfill_status = 'running', backfill_next_at = 100 \
               WHERE channel_id = 'UC1'",
         )
         .execute(&pool)
@@ -1291,12 +1346,11 @@ mod tests {
 
         let updated = enqueue_run_now(&pool, "UC1").await.unwrap();
         assert_eq!(updated, 0);
-        let next: i64 = sqlx::query_scalar(
-            "SELECT backfill_next_at FROM channel_sync_state WHERE channel_id = 'UC1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let next: i64 =
+            sqlx::query_scalar("SELECT backfill_next_at FROM channels WHERE channel_id = 'UC1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(next, 100, "running channel must not be re-enqueued");
     }
 
@@ -1306,7 +1360,7 @@ mod tests {
         allow_channel(&pool, "UC1").await;
         reconcile_with_allowlist(&pool).await.unwrap();
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status              = 'shelved', \
                  backfill_last_error          = 'boom', \
                  backfill_consecutive_errors  = 7, \
@@ -1323,7 +1377,7 @@ mod tests {
         let (status, err, errs, next): (String, Option<String>, i64, i64) = sqlx::query_as(
             "SELECT backfill_status, backfill_last_error, backfill_consecutive_errors, \
                     backfill_next_at \
-               FROM channel_sync_state WHERE channel_id = 'UC1'",
+               FROM channels WHERE channel_id = 'UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -1515,10 +1569,13 @@ mod tests {
         //    step, an RSS poll lands and writes vB with first_seen_at
         //    AFTER started_at. We simulate this by inserting vB
         //    directly with first_seen_at = 1500 before the call.
+        crate::models::video::upsert_stub(&pool, "vB-from-rss")
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO channel_videos \
-                (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
-             VALUES ('UC1', 'vB-from-rss', 'B', ?, ?, 'rss', 0)",
+                (channel_id, video_id, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vB-from-rss', ?, ?, 'rss', 0)",
         )
         .bind(1_500)
         .bind(1_500)
@@ -1556,10 +1613,13 @@ mod tests {
         let bcfg = BackfillConfig::default();
 
         // Seed a tombstoned row from an earlier backfill.
+        crate::models::video::upsert_stub(&pool, "vReborn")
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO channel_videos \
-                (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
-             VALUES ('UC1', 'vReborn', 'X', 100, 100, 'backfill', 1)",
+                (channel_id, video_id, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vReborn', 100, 100, 'backfill', 1)",
         )
         .execute(&pool)
         .await
@@ -1604,7 +1664,7 @@ mod tests {
             "SELECT backfill_status, backfill_last_completed_at, backfill_next_at, \
                     backfill_videos_observed_total, backfill_videos_new_last_run, \
                     backfill_videos_removed_last_run \
-               FROM channel_sync_state WHERE channel_id = 'UC1'",
+               FROM channels WHERE channel_id = 'UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -1643,7 +1703,7 @@ mod tests {
         let now = 1_000_000_i64;
         let expired_lease = now - 60; // expired 60s ago
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status           = 'running', \
                  backfill_lease_expires_at = ?, \
                  backfill_next_at          = 0 \
@@ -1662,7 +1722,7 @@ mod tests {
         // After claim, status is back to 'running' with a fresh lease.
         let (status, lease): (String, Option<i64>) = sqlx::query_as(
             "SELECT backfill_status, backfill_lease_expires_at \
-               FROM channel_sync_state WHERE channel_id = 'UCstuck'",
+               FROM channels WHERE channel_id = 'UCstuck'",
         )
         .fetch_one(&pool)
         .await
@@ -1686,7 +1746,7 @@ mod tests {
         let now = 1_000_000_i64;
         let fresh_lease = now + 30 * 60; // 30 minutes in the future
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status           = 'running', \
                  backfill_lease_expires_at = ?, \
                  backfill_next_at          = 0 \
@@ -1718,7 +1778,7 @@ mod tests {
         let now: i64 = 1_000_000;
         let recent = now - 10 * 60;
         sqlx::query(
-            "UPDATE channel_sync_state SET last_sidecar_fallback_at = ? \
+            "UPDATE channels SET last_sidecar_fallback_at = ? \
               WHERE channel_id = 'UCcool'",
         )
         .bind(recent)
@@ -1765,12 +1825,10 @@ mod tests {
         allow_channel(&pool, "UC2").await;
         reconcile_with_allowlist(&pool).await.unwrap();
         // UC2's backfill_next_at is in the future.
-        sqlx::query(
-            "UPDATE channel_sync_state SET backfill_next_at = 9_999_999 WHERE channel_id = 'UC2'",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE channels SET backfill_next_at = 9_999_999 WHERE channel_id = 'UC2'")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let claimed = claim_one_due(&pool, 1_000).await.unwrap();
         assert_eq!(claimed.as_deref(), Some("UC1"));
@@ -1847,7 +1905,7 @@ mod tests {
         reconcile_with_allowlist(&pool).await.unwrap();
         // Pretend the row was just claimed.
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status = 'running', \
                  backfill_lease_expires_at = 9999999 \
              WHERE channel_id = 'UCgone'",
@@ -1864,7 +1922,7 @@ mod tests {
 
         let (status, err, lease): (String, Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT backfill_status, backfill_last_error, backfill_lease_expires_at \
-               FROM channel_sync_state WHERE channel_id = 'UCgone'",
+               FROM channels WHERE channel_id = 'UCgone'",
         )
         .fetch_one(&pool)
         .await
@@ -1886,7 +1944,7 @@ mod tests {
         // Seed the channel right at the threshold-minus-one so the
         // next failure trips the shelve.
         sqlx::query(
-            "UPDATE channel_sync_state SET \
+            "UPDATE channels SET \
                  backfill_status = 'running', \
                  backfill_consecutive_errors = 2 \
              WHERE channel_id = 'UCflaky'",
@@ -1901,7 +1959,7 @@ mod tests {
 
         let (status, errs, err): (String, i64, Option<String>) = sqlx::query_as(
             "SELECT backfill_status, backfill_consecutive_errors, backfill_last_error \
-               FROM channel_sync_state WHERE channel_id = 'UCflaky'",
+               FROM channels WHERE channel_id = 'UCflaky'",
         )
         .fetch_one(&pool)
         .await
@@ -1921,7 +1979,7 @@ mod tests {
             ..BackfillConfig::default()
         };
         sqlx::query(
-            "UPDATE channel_sync_state SET backfill_status = 'running' \
+            "UPDATE channels SET backfill_status = 'running' \
               WHERE channel_id = 'UCsoft'",
         )
         .execute(&pool)
@@ -1937,7 +1995,7 @@ mod tests {
         let (status, errs, next, lease): (String, i64, i64, Option<i64>) = sqlx::query_as(
             "SELECT backfill_status, backfill_consecutive_errors, backfill_next_at, \
                     backfill_lease_expires_at \
-               FROM channel_sync_state WHERE channel_id = 'UCsoft'",
+               FROM channels WHERE channel_id = 'UCsoft'",
         )
         .fetch_one(&pool)
         .await

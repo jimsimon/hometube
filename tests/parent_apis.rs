@@ -304,15 +304,7 @@ async fn blocked_videos_round_trip_via_db_seed() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO blocked_videos (child_account_id, video_id, video_title, blocked_by) \
-         VALUES (?, 'vid-bad', 'Bad', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::seed_blocked(&app.pool, child_id, parent_id, "vid-bad", Some("Bad")).await;
 
     let res = app
         .server

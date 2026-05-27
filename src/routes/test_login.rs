@@ -183,20 +183,32 @@ pub async fn seed_feed_item(
     .await?
     .unwrap_or(body.child_account_id);
 
+    // `allowlisted_channels` is FK-only since migration 025; we need to
+    // seed the parent `channels` row first to satisfy the FK and to
+    // surface the title via the canonical store. Wrap both writes in a
+    // single transaction for parity with the production `add_channel`
+    // path — a failure between them would otherwise strand a `channels`
+    // row that GC has to clean up.
+    let mut tx = state.db.begin().await?;
+    crate::services::feed_cache::upsert_channel_with_metadata(
+        &mut *tx,
+        &body.channel_id,
+        Some(body.channel_title.as_deref().unwrap_or("Test Channel")),
+        None,
+        None,
+    )
+    .await?;
     sqlx::query(
-        "INSERT INTO allowlisted_channels \
-            (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, ?, ?, ?) \
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, added_by) \
+         VALUES (?, ?, ?) \
          ON CONFLICT(child_account_id, channel_id) DO NOTHING",
     )
     .bind(body.child_account_id)
     .bind(&body.channel_id)
-    .bind(body.channel_title.as_deref().unwrap_or("Test Channel"))
     .bind(attributed_by)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
-
-    crate::services::feed_cache::upsert_channel(&state.db, &body.channel_id).await?;
+    tx.commit().await?;
 
     let now = chrono::Utc::now().timestamp();
     crate::services::feed_cache::upsert_channel_videos_from_rss(

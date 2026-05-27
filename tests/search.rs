@@ -25,24 +25,23 @@ async fn child_search_returns_buckets_and_logs() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'chan-1', 'Cooking with Kids', ?)",
+    common::allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "chan-1",
+        Some("Cooking with Kids"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Cooking 101', ?)",
+    .await;
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-1",
+        Some("Cooking 101"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/search?q=Cooking&type=all").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -69,15 +68,15 @@ async fn child_search_kind_filter_returns_only_one_bucket() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Hello World', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-1",
+        Some("Hello World"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/search?q=Hello&type=video").await;
     assert_eq!(res.status_code(), StatusCode::OK);

@@ -348,10 +348,13 @@ pub async fn child_hidden(
 async fn fetch_hidden_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCardData> {
     type Row = (String, Option<String>, Option<String>, Option<String>);
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
-        "SELECT video_id, video_title, video_thumbnail_url, channel_title \
-         FROM hidden_videos \
-         WHERE child_account_id = ? \
-         ORDER BY hidden_at DESC",
+        "SELECT hv.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, ch.channel_title \
+         FROM hidden_videos hv \
+         JOIN videos v ON v.video_id = hv.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE hv.child_account_id = ? \
+         ORDER BY hv.hidden_at DESC",
     )
     .bind(child_id)
     .fetch_all(&state.db)
@@ -432,14 +435,17 @@ async fn fetch_liked_video_cards(state: &AppState, child_id: i64) -> Vec<VideoCa
         Option<i64>,
     );
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
-        "SELECT l.video_id, l.video_title, l.video_thumbnail_url, l.channel_title, \
-                l.duration_seconds \
+        "SELECT l.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title, v.duration_seconds \
          FROM video_likes l \
+         JOIN videos v ON v.video_id = l.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
          LEFT JOIN allowlisted_videos a \
            ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
          LEFT JOIN allowlisted_channels c \
            ON c.child_account_id = l.child_account_id \
-          AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+          AND v.channel_id IS NOT NULL AND c.channel_id = v.channel_id \
          WHERE l.child_account_id = ? AND l.is_deleted = 0 \
            AND (a.id IS NOT NULL OR c.id IS NOT NULL) \
            AND NOT EXISTS ( \
@@ -601,14 +607,19 @@ async fn fetch_allowlisted_video_cards(
     limit: i64,
 ) -> Vec<VideoCardData> {
     type Row = (String, String, Option<String>, Option<String>);
+    // unchanged shape; columns now hydrated from the `videos` table.
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
-        "SELECT video_id, video_title, video_thumbnail_url, channel_title \
-         FROM allowlisted_videos \
-         WHERE child_account_id = ? \
-           AND video_id NOT IN ( \
+        "SELECT av.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title \
+         FROM allowlisted_videos av \
+         JOIN videos v ON v.video_id = av.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE av.child_account_id = ? \
+           AND av.video_id NOT IN ( \
                 SELECT video_id FROM hidden_videos WHERE child_account_id = ? \
            ) \
-         ORDER BY created_at DESC \
+         ORDER BY av.created_at DESC \
          LIMIT ?",
     )
     .bind(child_id)

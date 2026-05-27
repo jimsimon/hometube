@@ -40,9 +40,14 @@ pub async fn list(
     Path(child_id): Path<i64>,
 ) -> AppResult<Json<Vec<BlockedVideo>>> {
     require_child(&state, child_id).await?;
+    // `video_title` is hydrated from the shared `videos` table
+    // (migration 024).
     let rows: Vec<BlockedVideo> = sqlx::query_as(
-        "SELECT id, video_id, video_title, reason, created_at \
-         FROM blocked_videos WHERE child_account_id = ? ORDER BY created_at DESC",
+        "SELECT bv.id, bv.video_id, v.title AS video_title, bv.reason, bv.created_at \
+         FROM blocked_videos bv \
+         JOIN videos v ON v.video_id = bv.video_id \
+         WHERE bv.child_account_id = ? \
+         ORDER BY bv.created_at DESC",
     )
     .bind(child_id)
     .fetch_all(&state.db)
@@ -72,20 +77,33 @@ pub async fn add(
         Err(_) => None,
     };
 
-    let row: BlockedVideo = sqlx::query_as(
-        "INSERT INTO blocked_videos \
-            (child_account_id, video_id, video_title, blocked_by, reason) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
-            video_title = excluded.video_title, \
-            reason = excluded.reason \
-         RETURNING id, video_id, video_title, reason, created_at",
+    let mut tx = state.db.begin().await?;
+    // Seed `videos` first so the FK on `blocked_videos.video_id` is
+    // satisfied. `None` falls back to the video_id at INSERT time and
+    // leaves any pre-existing richer title untouched on CONFLICT.
+    crate::models::video::upsert(&mut *tx, &body.video_id, title.as_deref(), None, None, None)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by, reason) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id) DO UPDATE SET reason = excluded.reason",
     )
     .bind(child_id)
     .bind(&body.video_id)
-    .bind(title)
     .bind(current.id)
     .bind(body.reason.clone())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let row: BlockedVideo = sqlx::query_as(
+        "SELECT bv.id, bv.video_id, v.title AS video_title, bv.reason, bv.created_at \
+         FROM blocked_videos bv \
+         JOIN videos v ON v.video_id = bv.video_id \
+         WHERE bv.child_account_id = ? AND bv.video_id = ?",
+    )
+    .bind(child_id)
+    .bind(&body.video_id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(row))

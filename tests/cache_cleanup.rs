@@ -73,15 +73,15 @@ async fn cleanup_keeps_directly_allowlisted_video() {
         hometube::models::account::AccountType::Child,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'keep-vid', 'Keep', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        child_id,
+        "keep-vid",
+        Some("Keep"),
+        None,
     )
-    .bind(child_id)
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let (msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
     assert!(msg.contains("0 videos"), "msg was: {msg}");
@@ -131,15 +131,14 @@ async fn cleanup_keeps_channel_allowlisted_video() {
         hometube::models::account::AccountType::Child,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCkeep', 'Keep Channel', ?)",
+    common::allowlist_channel(
+        &app.pool,
+        child_id,
+        child_id,
+        "UCkeep",
+        Some("Keep Channel"),
     )
-    .bind(child_id)
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let (msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
     assert!(msg.contains("0 videos"), "msg was: {msg}");
@@ -166,16 +165,7 @@ async fn lru_eviction_when_over_limit() {
     .await;
     // Allowlist both videos so the allowlist cleanup doesn't remove them.
     for vid in ["big-a", "big-b"] {
-        sqlx::query(
-            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-             VALUES (?, ?, 'V', ?)",
-        )
-        .bind(child_id)
-        .bind(vid)
-        .bind(child_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+        common::allowlist_video(&app.pool, child_id, child_id, vid, Some("V"), None).await;
     }
 
     // big-a: 6 GB, accessed a while ago (LRU).
@@ -262,15 +252,7 @@ async fn unlimited_size_skips_lru_eviction_even_when_huge() {
         hometube::models::account::AccountType::Child,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'huge-vid', 'V', ?)",
-    )
-    .bind(child_id)
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, child_id, "huge-vid", Some("V"), None).await;
     sqlx::query(
         "INSERT INTO segment_cache (video_id, format_id, segment_number, file_path, file_size_bytes, last_accessed_at) \
          VALUES ('huge-vid', '137', 0, '/tmp/nonexistent_huge', ?, 1000)",

@@ -42,6 +42,19 @@ use crate::services::ytdlp;
 /// Maximum number of bytes of stdout/stderr we persist per run.
 const OUTPUT_TRUNCATE_BYTES: usize = 8 * 1024;
 
+/// Threshold for the orphan-recovery sweep on scheduler startup.
+///
+/// Any `cron_job_runs` row whose `status = 'running'` and whose
+/// `started_at` is older than `now - ORPHAN_RUN_RECOVERY_SECS` is
+/// marked `'failure'`. The threshold is generous (24 h) because all
+/// real cron handlers in HomeTube finish in seconds-to-minutes — a
+/// run still showing `'running'` after a day is overwhelmingly
+/// likely to be a row pinned by a SIGKILL / OOM / host reboot mid-
+/// dispatch, not a legitimately long-running job. Operators with
+/// genuinely long handlers should bump this threshold (or migrate
+/// the long handler off the cron table entirely).
+const ORPHAN_RUN_RECOVERY_SECS: i64 = 24 * 60 * 60;
+
 /// Names used as primary key in `cron_jobs.name`. The `name` column has
 /// a UNIQUE constraint, so reseeding is safe via `INSERT OR IGNORE`.
 pub const NAME_YTDLP_UPDATE: &str = "ytdlp_update";
@@ -159,12 +172,58 @@ impl Scheduler {
 
     /// Start the scheduler. Idempotent — calling twice is a no-op
     /// (the underlying library tolerates it).
+    ///
+    /// Also sweeps `cron_job_runs` for orphan `'running'` rows older
+    /// than the recovery threshold (see [`ORPHAN_RUN_RECOVERY_SECS`])
+    /// and marks them `'failure'`. Orphans appear when the process is
+    /// killed mid-run (SIGKILL, OOM, host reboot) — the
+    /// `tokio::spawn` task that would have called `finalize_run`
+    /// never executes, leaving the row pinned to `'running'` forever
+    /// and silently hidden from `cron_jobs_with_last_run` (migration
+    /// 026, which filters on `status != 'running'`). Without this
+    /// sweep operators see the job "never ran" instead of "ran once,
+    /// host crashed." We run the sweep at start (not on each tick)
+    /// because the failure mode is recovery-from-crash, not steady-
+    /// state operation.
     pub async fn start(&self) -> AppResult<()> {
+        self.recover_orphan_runs().await;
         let sched = self.inner.lock().await;
         sched.start().await.map_err(|e| {
             crate::error::AppError::Other(anyhow::anyhow!("starting scheduler: {e}"))
         })?;
         Ok(())
+    }
+
+    /// Sweep `cron_job_runs` for `'running'` rows older than the
+    /// recovery threshold and mark them `'failure'` with a synthetic
+    /// message. Errors are logged but do not block startup — a
+    /// healthy scheduler that can't recover orphans is still better
+    /// than a scheduler that refuses to boot.
+    async fn recover_orphan_runs(&self) {
+        let cutoff = chrono::Utc::now().timestamp() - ORPHAN_RUN_RECOVERY_SECS;
+        match sqlx::query(
+            "UPDATE cron_job_runs \
+                SET status = 'failure', \
+                    finished_at = unixepoch(), \
+                    message = 'orphan recovery: row was left in running state, \
+                               likely because the process was killed mid-run' \
+              WHERE status = 'running' AND started_at < ?",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await
+        {
+            Ok(res) if res.rows_affected() > 0 => {
+                warn!(
+                    recovered = res.rows_affected(),
+                    cutoff, "swept orphan cron_job_runs ('running' rows older than threshold)"
+                );
+            }
+            Ok(_) => {} // No orphans — quiet.
+            Err(err) => {
+                error!(%err, "orphan cron_job_runs sweep failed; non-fatal");
+            }
+        }
     }
 
     /// Load all enabled jobs from the database and register them. Errors
@@ -201,14 +260,17 @@ impl Scheduler {
         let name_owned = name.to_string();
         let expression = to_six_field(schedule);
 
+        // `name_owned` lives only to provide a useful identifier in the
+        // error log when a tick fails; the run path itself uses
+        // `job_id` + `job_type` and doesn't touch the name.
         let job = Job::new_async(expression.as_str(), move |_uuid, _l| {
             let pool = pool.clone();
             let cfg = cfg.clone();
             let job_type = job_type_owned.clone();
-            let name = name_owned.clone();
+            let name_for_log = name_owned.clone();
             Box::pin(async move {
-                if let Err(err) = run_job(&pool, &cfg, job_id, &name, &job_type).await {
-                    error!(%job_id, %name, %err, "cron job execution failed");
+                if let Err(err) = run_job(&pool, &cfg, job_id, &job_type).await {
+                    error!(job_id = %job_id, name = %name_for_log, %err, "cron job execution failed");
                 }
             })
         })
@@ -254,12 +316,11 @@ impl Scheduler {
     /// Trigger a single job immediately, off the scheduler. Returns the
     /// `cron_job_runs.id` of the new run row.
     pub async fn run_now(&self, job_id: i64) -> AppResult<i64> {
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT name, job_type FROM cron_jobs WHERE id = ?")
-                .bind(job_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let (name, job_type) = row.ok_or_else(|| crate::error::AppError::NotFound)?;
+        let job_type: String = sqlx::query_scalar("SELECT job_type FROM cron_jobs WHERE id = ?")
+            .bind(job_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound)?;
 
         // Insert the run row up front so the API can return its ID
         // before the (possibly long-running) handler completes.
@@ -275,7 +336,15 @@ impl Scheduler {
         let cfg = self.cfg.clone();
         tokio::spawn(async move {
             let outcome = dispatch(&pool, &cfg, &job_type).await;
-            let _ = finalize_run(&pool, run_id, job_id, &name, &outcome).await;
+            // Log finalize errors loudly: the `cron_jobs_with_last_run`
+            // view (migration 026) filters on `status != 'running'`,
+            // so a failed finalize would leave this row permanently
+            // hidden from the admin UI — the job would appear to have
+            // never run. Surfacing the error gives operators something
+            // to grep for instead of a silent disappearance.
+            if let Err(err) = finalize_run(&pool, run_id, &outcome).await {
+                error!(%run_id, %job_id, %err, "failed to finalize cron run; run row left in 'running' state");
+            }
         });
 
         Ok(run_id)
@@ -284,13 +353,7 @@ impl Scheduler {
 
 /// Insert a `cron_job_runs` row, run the handler, and persist the
 /// outcome.
-async fn run_job(
-    pool: &SqlitePool,
-    cfg: &Config,
-    job_id: i64,
-    name: &str,
-    job_type: &str,
-) -> AppResult<()> {
+async fn run_job(pool: &SqlitePool, cfg: &Config, job_id: i64, job_type: &str) -> AppResult<()> {
     let run_id: i64 = sqlx::query_scalar(
         "INSERT INTO cron_job_runs (job_id, started_at, status) \
          VALUES (?, unixepoch(), 'running') RETURNING id",
@@ -300,7 +363,7 @@ async fn run_job(
     .await?;
 
     let outcome = dispatch(pool, cfg, job_type).await;
-    finalize_run(pool, run_id, job_id, name, &outcome).await
+    finalize_run(pool, run_id, &outcome).await
 }
 
 #[derive(Debug)]
@@ -354,13 +417,15 @@ async fn dispatch(pool: &SqlitePool, cfg: &Config, job_type: &str) -> RunOutcome
     }
 }
 
-async fn finalize_run(
-    pool: &SqlitePool,
-    run_id: i64,
-    job_id: i64,
-    _name: &str,
-    outcome: &RunOutcome,
-) -> AppResult<()> {
+/// Mark the in-flight `cron_job_runs` row as finished and persist
+/// status/message/output.
+///
+/// `cron_jobs.last_run_*` cache columns were dropped by migration 026;
+/// the admin UI now reads from the `cron_jobs_with_last_run` view,
+/// which derives the summary directly from `cron_job_runs`. As a
+/// result this function no longer needs the parent row's `job_id` /
+/// `name` — `run_id` alone is sufficient.
+async fn finalize_run(pool: &SqlitePool, run_id: i64, outcome: &RunOutcome) -> AppResult<()> {
     let status = if outcome.success {
         "success"
     } else {
@@ -374,16 +439,6 @@ async fn finalize_run(
     .bind(&outcome.message)
     .bind(&outcome.output)
     .bind(run_id)
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "UPDATE cron_jobs SET last_run_at = unixepoch(), last_run_status = ?, \
-            last_run_message = ? WHERE id = ?",
-    )
-    .bind(status)
-    .bind(&outcome.message)
-    .bind(job_id)
     .execute(pool)
     .await?;
     Ok(())

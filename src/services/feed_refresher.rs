@@ -1356,7 +1356,7 @@ mod tests {
         published_at: Option<i64>,
     ) {
         sqlx::query(
-            "INSERT INTO channel_sync_state (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
+            "INSERT INTO channels (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
              VALUES (?, 'pending', 0, 0)",
         )
         .bind(channel_id)
@@ -1364,14 +1364,16 @@ mod tests {
         .await
         .unwrap();
         if let Some(ts) = published_at {
+            let vid = format!("v-{channel_id}");
+            crate::models::video::upsert_stub(pool, &vid).await.unwrap();
             sqlx::query(
                 "INSERT INTO channel_videos \
-                    (channel_id, video_id, title, published_at, \
+                    (channel_id, video_id, published_at, \
                      first_seen_at, last_seen_at, source) \
-                 VALUES (?, ?, 'X', ?, 1, 1, 'rss')",
+                 VALUES (?, ?, ?, 1, 1, 'rss')",
             )
             .bind(channel_id)
-            .bind(format!("v-{channel_id}"))
+            .bind(&vid)
             .bind(ts)
             .execute(pool)
             .await

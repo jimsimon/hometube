@@ -34,10 +34,11 @@ use crate::state::AppState;
 const PAGE_SIZE: u32 = 30;
 
 /// `GET /api/channels/:channelId` — return channel metadata for an
-/// allowed channel, served entirely from `channel_sync_state`. Zero
-/// YouTube calls — the metadata was either forwarded from the parent
-/// search response at allowlist time or filled in by the sidecar
-/// fallback on raw-paste adds.
+/// allowed channel, served entirely from `channels` (the renamed
+/// `channel_sync_state` table, migration 025). Zero YouTube calls —
+/// the metadata was either forwarded from the parent search response
+/// at allowlist time or filled in by the sidecar fallback on raw-paste
+/// adds.
 pub async fn get_channel(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -45,13 +46,12 @@ pub async fn get_channel(
 ) -> AppResult<Json<ChannelInfo>> {
     enforce_channel_access(&state, current.id, &channel_id).await?;
 
-    /// Columns selected from `channel_sync_state` for the header
-    /// metadata response. Aliased to satisfy clippy's
-    /// `type_complexity` lint.
+    /// Columns selected from `channels` for the header metadata
+    /// response. Aliased to satisfy clippy's `type_complexity` lint.
     type HeaderRow = (String, Option<String>, Option<String>, Option<String>);
     let row: Option<HeaderRow> = sqlx::query_as(
         "SELECT channel_id, channel_title, channel_thumbnail_url, description \
-           FROM channel_sync_state WHERE channel_id = ?",
+           FROM channels WHERE channel_id = ?",
     )
     .bind(&channel_id)
     .fetch_optional(&state.db)
@@ -170,7 +170,7 @@ pub async fn list_videos(
         thumbnail_url: Option<String>,
         published_at: Option<i64>,
         #[allow(dead_code)]
-        duration_s: Option<i64>,
+        duration_seconds: Option<i64>,
         #[allow(dead_code)]
         view_count: Option<i64>,
     }
@@ -186,9 +186,12 @@ pub async fn list_videos(
     //     COALESCE(-1)), then published_at DESC as a tiebreaker.
     //   - anything else → sort by published_at DESC, last_seen_at DESC.
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT cv.video_id, cv.title, cv.channel_id, cv.channel_title, cv.thumbnail_url, \
-                cv.published_at, cv.duration_s, cv.view_count \
+        "SELECT cv.video_id, v.title, cv.channel_id, \
+                ch.channel_title, v.thumbnail_url, \
+                cv.published_at, v.duration_seconds, cv.view_count \
            FROM channel_videos cv \
+           JOIN videos v ON v.video_id = cv.video_id \
+           LEFT JOIN channels ch ON ch.channel_id = cv.channel_id \
           WHERE cv.channel_id = ?1 \
             AND cv.is_deleted = 0 \
             AND NOT EXISTS ( \
