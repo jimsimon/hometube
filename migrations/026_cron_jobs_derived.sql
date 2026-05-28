@@ -55,7 +55,8 @@ CREATE INDEX idx_cron_job_runs_job_started
 --   `last_attempted_*` so operators can spot orphan rows in the admin
 --   UI (`last_attempted_status = 'running'` AND `last_attempted_at` is
 --   far in the past ⇒ stuck row, recover by setting
---   `cron_job_runs.status = 'failed'` for that id).
+--   `cron_job_runs.status = 'failure'` for that id (matches the
+--   CHECK constraint allowlist: 'running'/'success'/'failure').
 --
 -- `id DESC` is the tiebreaker for sub-second collisions in both
 -- subqueries (e.g. `run_now` immediately after a scheduled tick):

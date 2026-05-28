@@ -185,7 +185,7 @@ pub async fn child_search(
     }
     let kind_label = q.kind.clone().unwrap_or_else(|| "all".to_string());
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as i64;
-    let pattern = format!("%{}%", trimmed.replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!("%{}%", escape_like_pattern(trimmed));
 
     let cursor = q
         .page_token
@@ -427,6 +427,22 @@ async fn search_videos(
         .collect())
 }
 
+/// Escape user input for a SQL `LIKE … ESCAPE '\\'` pattern.
+///
+/// Order matters: the escape character itself (`\`) must be escaped
+/// FIRST. Escaping `%` or `_` first would inject fresh backslashes,
+/// and a user-supplied `\` immediately before that fresh backslash
+/// would then form `\\` (literal backslash) under `ESCAPE '\\'`,
+/// leaving the wildcard UN-escaped — defeating the documented
+/// "literal `%` / `_` / `\` in the user's query doesn't widen the
+/// match" promise.
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Helper: pick the highest-resolution thumbnail URL from a YouTube
 /// `thumbnails` map. Currently unused locally but exposed for future
 /// suggestion endpoints.
@@ -463,5 +479,21 @@ mod tests {
             CHILD_SEARCH_SQL.contains("UNION"),
             "child_search SQL must contain UNION for cross-source dedupe"
         );
+    }
+
+    #[test]
+    fn escape_like_pattern_escapes_backslash_before_wildcards() {
+        // Plain wildcards are escaped.
+        assert_eq!(escape_like_pattern("100%"), "100\\%");
+        assert_eq!(escape_like_pattern("a_b"), "a\\_b");
+        // Literal backslash is escaped FIRST so it can't be "consumed"
+        // by the escape we inject for a following `%` or `_`.
+        assert_eq!(escape_like_pattern("foo\\bar"), "foo\\\\bar");
+        // The critical regression case: a user-supplied `\` immediately
+        // before a `%` must NOT result in an un-escaped wildcard.
+        // Expected: `foo\\\%bar` = literal `\` + escaped `%`.
+        assert_eq!(escape_like_pattern("foo\\%bar"), "foo\\\\\\%bar");
+        // Same for `_`.
+        assert_eq!(escape_like_pattern("foo\\_bar"), "foo\\\\\\_bar");
     }
 }

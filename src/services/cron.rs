@@ -199,6 +199,14 @@ impl Scheduler {
     /// message. Errors are logged but do not block startup — a
     /// healthy scheduler that can't recover orphans is still better
     /// than a scheduler that refuses to boot.
+    ///
+    /// Note on `finished_at`: we set it to `unixepoch()` (the recovery
+    /// time), NOT the unknown actual crash time. This means a run that
+    /// crashed days ago will show a recent `finished_at` and a very
+    /// long apparent duration vs `started_at`. The synthetic `message`
+    /// makes the source clear, so the row is unambiguous in context;
+    /// the alternative (leaving `finished_at` NULL) would break views
+    /// that expect terminal rows to have a finish time.
     async fn recover_orphan_runs(&self) {
         let cutoff = chrono::Utc::now().timestamp() - ORPHAN_RUN_RECOVERY_SECS;
         match sqlx::query(

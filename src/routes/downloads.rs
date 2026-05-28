@@ -531,9 +531,17 @@ pub async fn stream(
     let stream = res.bytes_stream().map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
     let mut response = (status, body).into_response();
+    // Don't unwrap on a remote-supplied header value: the upstream
+    // Content-Type passed `to_str().ok()` (so it's UTF-8) but
+    // `HeaderValue::from_str` is stricter (rejects e.g. embedded `\0`
+    // or some quoted-parameter shapes). Fall back to a safe generic
+    // type rather than panicking the whole handler.
+    let content_type_header = content_type
+        .parse()
+        .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream"));
     response
         .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        .insert(header::CONTENT_TYPE, content_type_header);
     if let Some(cl) = content_length {
         response.headers_mut().insert(header::CONTENT_LENGTH, cl);
     }
