@@ -14,16 +14,6 @@ use sqlx::SqliteExecutor;
 
 use crate::error::AppResult;
 
-/// Lightweight DTO matching the `videos` row shape.
-#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
-pub struct Video {
-    pub video_id: String,
-    pub title: String,
-    pub channel_id: Option<String>,
-    pub duration_seconds: Option<i64>,
-    pub thumbnail_url: Option<String>,
-}
-
 /// Upsert a row into `videos`.
 ///
 /// Refreshes any non-empty field on conflict so YouTube renames /

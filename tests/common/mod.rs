@@ -400,54 +400,19 @@ pub async fn allowlist_channel(
     .expect("seed allowlisted_channels row");
 }
 
+/// Seed a row into `video_likes` plus the canonical `videos` /
+/// `channels` rows the likes JOIN now requires.
+///
 /// Backwards-compat shim: many existing tests passed a denormalised
 /// row shape (video_id, video_title, video_thumbnail_url, channel_title)
 /// to the per-child tables that migrations 024 / 025 made FK-only.
 /// This helper splits the input across `videos` + `channels` + the
 /// target per-child table so those tests keep working without each one
-/// having to learn the new schema.
-///
-/// The positional-argument shape mirrors the pre-normalisation row
-/// layout that ~30 existing call sites use; switching to a struct
-/// builder would balloon the diff for no real readability win in tests.
-#[allow(clippy::too_many_arguments)]
-pub async fn seed_hidden(
-    pool: &SqlitePool,
-    child_id: i64,
-    video_id: &str,
-    video_title: Option<&str>,
-    channel_id: Option<&str>,
-    channel_title: Option<&str>,
-    video_thumbnail_url: Option<&str>,
-    duration_seconds: Option<i64>,
-) {
-    if let Some(cid) = channel_id {
-        seed_channel(pool, cid, channel_title).await;
-    }
-    seed_video_full(
-        pool,
-        video_id,
-        video_title,
-        channel_id,
-        duration_seconds,
-        video_thumbnail_url,
-    )
-    .await;
-    sqlx::query(
-        "INSERT INTO hidden_videos (child_account_id, video_id) VALUES (?, ?) \
-         ON CONFLICT(child_account_id, video_id) DO NOTHING",
-    )
-    .bind(child_id)
-    .bind(video_id)
-    .execute(pool)
-    .await
-    .expect("seed hidden_videos");
-}
-
-/// Seed a row into `video_likes` plus the canonical `videos` /
-/// `channels` rows the likes JOIN now requires.
-///
-/// See `seed_hidden` for why the positional-argument shape is kept.
+/// having to learn the new schema. The positional-argument shape
+/// mirrors the pre-normalisation row layout that ~30 existing call
+/// sites use; switching to a struct builder would balloon the diff for
+/// no real readability win in tests. The sibling `seed_*` helpers
+/// below follow the same convention.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_like(
     pool: &SqlitePool,
@@ -486,7 +451,7 @@ pub async fn seed_like(
 
 /// Seed a row into `watch_history` plus the canonical `videos` row.
 ///
-/// See `seed_hidden` for why the positional-argument shape is kept.
+/// See `seed_like` for why the positional-argument shape is kept.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_watch_history(
     pool: &SqlitePool,
@@ -553,7 +518,7 @@ pub async fn seed_blocked(
 
 /// Seed a row into `offline_downloads` plus the canonical `videos` row.
 ///
-/// See `seed_hidden` for why the positional-argument shape is kept.
+/// See `seed_like` for why the positional-argument shape is kept.
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_offline_download(
     pool: &SqlitePool,

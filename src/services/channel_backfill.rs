@@ -1234,76 +1234,14 @@ mod tests {
         assert_eq!(vn, 0, "channel_videos cascade-deleted with channels");
     }
 
-    /// Migration 025 moved channel title/thumbnail off `allowlisted_channels`
-    /// onto the canonical `channels` row, so `reconcile_with_allowlist`
-    /// no longer has anywhere to copy them from. The allowlist POST
-    /// handler upserts `channels` directly via
-    /// `feed_cache::upsert_channel_with_metadata`; reconcile only
-    /// ensures every allowlisted channel has *some* `channels` row
-    /// (seeded if necessary) and GC's orphans.
-    #[tokio::test]
-    #[ignore = "reconcile no longer propagates channel_title (moved off allowlisted_channels by migration 025)"]
-    async fn reconcile_propagates_channel_title() {
-        let pool = setup_db().await;
-        allow_channel(&pool, "UC1").await;
-
-        // Pre-create a `channels` row the way the older
-        // (title-less) seed path used to: NULL title, NULL thumbnail.
-        // This simulates a long-lived row in a real deployment.
-        sqlx::query(
-            "INSERT INTO channels (channel_id, backfill_status, \
-                                             backfill_next_at, rss_next_poll_at) \
-             VALUES ('UC1', 'pending', 0, 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        reconcile_with_allowlist(&pool).await.unwrap();
-
-        let title: Option<String> =
-            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            title.as_deref(),
-            Some("X"),
-            "reconcile should have backfilled the NULL title from allowlisted_channels"
-        );
-
-        // Seeding a brand-new channel should also pick up the title in
-        // the same call.
-        allow_channel(&pool, "UC2").await;
-        reconcile_with_allowlist(&pool).await.unwrap();
-        let title2: Option<String> =
-            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC2'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(title2.as_deref(), Some("X"));
-
-        // An existing non-NULL title (e.g. set by a sidecar refresh)
-        // must not be clobbered by reconcile.
-        sqlx::query(
-            "UPDATE channels SET channel_title = 'Sidecar Title' \
-              WHERE channel_id = 'UC1'",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        reconcile_with_allowlist(&pool).await.unwrap();
-        let title3: Option<String> =
-            sqlx::query_scalar("SELECT channel_title FROM channels WHERE channel_id = 'UC1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            title3.as_deref(),
-            Some("Sidecar Title"),
-            "reconcile must not clobber a richer title with the allowlist title"
-        );
-    }
+    // NOTE: an earlier `reconcile_propagates_channel_title` test was
+    // removed in this change. Migration 025 moved channel
+    // title/thumbnail off `allowlisted_channels` onto the canonical
+    // `channels` row, so `reconcile_with_allowlist` no longer has
+    // anywhere to copy them from. The allowlist POST handler upserts
+    // `channels` directly via `feed_cache::upsert_channel_with_metadata`;
+    // reconcile only ensures every allowlisted channel has *some*
+    // `channels` row (seeded if necessary) and GC's orphans.
 
     #[tokio::test]
     async fn enqueue_run_now_bumps_pending_channel() {
