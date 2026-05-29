@@ -64,6 +64,13 @@ pub async fn add(
 ) -> AppResult<Json<BlockedVideo>> {
     require_child(&state, child_id).await?;
 
+    // Reject a blank video_id before touching the DB: an empty id would
+    // seed a junk `videos` row (PK = "") and a `blocked_videos` row that
+    // no real video can ever match.
+    if body.video_id.trim().is_empty() {
+        return Err(AppError::BadRequest("video_id must not be empty".into()));
+    }
+
     // Best-effort metadata lookup so the parent UI shows the title.
     // The `blocked_videos` schema doesn't store a thumbnail (just title
     // + reason), so we don't bother with the thumbnail URL here.

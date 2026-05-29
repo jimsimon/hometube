@@ -320,9 +320,14 @@ pub async fn create(
     )
     .await?;
     sqlx::query(
+        // Clear `downloaded_at` on the conflict path so a re-queued row
+        // (e.g. re-downloading after a soft-delete) doesn't keep its
+        // stale completion timestamp while sitting in 'pending'. The
+        // `update` handler re-stamps it when the download completes.
         "INSERT INTO offline_downloads (child_account_id, video_id, quality_label, status) \
          VALUES (?, ?, ?, 'pending') \
-         ON CONFLICT(child_account_id, video_id, quality_label) DO UPDATE SET status = 'pending'",
+         ON CONFLICT(child_account_id, video_id, quality_label) \
+              DO UPDATE SET status = 'pending', downloaded_at = NULL",
     )
     .bind(current.id)
     .bind(&body.video_id)
@@ -383,17 +388,25 @@ pub async fn update(
         None
     };
 
+    // Both branches exclude soft-deleted rows (`status != 'deleted'`)
+    // so a `PUT` can't resurrect a download the client already deleted.
+    // Re-downloading goes through `create`'s `ON CONFLICT` revive path
+    // instead, which is the only intended way to bring a deleted row
+    // back to 'pending'.
+    //
     // Asymmetric 404 semantics across the two branches:
     //
     // - `quality.is_some()` → the client targets a specific row. If
-    //   no row matches (typo'd quality label, e.g. "1080p" when only
-    //   "720p" was recorded), silently 204'ing would let the UI think
-    //   the status flipped. Return 404 so the client can correct.
+    //   no live row matches (typo'd quality label, e.g. "1080p" when
+    //   only "720p" was recorded, or the row was deleted), silently
+    //   204'ing would let the UI think the status flipped. Return 404
+    //   so the client can correct.
     //
     // - `quality.is_none()` → the client wants every quality for the
     //   video updated. Zero matching rows is the *expected* outcome
-    //   for an idempotent `DELETE`-then-`PUT` sequence, so 204 with
-    //   no row-count gate is correct.
+    //   for an idempotent `DELETE`-then-`PUT` sequence (the deleted
+    //   rows are now filtered out), so 204 with no row-count gate is
+    //   correct.
     //
     // The boolean below makes that asymmetry obvious at the call
     // site; the earlier `Option<u64>` shape was technically correct
@@ -404,7 +417,8 @@ pub async fn update(
         }
         let res = sqlx::query(
             "UPDATE offline_downloads SET status = ?, downloaded_at = ? \
-             WHERE child_account_id = ? AND video_id = ? AND quality_label = ?",
+             WHERE child_account_id = ? AND video_id = ? AND quality_label = ? \
+               AND status != 'deleted'",
         )
         .bind(status)
         .bind(downloaded_at)
@@ -417,7 +431,8 @@ pub async fn update(
     } else {
         sqlx::query(
             "UPDATE offline_downloads SET status = ?, downloaded_at = ? \
-             WHERE child_account_id = ? AND video_id = ?",
+             WHERE child_account_id = ? AND video_id = ? \
+               AND status != 'deleted'",
         )
         .bind(status)
         .bind(downloaded_at)
