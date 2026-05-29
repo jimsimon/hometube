@@ -76,6 +76,12 @@ pub async fn add(
             .map(|v| v.title),
         Err(_) => None,
     };
+    // Treat a blank sidecar title as absent. `models::video::upsert`'s
+    // INSERT path binds the title as-is (no `NULLIF`), so a `Some("")`
+    // would persist an empty title on first sighting instead of the
+    // `video_id` placeholder; every other caller filters empties to
+    // `None` to uphold that contract.
+    let title = title.filter(|s| !s.trim().is_empty());
 
     let mut tx = state.db.begin().await?;
     // Seed `videos` first so the FK on `blocked_videos.video_id` is

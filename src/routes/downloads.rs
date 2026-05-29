@@ -152,12 +152,25 @@ fn is_valid_video_id(id: &str) -> bool {
 }
 
 /// Reject body-supplied quality labels that aren't shaped like
-/// `<digits>p` (e.g. `"720p"`, `"1080p"`). Same defensive rationale
-/// as `is_valid_video_id` — the value is echoed into the `stream_url`
-/// query string.
+/// `<digits>p` (e.g. `"720p"`, `"1080p"`) or the literal sentinel
+/// `"auto"`. Same defensive rationale as `is_valid_video_id` — the
+/// value is echoed into the `stream_url` query string.
 ///
-/// **Canonical form is required**: only `<digits>p` is accepted, not
-/// bare `<digits>`. The frontend (`video-player.ts`,
+/// **`"auto"` sentinel:** the frontend (`video-player.ts`) emits
+/// `"auto"` when it can't pin a concrete height — i.e. no progressive
+/// (muxed audio+video) format is available to derive a `<digits>p`
+/// label from. The `stream` handler treats an unparseable quality as
+/// "no height cap, pick the best progressive" (see the
+/// `trim_end_matches('p').parse()` → `None` path), so `"auto"` is a
+/// first-class, load-bearing value — rejecting it breaks downloads of
+/// any video lacking a muxed format. It round-trips through the
+/// `offline_downloads.quality_label` unique key and the OPFS filename
+/// unchanged and is within the unreserved URL alphabet, so it's safe
+/// to echo into `stream_url` without encoding.
+///
+/// **Canonical form is required for the numeric variant**: only
+/// `<digits>p` is accepted, not bare `<digits>`. The frontend
+/// (`video-player.ts`,
 /// `child-settings-form.ts`, `types/index.ts::max_quality`) always
 /// emits the `p`-suffixed form, and the downstream consumers
 /// (`offline_downloads.quality_label` unique key, yt-dlp `--format`
@@ -191,6 +204,13 @@ fn is_valid_video_id(id: &str) -> bool {
 ///    range-checking closes that gap so callers can rely on
 ///    "validator passes ⇒ recognisable YouTube label."
 fn is_valid_quality_label(q: &str) -> bool {
+    // `"auto"` is the frontend's "pick the best progressive format"
+    // sentinel (emitted when no muxed format yields a concrete height).
+    // The `stream` handler already handles it as "no height cap", so
+    // accept it as-is alongside the canonical `<digits>p` form.
+    if q == "auto" {
+        return true;
+    }
     let Some(digits) = q.strip_suffix('p') else {
         return false;
     };
@@ -584,6 +604,24 @@ mod tests {
         assert!(is_valid_quality_label("1080p"));
         assert!(is_valid_quality_label("144p"));
         assert!(is_valid_quality_label("2160p"));
+    }
+
+    #[test]
+    fn quality_accepts_auto_sentinel() {
+        // `"auto"` is the frontend sentinel for "no muxed format → let
+        // the stream handler pick the best progressive". Rejecting it
+        // (as an earlier revision of this validator did) breaks
+        // downloads of any video lacking a progressive format. The
+        // `stream` handler's `trim_end_matches('p').parse()` → `None`
+        // path treats it as "no height cap".
+        assert!(is_valid_quality_label("auto"));
+        // But only the exact literal — no near-misses that could fork
+        // the `quality_label` unique key.
+        assert!(!is_valid_quality_label("Auto"));
+        assert!(!is_valid_quality_label("AUTO"));
+        assert!(!is_valid_quality_label("autop"));
+        assert!(!is_valid_quality_label("auto "));
+        assert!(!is_valid_quality_label("automatic"));
     }
 
     #[test]
