@@ -242,13 +242,26 @@ async fn upsert_watch_history(
     let channel_id = body.channel_id.as_deref().filter(|s| !s.is_empty());
     let channel_title = body.channel_title.as_deref().filter(|s| !s.is_empty());
     if let Some(cid) = channel_id {
-        crate::services::feed_cache::upsert_channel_with_metadata(
-            &mut *tx,
-            cid,
-            channel_title,
-            None,
-            None,
+        // Refresh the title for channels we already track, but never
+        // CREATE a `channels` row from a heartbeat. An individually-
+        // allowlisted video can belong to a channel that nobody
+        // allowlisted; inserting a `channels` row here (with
+        // `backfill_next_at`/`rss_next_poll_at` = 0) would enroll that
+        // channel in RSS polling and an expensive yt-dlp backfill until
+        // GC reaps it. `add_channel`/`add_video` seed the row for
+        // legitimately-tracked channels, so an UPDATE that silently
+        // affects zero rows when the channel is untracked is correct.
+        // `NULLIF(?, '')` mirrors `record_poll_success` so a blank
+        // title can't clobber a stored one (defensive — the bind is
+        // already empty-filtered to `None`).
+        sqlx::query(
+            "UPDATE channels \
+                SET channel_title = COALESCE(NULLIF(?, ''), channel_title) \
+              WHERE channel_id = ?",
         )
+        .bind(channel_title)
+        .bind(cid)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -275,7 +288,11 @@ async fn upsert_watch_history(
     )
     .bind(child_id)
     .bind(&body.video_id)
-    .bind(body.position_seconds)
+    // Clamp at the single shared write site: the `progress` handler
+    // already clamps before calling, but the heartbeat path passes the
+    // raw body, and a negative resume point would render as nonsense in
+    // continue-watching.
+    .bind(body.position_seconds.max(0))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

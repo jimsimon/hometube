@@ -402,14 +402,17 @@ async fn search_videos(
     // not fan out to two response rows. Do NOT swap `UNION` for
     // `UNION ALL` here without also wrapping the outer select in
     // `DISTINCT` / `GROUP BY v.video_id`.
+    // Propagate query/mapping failures (matching `search_channels`)
+    // rather than `unwrap_or_default()`-ing them: a SQL or decode error
+    // is a real server fault, and swallowing it as an empty result is
+    // indistinguishable from "no matches" to the caller.
     let rows: Vec<SearchRow> = sqlx::query_as(CHILD_SEARCH_SQL)
         .bind(child_id)
         .bind(pattern)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
     Ok(rows
         .into_iter()
