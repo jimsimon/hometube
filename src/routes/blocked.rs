@@ -79,12 +79,7 @@ pub async fn add(
     // The `blocked_videos` schema doesn't store a thumbnail (just title
     // + reason), so we don't bother with the thumbnail URL here.
     let title = match YoutubeClient::from_db(&state.db).await {
-        Ok(yt) => yt
-            .get_video(video_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v.title),
+        Ok(yt) => yt.get_video(video_id).await.ok().flatten().map(|v| v.title),
         Err(_) => None,
     };
     // Treat a blank sidecar title as absent. `models::video::upsert`'s
