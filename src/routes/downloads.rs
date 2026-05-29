@@ -301,13 +301,23 @@ pub async fn create(
 
     let mut tx = state.db.begin().await?;
     if let Some(cid) = result.channel_id.as_deref() {
-        crate::services::feed_cache::upsert_channel_with_metadata(
-            &mut *tx,
-            cid,
-            result.channel_title.as_deref(),
-            None,
-            None,
+        // Refresh the title for channels we already track, but never
+        // CREATE a `channels` row from a direct-video download. An
+        // individually-allowlisted video can belong to a channel nobody
+        // allowlisted; inserting a row here (with
+        // `backfill_next_at`/`rss_next_poll_at` = 0) would enroll that
+        // channel in RSS polling + an expensive yt-dlp backfill until GC
+        // reaps it. Mirrors the heartbeat path in `routes/usage.rs`;
+        // `add_channel`/`add_video` seed the row for tracked channels,
+        // so a zero-row UPDATE for an untracked channel is correct.
+        sqlx::query(
+            "UPDATE channels \
+                SET channel_title = COALESCE(NULLIF(?, ''), channel_title) \
+              WHERE channel_id = ?",
         )
+        .bind(result.channel_title.as_deref())
+        .bind(cid)
+        .execute(&mut *tx)
         .await?;
     }
     crate::models::video::upsert(

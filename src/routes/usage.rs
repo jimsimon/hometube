@@ -18,7 +18,7 @@
 use axum::{extract::State, Json};
 use serde::Deserialize;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
 use crate::state::AppState;
 
@@ -237,6 +237,18 @@ async fn upsert_watch_history(
     // background reconciler) preserves the contract that listing
     // surfaces see the freshest title/thumbnail/duration immediately
     // after a heartbeat — which is what the player UI relies on.
+
+    // Reject a blank/whitespace video_id before opening the transaction
+    // so we never seed a junk `videos`/`watch_history` row keyed on an
+    // empty id that no real playback can match. (The heartbeat caller
+    // runs this before `upsert_usage_log`, so a short-circuit here also
+    // keeps `usage_log` clean.) We deliberately store the raw id rather
+    // than a trimmed copy so `usage_log` and `watch_history` agree and
+    // the `top_channels` JOIN keeps matching.
+    if body.video_id.trim().is_empty() {
+        return Err(AppError::BadRequest("video_id must not be empty".into()));
+    }
+
     let mut tx = state.db.begin().await?;
 
     let channel_id = body.channel_id.as_deref().filter(|s| !s.is_empty());

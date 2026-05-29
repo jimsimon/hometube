@@ -64,10 +64,14 @@ pub async fn add(
 ) -> AppResult<Json<BlockedVideo>> {
     require_child(&state, child_id).await?;
 
-    // Reject a blank video_id before touching the DB: an empty id would
-    // seed a junk `videos` row (PK = "") and a `blocked_videos` row that
-    // no real video can ever match.
-    if body.video_id.trim().is_empty() {
+    // Normalize once and reuse for every lookup/insert below so we never
+    // persist or query with surrounding whitespace (a padded id would
+    // silently fail to match real playback / access checks). Reject a
+    // blank id before touching the DB — an empty id would seed a junk
+    // `videos` row (PK = "") and a `blocked_videos` row no real video
+    // can ever match.
+    let video_id = body.video_id.trim();
+    if video_id.is_empty() {
         return Err(AppError::BadRequest("video_id must not be empty".into()));
     }
 
@@ -76,7 +80,7 @@ pub async fn add(
     // + reason), so we don't bother with the thumbnail URL here.
     let title = match YoutubeClient::from_db(&state.db).await {
         Ok(yt) => yt
-            .get_video(&body.video_id)
+            .get_video(video_id)
             .await
             .ok()
             .flatten()
@@ -94,15 +98,14 @@ pub async fn add(
     // Seed `videos` first so the FK on `blocked_videos.video_id` is
     // satisfied. `None` falls back to the video_id at INSERT time and
     // leaves any pre-existing richer title untouched on CONFLICT.
-    crate::models::video::upsert(&mut *tx, &body.video_id, title.as_deref(), None, None, None)
-        .await?;
+    crate::models::video::upsert(&mut *tx, video_id, title.as_deref(), None, None, None).await?;
     sqlx::query(
         "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by, reason) \
          VALUES (?, ?, ?, ?) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET reason = excluded.reason",
     )
     .bind(child_id)
-    .bind(&body.video_id)
+    .bind(video_id)
     .bind(current.id)
     .bind(body.reason.clone())
     .execute(&mut *tx)
@@ -116,7 +119,7 @@ pub async fn add(
          WHERE bv.child_account_id = ? AND bv.video_id = ?",
     )
     .bind(child_id)
-    .bind(&body.video_id)
+    .bind(video_id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(row))
