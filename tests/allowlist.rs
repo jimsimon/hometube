@@ -14,7 +14,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::boot_with_parent_and_child;
+use common::{allowlist_channel, allowlist_video, boot_with_parent_and_child};
 use hometube::models::account::AccountType;
 
 #[tokio::test]
@@ -23,16 +23,27 @@ async fn videos_round_trip_via_db_seed() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
+    // Seed both the canonical `videos` row and the per-child link.
+    // `channel_title` is no longer a column on `allowlisted_videos`; the
+    // list handler hydrates it via `videos.channel_id → channels`.
+    common::seed_channel(&app.pool, "chan-1", Some("Some Channel")).await;
     sqlx::query(
-        "INSERT INTO allowlisted_videos \
-            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
-         VALUES (?, 'vid-1', 'Hello', 'http://thumb', 'Some Channel', ?)",
+        "INSERT INTO videos (video_id, title, channel_id, thumbnail_url) \
+         VALUES ('vid-1', 'Hello', 'chan-1', 'http://thumb')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO allowlisted_videos (child_account_id, video_id, added_by) \
+         VALUES (?, 'vid-1', ?)",
     )
     .bind(child_id)
     .bind(parent_id)
     .execute(&app.pool)
     .await
     .expect("seed video");
+    let _ = allowlist_video; // imported for other tests in this file
 
     // Pre-populate `video_metadata_cache` so any handler that does a
     // best-effort lookup hits the cache rather than yt-dlp.
@@ -76,16 +87,14 @@ async fn channels_round_trip_via_db_seed() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels \
-            (child_account_id, channel_id, channel_title, channel_thumbnail_url, added_by) \
-         VALUES (?, 'chan-1', 'Cool Channel', NULL, ?)",
+    allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "chan-1",
+        Some("Cool Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app
         .server
@@ -244,13 +253,12 @@ async fn add_channel_truncates_multibyte_description_without_panicking() {
 
     // The stored description should be valid UTF-8 of at most
     // MAX_DESCRIPTION_LEN bytes (8192). We verify both via DB.
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT description FROM channel_sync_state WHERE channel_id = 'UCemoji'",
-    )
-    .fetch_optional(&app.pool)
-    .await
-    .unwrap()
-    .flatten();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT description FROM channels WHERE channel_id = 'UCemoji'")
+            .fetch_optional(&app.pool)
+            .await
+            .unwrap()
+            .flatten();
     let stored = stored.expect("description was stored");
     assert!(
         stored.len() <= 8192,

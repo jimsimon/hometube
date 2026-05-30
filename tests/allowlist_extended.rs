@@ -8,7 +8,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::boot_with_parent_and_child;
+use common::{allowlist_channel, allowlist_video, boot_with_parent_and_child};
 use hometube::models::account::AccountType;
 use serde_json::json;
 
@@ -36,15 +36,7 @@ async fn list_channels_returns_seeded_rows() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCch1', 'Channel One', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "UCch1", Some("Channel One")).await;
 
     let res = app
         .server
@@ -64,15 +56,7 @@ async fn delete_channel_from_allowlist() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCdel', 'To Delete', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "UCdel", Some("To Delete")).await;
 
     let res = app
         .server
@@ -131,15 +115,16 @@ async fn list_videos_returns_seeded_rows() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, channel_title, added_by) \
-         VALUES (?, 'vid-A', 'Video A', 'Ch', ?)",
+    common::seed_channel(&app.pool, "chan-A", Some("Ch")).await;
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-A",
+        Some("Video A"),
+        Some("chan-A"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app
         .server
@@ -158,15 +143,7 @@ async fn delete_video_from_allowlist() {
     let child_id = app.child_id.unwrap();
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-del', 'Del', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_video(&app.pool, child_id, parent_id, "vid-del", Some("Del"), None).await;
 
     let res = app
         .server
@@ -227,8 +204,19 @@ async fn add_video_uses_body_metadata_when_sidecar_unavailable() {
 
     // Title is persisted on disk — the search SQL filters on
     // `video_title LIKE …`, so this is the field that matters.
-    let (db_title, db_channel): (String, Option<String>) = sqlx::query_as(
-        "SELECT video_title, channel_title FROM allowlisted_videos \
+    // Title is now persisted on the canonical `videos` row. Channel
+    // title lives on `channels` if `videos.channel_id` was resolved;
+    // in this test the body didn't supply a channel_id, so the
+    // handler used the body-supplied `channel_title` directly in
+    // its JSON response (already asserted above).
+    let db_title: String = sqlx::query_scalar("SELECT title FROM videos WHERE video_id = ?")
+        .bind("dQw4w9WgXcQ")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(db_title, "Never Gonna Give You Up");
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM allowlisted_videos \
          WHERE child_account_id = ? AND video_id = ?",
     )
     .bind(child_id)
@@ -236,8 +224,7 @@ async fn add_video_uses_body_metadata_when_sidecar_unavailable() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(db_title, "Never Gonna Give You Up");
-    assert_eq!(db_channel.as_deref(), Some("Rick Astley"));
+    assert_eq!(exists, 1);
 }
 
 #[tokio::test]

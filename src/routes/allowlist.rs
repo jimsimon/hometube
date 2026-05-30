@@ -71,9 +71,16 @@ pub async fn list_channels(
     Path(child_id): Path<i64>,
 ) -> AppResult<Json<Vec<AllowlistedChannel>>> {
     require_child_id(&state, child_id).await?;
+    // Channel metadata now lives on `channels` (migration 025); the
+    // `allowlisted_channels` row is just a FK linkage.
     let rows: Vec<AllowlistedChannel> = sqlx::query_as(
-        "SELECT id, channel_id, channel_title, channel_thumbnail_url, created_at \
-         FROM allowlisted_channels WHERE child_account_id = ? ORDER BY created_at DESC",
+        "SELECT ac.id, ac.channel_id, \
+                COALESCE(ch.channel_title, '') AS channel_title, \
+                ch.channel_thumbnail_url, ac.created_at \
+         FROM allowlisted_channels ac \
+         LEFT JOIN channels ch ON ch.channel_id = ac.channel_id \
+         WHERE ac.child_account_id = ? \
+         ORDER BY ac.created_at DESC",
     )
     .bind(child_id)
     .fetch_all(&state.db)
@@ -243,15 +250,26 @@ pub async fn add_channel(
             // byte-slice `&d[..8192]` would panic with
             // `byte index 8192 is not a char boundary`, which a
             // malicious parent could weaponise as a remote DoS.
-            // `char_indices` gives us safe boundaries; we take the
-            // last one that fits.
-            let end = d
+            // `char_indices` gives us safe boundaries.
+            //
+            // `boundary` is the byte offset of the first char that
+            // is *not* included in the truncated slice — i.e.,
+            // `&d[..boundary]` is the kept portion, and the char
+            // starting at exactly `boundary` is dropped. The
+            // `take_while(<=)` keeps every char whose *start* byte
+            // is at or below the cap; the `last()` of that filtered
+            // sequence is therefore the start of the last kept
+            // char, which is what we want as the half-open slice
+            // upper bound. A description shorter than the cap
+            // takes the `else` branch above, so we never need to
+            // handle the "every char fits" case here.
+            let boundary = d
                 .char_indices()
                 .map(|(i, _)| i)
                 .take_while(|&i| i <= MAX_DESCRIPTION_LEN)
                 .last()
                 .unwrap_or(0);
-            Some(&d[..end])
+            Some(&d[..boundary])
         } else {
             Some(d)
         }
@@ -297,42 +315,52 @@ pub async fn add_channel(
         .map(|i| i.id.clone())
         .unwrap_or_else(|| body_channel_id.to_string());
 
-    let row: AllowlistedChannel = sqlx::query_as(
-        "INSERT INTO allowlisted_channels \
-            (child_account_id, channel_id, channel_title, channel_thumbnail_url, added_by) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(child_account_id, channel_id) DO UPDATE SET \
-            channel_title = excluded.channel_title, \
-            channel_thumbnail_url = excluded.channel_thumbnail_url \
-         RETURNING id, channel_id, channel_title, channel_thumbnail_url, created_at",
-    )
-    .bind(child_id)
-    .bind(&canonical_id)
-    .bind(&title)
-    .bind(&thumb)
-    .bind(current.id)
-    .fetch_one(&state.db)
-    .await?;
-
-    // Seed the channel sync state with the full header metadata. The
-    // RSS refresher and the backfill loop both pick this up on their
-    // next ticks. Failures here are logged but do not fail the
-    // allowlist write — the user has already committed.
-    if let Err(err) = crate::services::feed_cache::upsert_channel_with_metadata(
-        &state.db,
+    // Seed `channels` and link the per-child `allowlisted_channels` row
+    // in one transaction so an observer can never witness the channel
+    // metadata row without the linkage that motivated writing it.
+    // Failures here are fatal — the FK would reject the allowlist row
+    // anyway.
+    let mut tx = state.db.begin().await?;
+    crate::services::feed_cache::upsert_channel_with_metadata(
+        &mut *tx,
         &canonical_id,
         Some(&title),
         thumb.as_deref(),
         description.as_deref(),
     )
-    .await
-    {
-        tracing::warn!(
-            channel_id = %canonical_id,
-            %err,
-            "failed to seed channel_sync_state for newly allowlisted channel",
-        );
-    }
+    .await?;
+
+    // Insert the linkage; ignore the RETURNING shape — we always
+    // re-fetch via the canonical LEFT JOIN below so the response
+    // matches `list_channels` exactly regardless of whether this was a
+    // fresh insert or a duplicate. Unifying the two paths is cheaper
+    // and clearer than the alternative (two correlated subqueries
+    // inside `RETURNING` for the channels-table fields).
+    sqlx::query(
+        "INSERT INTO allowlisted_channels \
+            (child_account_id, channel_id, added_by) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(child_account_id, channel_id) DO NOTHING",
+    )
+    .bind(child_id)
+    .bind(&canonical_id)
+    .bind(current.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let row: AllowlistedChannel = sqlx::query_as(
+        "SELECT ac.id, ac.channel_id, \
+                COALESCE(ch.channel_title, '') AS channel_title, \
+                ch.channel_thumbnail_url, ac.created_at \
+         FROM allowlisted_channels ac \
+         LEFT JOIN channels ch ON ch.channel_id = ac.channel_id \
+         WHERE ac.child_account_id = ? AND ac.channel_id = ?",
+    )
+    .bind(child_id)
+    .bind(&canonical_id)
+    .fetch_one(&state.db)
+    .await?;
     Ok(Json(row))
 }
 
@@ -371,7 +399,7 @@ pub async fn delete_channel(
             .bind(&channel_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM channel_sync_state WHERE channel_id = ?")
+        sqlx::query("DELETE FROM channels WHERE channel_id = ?")
             .bind(&channel_id)
             .execute(&mut *tx)
             .await?;
@@ -424,9 +452,20 @@ pub async fn list_videos(
     Path(child_id): Path<i64>,
 ) -> AppResult<Json<Vec<AllowlistedVideo>>> {
     require_child_id(&state, child_id).await?;
+    // Hydrate metadata from `videos` (migration 024); fall back to
+    // `channels.channel_title` for the per-row `channel_title` display
+    // string the API has always exposed.
     let rows: Vec<AllowlistedVideo> = sqlx::query_as(
-        "SELECT id, video_id, video_title, video_thumbnail_url, channel_title, created_at \
-         FROM allowlisted_videos WHERE child_account_id = ? ORDER BY created_at DESC",
+        "SELECT av.id, av.video_id, \
+                v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                ch.channel_title, \
+                av.created_at \
+         FROM allowlisted_videos av \
+         JOIN videos v ON v.video_id = av.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE av.child_account_id = ? \
+         ORDER BY av.created_at DESC",
     )
     .bind(child_id)
     .fetch_all(&state.db)
@@ -500,22 +539,93 @@ pub async fn add_video(
         });
     let canonical_id = info.as_ref().map(|i| i.id.clone()).unwrap_or(video_id);
 
-    let row: AllowlistedVideo = sqlx::query_as(
-        "INSERT INTO allowlisted_videos \
-            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
-            video_title = excluded.video_title, \
-            video_thumbnail_url = excluded.video_thumbnail_url, \
-            channel_title = excluded.channel_title \
-         RETURNING id, video_id, video_title, video_thumbnail_url, channel_title, created_at",
+    // Pull the canonical channel ID from the sidecar response, if any.
+    // Body data doesn't currently carry channel_id (just channel_title)
+    // so this can be NULL — that's fine; `videos.channel_id` is
+    // nullable.
+    let channel_id_for_video = info.as_ref().and_then(|i| i.channel_id.clone());
+    // `VideoInfo.duration` is ISO 8601 (e.g. "PT4M13S"); parsing it is
+    // out of scope for this path. Leave the seconds slot empty — a
+    // later sighting (watch_history heartbeat, channel_videos
+    // backfill) will fill it in.
+    let duration_for_video: Option<i64> = None;
+
+    let mut tx = state.db.begin().await?;
+    // Seed `channels` first when we have a resolved channel_id so the
+    // `LEFT JOIN channels` in `list_videos` (and the GET response
+    // below) returns the actual title rather than NULL on subsequent
+    // reads. Without this, a direct-by-ID add would leave the per-row
+    // `channel_title` blank until another writer (heartbeat / RSS /
+    // backfill) populated `channels`.
+    if let Some(cid) = channel_id_for_video.as_deref() {
+        crate::services::feed_cache::upsert_channel_with_metadata(
+            &mut *tx,
+            cid,
+            channel_title.as_deref(),
+            None,
+            None,
+        )
+        .await?;
+    }
+    crate::models::video::upsert(
+        &mut *tx,
+        &canonical_id,
+        Some(title.as_str()),
+        channel_id_for_video.as_deref(),
+        duration_for_video,
+        thumb.as_deref(),
+    )
+    .await?;
+    // No-op `DO UPDATE` so `RETURNING id` yields exactly one row in
+    // both insert and conflict cases. SQLite's `DO NOTHING ... RETURNING`
+    // returns no row on conflict, which would force a fallback SELECT
+    // and a second round-trip; rewriting `added_by` back to its own
+    // stored value is cheap and keeps the row count contract simple.
+    let allow_id: i64 = sqlx::query_scalar(
+        "INSERT INTO allowlisted_videos (child_account_id, video_id, added_by) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id) \
+              DO UPDATE SET added_by = allowlisted_videos.added_by \
+         RETURNING id",
     )
     .bind(child_id)
     .bind(&canonical_id)
-    .bind(&title)
-    .bind(thumb)
-    .bind(channel_title)
     .bind(current.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // Re-fetch via the canonical JOIN. The
+    // `COALESCE(NULLIF(ch.channel_title, ''), ?)` surfaces the
+    // body-supplied channel_title in the response when we couldn't
+    // resolve a channel_id (so `channels.channel_title` is NULL) —
+    // this is a deliberate, documented asymmetry with `list_videos`:
+    // the POST acknowledgement echoes what the caller sent so the
+    // optimistic UI can render without a follow-up GET.
+    //
+    // The `NULLIF(..., '')` guard is defensive: every production
+    // writer of `channels.channel_title` filters empties to `None`,
+    // but legacy migration-backfilled rows and raw-SQL test fixtures
+    // can carry `''`. Plain `COALESCE` treats `''` as "present" and
+    // would silently lose the body-supplied fallback in that case.
+    //
+    // Subsequent GETs (which have no body to fall back on) will show
+    // a blank channel_title for the same row until some other writer
+    // (heartbeat, RSS, backfill) populates `channels`. Tests in
+    // `allowlist_extended.rs::add_video_uses_body_metadata_when_sidecar_unavailable`
+    // pin this echo contract.
+    let row: AllowlistedVideo = sqlx::query_as(
+        "SELECT av.id, av.video_id, v.title AS video_title, \
+                v.thumbnail_url AS video_thumbnail_url, \
+                COALESCE(NULLIF(ch.channel_title, ''), ?) AS channel_title, \
+                av.created_at \
+         FROM allowlisted_videos av \
+         JOIN videos v ON v.video_id = av.video_id \
+         LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         WHERE av.id = ?",
+    )
+    .bind(channel_title)
+    .bind(allow_id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(row))

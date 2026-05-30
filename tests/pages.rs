@@ -169,26 +169,35 @@ async fn video_grid_partial_renders_seeded_videos_on_child_home() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
+    // First video carries a channel (so channel_title is visible)
+    // and a thumbnail URL.
+    common::seed_channel(&app.pool, "cats-inc", Some("Cats Inc.")).await;
     sqlx::query(
-        "INSERT INTO allowlisted_videos \
-            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
-         VALUES (?, 'vid-aa', 'Funny Cats', 'https://img.example/cats.jpg', 'Cats Inc.', ?)",
+        "INSERT INTO videos (video_id, title, channel_id, thumbnail_url) \
+         VALUES ('vid-aa', 'Funny Cats', 'cats-inc', 'https://img.example/cats.jpg')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO allowlisted_videos (child_account_id, video_id, added_by) \
+         VALUES (?, 'vid-aa', ?)",
     )
     .bind(child_id)
     .bind(parent_id)
     .execute(&app.pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO allowlisted_videos \
-            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, added_by) \
-         VALUES (?, 'vid-bb', 'Big Trains', NULL, NULL, ?)",
+    // Second video has no thumbnail/channel.
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-bb",
+        Some("Big Trains"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/child/home").await;
     assert_eq!(res.status_code(), StatusCode::OK);

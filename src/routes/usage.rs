@@ -18,7 +18,7 @@
 use axum::{extract::State, Json};
 use serde::Deserialize;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
 use crate::state::AppState;
 
@@ -60,8 +60,43 @@ pub async fn heartbeat(
 ) -> AppResult<axum::http::StatusCode> {
     let elapsed = body.elapsed_seconds.unwrap_or(30).clamp(1, 90);
 
-    upsert_usage_log(&state, current.id, &body.video_id, elapsed).await?;
+    // Order matters: `upsert_watch_history` seeds the canonical
+    // `videos` row (and, when channel metadata is supplied, the
+    // `channels` row) that `top_channels` joins against via INNER JOIN
+    // (`routes/usage.rs::top_channels`). Running it *before*
+    // `upsert_usage_log` ensures that if the second write fails for
+    // any reason, we don't strand a `usage_log` row whose video has no
+    // `videos` parent — such a row is silently dropped from the
+    // top-channels totals by the INNER JOIN.
+    //
+    // The two writes are still in separate transactions; folding them
+    // into one would mean a single failure in either path loses both
+    // the screen-time accounting AND the resume point, which is worse
+    // UX than the current "best-effort, watch_history wins on failure".
+    //
+    // Note also the *converse* failure mode: if `upsert_watch_history`
+    // itself fails (e.g. transient lock), the `?` short-circuits and
+    // neither write happens — this tick loses both the resume point
+    // and the screen-time accounting. Acceptable because both writes
+    // are idempotent and the next heartbeat (≤elapsed seconds later,
+    // 30s default) recovers both: `upsert_watch_history` re-asserts
+    // the same `progress_seconds = excluded.progress_seconds` and
+    // `upsert_usage_log` extends the same session window with the
+    // newer tick. We surface the failure to the client (500) so a
+    // persistent failure isn't silent.
+    //
+    // INNER JOIN consequence: `top_channels` reads
+    // `usage_log u INNER JOIN videos v ON u.video_id = v.video_id`
+    // and groups by `v.channel_id IS NOT NULL`. A heartbeat that
+    // arrives with `body.channel_id == None` still seeds the `videos`
+    // row (with channel_id NULL until a future writer fills it),
+    // which means the row is *currently* excluded from
+    // `top_channels`. This is documented as intentional in migration
+    // 024: rows with no resolvable channel are excluded until a
+    // future writer enriches them, so the totals are eventually
+    // correct without ever attributing usage to "channel unknown."
     upsert_watch_history(&state, current.id, &body).await?;
+    upsert_usage_log(&state, current.id, &body.video_id, elapsed).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -182,37 +217,96 @@ async fn upsert_watch_history(
     child_id: i64,
     body: &HeartbeatBody,
 ) -> AppResult<()> {
-    // `watch_history.video_title` is `NOT NULL`, so the INSERT path
-    // must always have a value — fall back to empty string when the
-    // caller didn't provide one (e.g. the progress endpoint). On the
-    // UPDATE path we bind the raw Option so `COALESCE` keeps the
-    // previously-stored title instead of clobbering it with "".
-    let title_insert = body.video_title.clone().unwrap_or_default();
-    let title_update = body.video_title.clone();
+    // Heartbeats are the *authoritative* refresh path for `videos`:
+    // the player has the live title/thumbnail/duration in scope, so we
+    // upsert them on every tick. `crate::models::video::upsert` uses
+    // NULLIF on the conflict path so an empty string from the body
+    // doesn't clobber a previously-stored value.
+    //
+    // WRITE-AMPLIFICATION TRADE-OFF: this used to be a single
+    // `INSERT … ON CONFLICT DO UPDATE` against `watch_history`.
+    // Migrations 024/025 split per-video metadata across `videos` +
+    // `channels`, so each heartbeat now executes up to three writes
+    // (channels upsert, videos upsert, watch_history upsert) under a
+    // single transaction. Heartbeats fire roughly every few seconds
+    // during playback, so the per-tick cost matters — but on WAL
+    // SQLite the three statements share one fsync at commit time and
+    // none of them touch indexed columns beyond the PKs, so in
+    // practice the cost is dominated by the existing watch_history
+    // write. Keeping the upserts here (rather than deferring to a
+    // background reconciler) preserves the contract that listing
+    // surfaces see the freshest title/thumbnail/duration immediately
+    // after a heartbeat — which is what the player UI relies on.
+
+    // Reject a blank/whitespace video_id before opening the transaction
+    // so we never seed a junk `videos`/`watch_history` row keyed on an
+    // empty id that no real playback can match. (The heartbeat caller
+    // runs this before `upsert_usage_log`, so a short-circuit here also
+    // keeps `usage_log` clean.) We deliberately store the raw id rather
+    // than a trimmed copy so `usage_log` and `watch_history` agree and
+    // the `top_channels` JOIN keeps matching.
+    if body.video_id.trim().is_empty() {
+        return Err(AppError::BadRequest("video_id must not be empty".into()));
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    let channel_id = body.channel_id.as_deref().filter(|s| !s.is_empty());
+    let channel_title = body.channel_title.as_deref().filter(|s| !s.is_empty());
+    if let Some(cid) = channel_id {
+        // Refresh the title for channels we already track, but never
+        // CREATE a `channels` row from a heartbeat. An individually-
+        // allowlisted video can belong to a channel that nobody
+        // allowlisted; inserting a `channels` row here (with
+        // `backfill_next_at`/`rss_next_poll_at` = 0) would enroll that
+        // channel in RSS polling and an expensive yt-dlp backfill until
+        // GC reaps it. `add_channel`/`add_video` seed the row for
+        // legitimately-tracked channels, so an UPDATE that silently
+        // affects zero rows when the channel is untracked is correct.
+        // `NULLIF(?, '')` mirrors `record_poll_success` so a blank
+        // title can't clobber a stored one (defensive — the bind is
+        // already empty-filtered to `None`).
+        sqlx::query(
+            "UPDATE channels \
+                SET channel_title = COALESCE(NULLIF(?, ''), channel_title) \
+              WHERE channel_id = ?",
+        )
+        .bind(channel_title)
+        .bind(cid)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let title = body.video_title.as_deref().filter(|s| !s.is_empty());
+    crate::models::video::upsert(
+        &mut *tx,
+        &body.video_id,
+        title,
+        channel_id,
+        body.duration_seconds.filter(|d| *d > 0),
+        body.video_thumbnail_url
+            .as_deref()
+            .filter(|s| !s.is_empty()),
+    )
+    .await?;
+
     sqlx::query(
         "INSERT INTO watch_history \
-            (child_account_id, video_id, video_title, video_thumbnail_url, channel_title, \
-             channel_id, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
+            (child_account_id, video_id, progress_seconds, last_watched_at) \
+         VALUES (?, ?, ?, unixepoch()) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
             progress_seconds = excluded.progress_seconds, \
-            duration_seconds = COALESCE(excluded.duration_seconds, watch_history.duration_seconds), \
-            video_title = COALESCE(?, watch_history.video_title), \
-            video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, watch_history.video_thumbnail_url), \
-            channel_title = COALESCE(excluded.channel_title, watch_history.channel_title), \
-            channel_id = COALESCE(excluded.channel_id, watch_history.channel_id), \
-            last_watched_at = unixepoch()",
+            last_watched_at  = unixepoch()",
     )
     .bind(child_id)
     .bind(&body.video_id)
-    .bind(title_insert)
-    .bind(body.video_thumbnail_url.clone())
-    .bind(body.channel_title.clone())
-    .bind(body.channel_id.clone())
-    .bind(body.duration_seconds)
-    .bind(body.position_seconds)
-    .bind(title_update)
-    .execute(&state.db)
+    // Clamp at the single shared write site: the `progress` handler
+    // already clamps before calling, but the heartbeat path passes the
+    // raw body, and a negative resume point would render as nonsense in
+    // continue-watching.
+    .bind(body.position_seconds.max(0))
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }

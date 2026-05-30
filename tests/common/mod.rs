@@ -174,23 +174,21 @@ pub async fn boot_with_parent_and_child(role: AccountType) -> (TestApp, AuthCook
 }
 
 /// Insert a fully-populated `accounts` row. Returns the new `accounts.id`.
+///
+/// Delegates to [`hometube::models::account::insert_local`] so test
+/// fixtures share the exact column-default behaviour the live signup
+/// flow uses. A hand-rolled `INSERT` would diverge from production if
+/// `accounts` ever grows a NOT NULL column with no default (the
+/// production helper will be updated atomically; the test helper
+/// would silently fall behind).
 pub async fn insert_account(
     pool: &SqlitePool,
     display_name: &str,
     account_type: AccountType,
 ) -> i64 {
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO accounts \
-            (display_name, avatar_url, account_type) \
-         VALUES (?, NULL, ?) \
-         RETURNING id",
-    )
-    .bind(display_name)
-    .bind(account_type.as_str())
-    .fetch_one(pool)
-    .await
-    .expect("insert account");
-    id
+    hometube::models::account::insert_local(pool, display_name, None, account_type)
+        .await
+        .expect("insert account")
 }
 
 /// Insert a session row for `account_id` and return a signed cookie
@@ -283,6 +281,311 @@ pub async fn seed_proxy_secret(pool: &SqlitePool) {
     set_config_value(pool, "proxy_hmac_secret", &encoded)
         .await
         .expect("seed proxy secret");
+}
+
+// ---------------------------------------------------------------------------
+// Schema-aware fixture helpers (migrations 024 + 025 normalisation)
+// ---------------------------------------------------------------------------
+//
+// After migrations 024 / 025 the per-child tables (`allowlisted_videos`,
+// `blocked_videos`, `hidden_videos`, `watch_history`, `video_likes`,
+// `offline_downloads`) are FK-only — title / thumbnail / duration /
+// channel_id live on the canonical `videos` table. `allowlisted_channels`
+// is similarly FK-only into the `channels` reference table.
+//
+// These helpers seed both sides at once so tests can keep the
+// "insert a video the child can see" semantics they had before the
+// normalisation, without each test re-implementing the upsert dance.
+
+/// Seed (or refresh) a `videos` row. Delegates to the production
+/// [`hometube::models::video::upsert`] helper so test fixtures stay in
+/// sync with the route handlers' canonical upsert semantics (placeholder
+/// title fallback, NULLIF guards on the conflict path, etc.).
+pub async fn seed_video(
+    pool: &SqlitePool,
+    video_id: &str,
+    title: Option<&str>,
+    channel_id: Option<&str>,
+) {
+    seed_video_full(pool, video_id, title, channel_id, None, None).await;
+}
+
+/// Full-shape variant of [`seed_video`] used by the per-table seed
+/// helpers below — they all funnel through here so the per-test row
+/// shape is irrelevant to the production helper, which sees exactly
+/// the same arguments it would in a route.
+async fn seed_video_full(
+    pool: &SqlitePool,
+    video_id: &str,
+    title: Option<&str>,
+    channel_id: Option<&str>,
+    duration_seconds: Option<i64>,
+    thumbnail_url: Option<&str>,
+) {
+    hometube::models::video::upsert(
+        pool,
+        video_id,
+        title,
+        channel_id,
+        duration_seconds,
+        thumbnail_url,
+    )
+    .await
+    .expect("seed videos row");
+}
+
+/// Seed a `channels` row with a title so allowlisted-channel surfaces
+/// have something to render.
+///
+/// Delegates to the production
+/// [`hometube::services::feed_cache::upsert_channel_with_metadata`]
+/// helper so test fixtures share the exact `NULLIF`-guarded rename-
+/// propagation semantics route handlers see. A hand-rolled
+/// `COALESCE(excluded, stored)` would diverge from production on
+/// `Some("")` inputs (production treats `""` as missing; the
+/// hand-rolled form would persist it).
+pub async fn seed_channel(pool: &SqlitePool, channel_id: &str, title: Option<&str>) {
+    hometube::services::feed_cache::upsert_channel_with_metadata(
+        pool, channel_id, title, None, None,
+    )
+    .await
+    .expect("seed channels row");
+}
+
+/// Insert a `videos` row plus the per-child `allowlisted_videos`
+/// linkage. Convenience for tests that previously did the denormalised
+/// insert directly.
+pub async fn allowlist_video(
+    pool: &SqlitePool,
+    child_id: i64,
+    added_by: i64,
+    video_id: &str,
+    title: Option<&str>,
+    channel_id: Option<&str>,
+) {
+    seed_video(pool, video_id, title, channel_id).await;
+    sqlx::query(
+        "INSERT INTO allowlisted_videos (child_account_id, video_id, added_by) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id) DO NOTHING",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .bind(added_by)
+    .execute(pool)
+    .await
+    .expect("seed allowlisted_videos row");
+}
+
+/// Insert a `channels` row plus the per-child `allowlisted_channels`
+/// linkage.
+pub async fn allowlist_channel(
+    pool: &SqlitePool,
+    child_id: i64,
+    added_by: i64,
+    channel_id: &str,
+    title: Option<&str>,
+) {
+    seed_channel(pool, channel_id, title).await;
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (child_account_id, channel_id, added_by) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(child_account_id, channel_id) DO NOTHING",
+    )
+    .bind(child_id)
+    .bind(channel_id)
+    .bind(added_by)
+    .execute(pool)
+    .await
+    .expect("seed allowlisted_channels row");
+}
+
+/// Seed a row into `video_likes` plus the canonical `videos` /
+/// `channels` rows the likes JOIN now requires.
+///
+/// Backwards-compat shim: many existing tests passed a denormalised
+/// row shape (video_id, video_title, video_thumbnail_url, channel_title)
+/// to the per-child tables that migrations 024 / 025 made FK-only.
+/// This helper splits the input across `videos` + `channels` + the
+/// target per-child table so those tests keep working without each one
+/// having to learn the new schema. The positional-argument shape
+/// mirrors the pre-normalisation row layout that ~30 existing call
+/// sites use; switching to a struct builder would balloon the diff for
+/// no real readability win in tests. The sibling `seed_*` helpers
+/// below follow the same convention.
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_like(
+    pool: &SqlitePool,
+    child_id: i64,
+    video_id: &str,
+    video_title: Option<&str>,
+    channel_id: Option<&str>,
+    channel_title: Option<&str>,
+    video_thumbnail_url: Option<&str>,
+    duration_seconds: Option<i64>,
+) {
+    if let Some(cid) = channel_id {
+        seed_channel(pool, cid, channel_title).await;
+    }
+    seed_video_full(
+        pool,
+        video_id,
+        video_title,
+        channel_id,
+        duration_seconds,
+        video_thumbnail_url,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO video_likes (child_account_id, video_id, is_deleted) \
+         VALUES (?, ?, 0) \
+         ON CONFLICT(child_account_id, video_id) DO UPDATE SET is_deleted = 0, \
+            updated_at = unixepoch()",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .execute(pool)
+    .await
+    .expect("seed video_likes");
+}
+
+/// Seed a row into `watch_history` plus the canonical `videos` row.
+///
+/// See `seed_like` for why the positional-argument shape is kept.
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_watch_history(
+    pool: &SqlitePool,
+    child_id: i64,
+    video_id: &str,
+    video_title: Option<&str>,
+    channel_id: Option<&str>,
+    channel_title: Option<&str>,
+    video_thumbnail_url: Option<&str>,
+    duration_seconds: Option<i64>,
+    progress_seconds: i64,
+    last_watched_at: Option<i64>,
+) {
+    if let Some(cid) = channel_id {
+        seed_channel(pool, cid, channel_title).await;
+    }
+    seed_video_full(
+        pool,
+        video_id,
+        video_title,
+        channel_id,
+        duration_seconds,
+        video_thumbnail_url,
+    )
+    .await;
+    let watched = last_watched_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    sqlx::query(
+        "INSERT INTO watch_history (child_account_id, video_id, progress_seconds, last_watched_at) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
+            progress_seconds = excluded.progress_seconds, \
+            last_watched_at = excluded.last_watched_at",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .bind(progress_seconds)
+    .bind(watched)
+    .execute(pool)
+    .await
+    .expect("seed watch_history");
+}
+
+/// Seed a row into `blocked_videos` plus the canonical `videos` row.
+pub async fn seed_blocked(
+    pool: &SqlitePool,
+    child_id: i64,
+    blocked_by: i64,
+    video_id: &str,
+    video_title: Option<&str>,
+) {
+    seed_video_full(pool, video_id, video_title, None, None, None).await;
+    sqlx::query(
+        "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id) DO NOTHING",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .bind(blocked_by)
+    .execute(pool)
+    .await
+    .expect("seed blocked_videos");
+}
+
+/// Seed a row into `offline_downloads` plus the canonical `videos` row.
+///
+/// See `seed_like` for why the positional-argument shape is kept.
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_offline_download(
+    pool: &SqlitePool,
+    child_id: i64,
+    video_id: &str,
+    video_title: Option<&str>,
+    channel_id: Option<&str>,
+    channel_title: Option<&str>,
+    video_thumbnail_url: Option<&str>,
+    quality_label: &str,
+    status: &str,
+) {
+    if let Some(cid) = channel_id {
+        seed_channel(pool, cid, channel_title).await;
+    }
+    seed_video_full(
+        pool,
+        video_id,
+        video_title,
+        channel_id,
+        None,
+        video_thumbnail_url,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO offline_downloads (child_account_id, video_id, quality_label, status) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(child_account_id, video_id, quality_label) DO UPDATE SET status = excluded.status",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .bind(quality_label)
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("seed offline_downloads");
+}
+
+/// Insert a `channel_videos` archive row. Seeds the parent `channels`
+/// + `videos` rows as needed.
+pub async fn seed_channel_video(
+    pool: &SqlitePool,
+    channel_id: &str,
+    channel_title: Option<&str>,
+    video_id: &str,
+    title: Option<&str>,
+    published_at: Option<i64>,
+    source: &str,
+) {
+    seed_channel(pool, channel_id, channel_title).await;
+    seed_video(pool, video_id, title, Some(channel_id)).await;
+    let now = published_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    sqlx::query(
+        "INSERT INTO channel_videos \
+            (channel_id, video_id, published_at, first_seen_at, last_seen_at, source) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(channel_id, video_id) DO NOTHING",
+    )
+    .bind(channel_id)
+    .bind(video_id)
+    .bind(published_at)
+    .bind(now)
+    .bind(now)
+    .bind(source)
+    .execute(pool)
+    .await
+    .expect("seed channel_videos");
 }
 
 /// Ensure `YTDLP_COOKIES_PATH` points to a writable temp location.

@@ -246,8 +246,12 @@ async fn full_subprocess_to_db_pipeline_populates_channel_videos() {
             .unwrap();
     assert_eq!(n, 2);
 
+    // Titles now live on the canonical `videos` table.
     let titles: Vec<String> = sqlx::query_scalar(
-        "SELECT title FROM channel_videos WHERE channel_id = 'UCpipe' ORDER BY video_id",
+        "SELECT v.title FROM channel_videos cv \
+           JOIN videos v ON v.video_id = cv.video_id \
+          WHERE cv.channel_id = 'UCpipe' \
+          ORDER BY cv.video_id",
     )
     .fetch_all(&pool)
     .await

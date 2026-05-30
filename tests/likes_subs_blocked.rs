@@ -21,13 +21,14 @@ use serde_json::json;
 async fn like_creates_row_without_body() {
     let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
 
-    // No body supplied — the row gets NULL title/thumbnail columns and
-    // the like still succeeds.
+    // No body supplied — the like still succeeds. `videos.title` is
+    // `NOT NULL` (migration 024), so a body-less like falls back to
+    // the `video_id` as a placeholder title; thumbnail stays NULL.
     let res = app.server.post("/api/likes/vid-liked").await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["video_id"], "vid-liked");
-    assert!(body["video_title"].is_null());
+    assert_eq!(body["video_title"], "vid-liked");
     assert!(body["video_thumbnail_url"].is_null());
     assert_eq!(body["visible"], false); // not allowlisted
 }
@@ -81,15 +82,15 @@ async fn like_is_visible_when_allowlisted() {
     let child_id = auth.account_id;
     let parent_id = app.parent_id.unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-vis', 'Title', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-vis",
+        Some("Title"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.post("/api/likes/vid-vis").await;
     assert_eq!(res.status_code(), StatusCode::OK);

@@ -60,16 +60,14 @@ async fn rss_poll_populates_feed_then_handler_serves_it() {
         .unwrap();
 
     // Allowlist the channel + register as a feed source.
-    sqlx::query(
-        "INSERT INTO allowlisted_channels \
-            (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'UCtest', 'Test Channel', ?)",
+    common::allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "UCtest",
+        Some("Test Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
     feed_cache::upsert_channel(&app.pool, "UCtest")
         .await
         .unwrap();
@@ -174,7 +172,7 @@ async fn rss_304_preserves_existing_items() {
 /// End-to-end test of the actual `feed_refresher::run` loop. Unlike
 /// the earlier tests which call `poll_channel` directly, this one
 /// spawns the production background task with a tight dispatch
-/// interval, lets it pick up a seeded `channel_sync_state` row, and
+/// interval, lets it pick up a seeded `channels` row, and
 /// asserts the row's items appear in `channel_videos` afterwards.
 ///
 /// Covers the otherwise-untested code paths:
@@ -260,7 +258,7 @@ async fn refresher_loop_polls_seeded_source_end_to_end() {
     // set, no error, rss_consecutive_errors reset.
     let (ls, err, errs): (Option<i64>, Option<String>, i64) = sqlx::query_as(
         "SELECT rss_last_success_at, rss_last_error, rss_consecutive_errors \
-           FROM channel_sync_state WHERE channel_id='UCloop'",
+           FROM channels WHERE channel_id='UCloop'",
     )
     .fetch_one(&app.pool)
     .await
@@ -401,7 +399,7 @@ async fn fallback_writes_items_when_rss_fails_and_sidecar_returns_items() {
     // so a future tick sees the per-source cap.
     let (last_success, errs, fb): (Option<i64>, i64, Option<i64>) = sqlx::query_as(
         "SELECT rss_last_success_at, rss_consecutive_errors, last_sidecar_fallback_at \
-           FROM channel_sync_state WHERE channel_id='UCfb1'",
+           FROM channels WHERE channel_id='UCfb1'",
     )
     .fetch_one(&app.pool)
     .await
@@ -426,7 +424,7 @@ async fn fallback_marks_dead_only_after_threshold_not_found() {
         .unwrap();
     // Pre-seed: 2 prior consecutive errors (threshold is 3 today).
     sqlx::query(
-        "UPDATE channel_sync_state SET rss_consecutive_errors = 2 \
+        "UPDATE channels SET rss_consecutive_errors = 2 \
           WHERE channel_id = 'UCdead'",
     )
     .execute(&app.pool)
@@ -457,7 +455,7 @@ async fn fallback_marks_dead_only_after_threshold_not_found() {
         let pool = pool.clone();
         Box::pin(async move {
             let next: i64 = sqlx::query_scalar(
-                "SELECT rss_next_poll_at FROM channel_sync_state \
+                "SELECT rss_next_poll_at FROM channels \
                  WHERE channel_id='UCdead'",
             )
             .fetch_one(&pool)
@@ -470,7 +468,7 @@ async fn fallback_marks_dead_only_after_threshold_not_found() {
     handle.abort();
 
     let (err, errs): (Option<String>, i64) = sqlx::query_as(
-        "SELECT rss_last_error, rss_consecutive_errors FROM channel_sync_state \
+        "SELECT rss_last_error, rss_consecutive_errors FROM channels \
          WHERE channel_id='UCdead'",
     )
     .fetch_one(&app.pool)
@@ -520,7 +518,7 @@ async fn fallback_first_not_found_backs_off_does_not_shelve() {
         let pool = pool.clone();
         Box::pin(async move {
             let errs: i64 = sqlx::query_scalar(
-                "SELECT rss_consecutive_errors FROM channel_sync_state \
+                "SELECT rss_consecutive_errors FROM channels \
                  WHERE channel_id='UCmaybe-dead'",
             )
             .fetch_one(&pool)
@@ -533,7 +531,7 @@ async fn fallback_first_not_found_backs_off_does_not_shelve() {
     handle.abort();
 
     let (next, errs, err): (i64, i64, Option<String>) = sqlx::query_as(
-        "SELECT rss_next_poll_at, rss_consecutive_errors, rss_last_error FROM channel_sync_state \
+        "SELECT rss_next_poll_at, rss_consecutive_errors, rss_last_error FROM channels \
          WHERE channel_id='UCmaybe-dead'",
     )
     .fetch_one(&app.pool)
@@ -588,7 +586,7 @@ async fn fallback_soft_fails_when_sidecar_5xxs() {
             let pool = pool.clone();
             Box::pin(async move {
                 let (errs, err): (i64, Option<String>) = sqlx::query_as(
-                    "SELECT rss_consecutive_errors, rss_last_error FROM channel_sync_state \
+                    "SELECT rss_consecutive_errors, rss_last_error FROM channels \
                  WHERE channel_id='UCsoft'",
                 )
                 .fetch_one(&pool)
@@ -602,7 +600,7 @@ async fn fallback_soft_fails_when_sidecar_5xxs() {
     handle.abort();
 
     let (next, err): (i64, Option<String>) = sqlx::query_as(
-        "SELECT rss_next_poll_at, rss_last_error FROM channel_sync_state \
+        "SELECT rss_next_poll_at, rss_last_error FROM channels \
          WHERE channel_id='UCsoft'",
     )
     .fetch_one(&app.pool)

@@ -50,15 +50,7 @@ async fn metadata_for_allowlisted_video() {
     let parent_id = app.parent_id.unwrap();
 
     seed_metadata(&app.pool, "vid-1", "chan-1").await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Title', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, parent_id, "vid-1", Some("Title"), None).await;
 
     let res = app.server.get("/api/videos/vid-1").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -76,15 +68,15 @@ async fn metadata_denies_blocked_video() {
 
     seed_metadata(&app.pool, "vid-bad", "chan-1").await;
     // Allowlist + then block. Block wins.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-bad', 'Title', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-bad",
+        Some("Title"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
     sqlx::query(
         "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by) \
          VALUES (?, 'vid-bad', ?)",
@@ -114,15 +106,7 @@ async fn list_captions_returns_empty_when_none() {
     let parent_id = app.parent_id.unwrap();
 
     seed_metadata(&app.pool, "vid-1", "chan-1").await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Title', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, parent_id, "vid-1", Some("Title"), None).await;
 
     let res = app.server.get("/api/videos/vid-1/captions").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -139,15 +123,7 @@ async fn stream_manifest_404_when_no_usable_formats() {
     let parent_id = app.parent_id.unwrap();
 
     seed_metadata(&app.pool, "vid-1", "chan-1").await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Title', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, parent_id, "vid-1", Some("Title"), None).await;
 
     let res = app
         .server
@@ -174,15 +150,7 @@ async fn stream_for_allowlisted_video_returns_formats() {
     let parent_id = app.parent_id.unwrap();
 
     seed_metadata(&app.pool, "vid-1", "chan-1").await;
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Title', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, parent_id, "vid-1", Some("Title"), None).await;
 
     let res = app.server.get("/api/videos/vid-1/stream").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -225,15 +193,7 @@ async fn stream_applies_max_quality_cap_for_child() {
     .await
     .unwrap();
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-2', 'Title', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    common::allowlist_video(&app.pool, child_id, parent_id, "vid-2", Some("Title"), None).await;
 
     // Set a 720p cap on the child.
     sqlx::query(

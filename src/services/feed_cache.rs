@@ -2,7 +2,7 @@
 //!
 //! Two tables back this module (see `migrations/020_channel_archive_sync.sql`):
 //!
-//! - `channel_sync_state` — one row per channel currently allowlisted
+//! - `channels` — one row per channel currently allowlisted
 //!   by any child. Carries RSS poll metadata (etag, last success, next
 //!   scheduled poll), the sidecar fallback cooldown timestamp, the
 //!   backfill loop's lease/status columns, and the channel header
@@ -21,10 +21,11 @@
 //! [`record_poll_failure`] here. The [`crate::services::channel_backfill`]
 //! task drives the monthly yt-dlp backfill.
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteExecutor, SqlitePool};
 
 use crate::error::AppResult;
 use crate::routes::feed::NewVideoItem;
+use crate::services::sql_helpers;
 
 /// Conceptual kind value emitted in API responses for any item served
 /// out of `channel_videos`. The schema no longer carries a kind column
@@ -50,7 +51,7 @@ pub struct ItemRow {
     pub published_raw: Option<String>,
 }
 
-/// One row from `channel_sync_state`, used by the refresher when
+/// One row from `channels`, used by the refresher when
 /// picking work.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DueSource {
@@ -73,7 +74,7 @@ pub struct UpsertStats {
     pub untombstoned: u64,
 }
 
-/// One row of `channel_sync_state` for the admin diagnostics endpoint.
+/// One row of `channels` for the admin diagnostics endpoint.
 /// Renamed from `FeedSourceStatus` to reflect the consolidated table.
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct ChannelSyncStateStatus {
@@ -107,7 +108,7 @@ pub struct ChannelSyncStateStatus {
 /// their next tick. Idempotent.
 pub async fn upsert_channel(pool: &SqlitePool, channel_id: &str) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO channel_sync_state \
+        "INSERT INTO channels \
              (channel_id, backfill_status, backfill_next_at, rss_next_poll_at) \
          VALUES (?, 'pending', 0, 0) \
          ON CONFLICT(channel_id) DO NOTHING",
@@ -119,40 +120,48 @@ pub async fn upsert_channel(pool: &SqlitePool, channel_id: &str) -> AppResult<()
 }
 
 /// Insert a `channel_id` row with explicit header metadata, or update
-/// any existing row's missing-metadata fields. Used by the allowlist
-/// POST handler so the channel page can render title/thumbnail/
-/// description from local state without a sidecar call on every visit.
+/// any existing row's metadata fields. Used by the allowlist POST
+/// handler so the channel page can render title/thumbnail/description
+/// from local state without a sidecar call on every visit, and by the
+/// RSS / sidecar / backfill paths so YouTube renames propagate.
 ///
-/// COALESCE on the conflict path preserves any previously-set metadata
-/// when the new add path supplied NULL/empty values; the body-data
-/// path supplies real values most of the time.
-pub async fn upsert_channel_with_metadata(
-    pool: &SqlitePool,
+/// **Rename propagation:** the conflict path lets a non-null `excluded`
+/// value win over the stored value. Callers that don't have a fresh
+/// title pass `None` (or filter empty strings to `None`); a `None`
+/// arrives as SQL `NULL` and `COALESCE(NULLIF(excluded, ''), stored)`
+/// preserves the stored value. Net effect: any caller carrying a real
+/// title overwrites the stored one (so YouTube renames land), and
+/// callers without one don't clobber what's there.
+pub async fn upsert_channel_with_metadata<'e, E>(
+    exec: E,
     channel_id: &str,
     title: Option<&str>,
     thumbnail_url: Option<&str>,
     description: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    E: SqliteExecutor<'e>,
+{
     sqlx::query(
-        "INSERT INTO channel_sync_state \
+        "INSERT INTO channels \
              (channel_id, channel_title, channel_thumbnail_url, description, \
               backfill_status, backfill_next_at, rss_next_poll_at) \
          VALUES (?, ?, ?, ?, 'pending', 0, 0) \
          ON CONFLICT(channel_id) DO UPDATE SET \
-             channel_title         = COALESCE(excluded.channel_title, channel_sync_state.channel_title), \
-             channel_thumbnail_url = COALESCE(excluded.channel_thumbnail_url, channel_sync_state.channel_thumbnail_url), \
-             description           = COALESCE(excluded.description, channel_sync_state.description)",
+             channel_title         = COALESCE(NULLIF(excluded.channel_title, ''),         channels.channel_title), \
+             channel_thumbnail_url = COALESCE(NULLIF(excluded.channel_thumbnail_url, ''), channels.channel_thumbnail_url), \
+             description           = COALESCE(NULLIF(excluded.description, ''),           channels.description)",
     )
     .bind(channel_id)
     .bind(title)
     .bind(thumbnail_url)
     .bind(description)
-    .execute(pool)
+    .execute(exec)
     .await?;
     Ok(())
 }
 
-/// Delete any `channel_sync_state` rows whose `channel_id` no longer
+/// Delete any `channels` rows whose `channel_id` no longer
 /// appears in `allowlisted_channels`. The corresponding `channel_videos`
 /// rows are cleaned up in the same transaction. Returns the number of
 /// channels removed.
@@ -165,7 +174,7 @@ pub async fn gc_orphan_sources(pool: &SqlitePool) -> AppResult<u64> {
     .execute(&mut *tx)
     .await?;
     let result = sqlx::query(
-        "DELETE FROM channel_sync_state \
+        "DELETE FROM channels \
          WHERE channel_id NOT IN (SELECT channel_id FROM allowlisted_channels)",
     )
     .execute(&mut *tx)
@@ -229,13 +238,35 @@ async fn upsert_channel_videos(
     let existing: HashMap<String, i64> = if items.is_empty() {
         HashMap::new()
     } else {
-        // SQLite's parameter limit is 999 by default; freshness
-        // batches are always far below this (RSS=15, sidecar=30).
-        // Build the IN clause dynamically so we still bind each
-        // video_id (no string interpolation). The string only ever
-        // interpolates `?` placeholders (a fixed alphabet of one
-        // character with no user input), so wrapping in
-        // `AssertSqlSafe` is sound for sqlx 0.9's `SqlSafeStr` bound.
+        // Freshness batches are small by construction (RSS≈15,
+        // sidecar≈30), well below `sql_helpers::MAX_BIND_PARAMS`. We
+        // therefore don't chunk — but we *do* defensively assert
+        // against the ceiling so a future caller bumping batch size
+        // (e.g., a sidecar full-page pull) gets a loud debug-build
+        // failure instead of a runtime "too many SQL variables".
+        // Total bind count is `items.len() + 1` (the IN-clause binds
+        // plus the leading `channel_id` bind). The comparison form
+        // `items.len() < MAX_BIND_PARAMS` is equivalent to
+        // `items.len() + 1 <= MAX_BIND_PARAMS` (integer arithmetic):
+        // both trip when `items.len() == MAX_BIND_PARAMS`, i.e. when
+        // the total bind count would be `MAX_BIND_PARAMS + 1`. We
+        // prefer the `<` form because clippy's `int_plus_one` lint
+        // bans the `+ 1 <=` shape, and the message below makes the
+        // accounting explicit so a future maintainer doesn't have
+        // to re-derive the equivalence.
+        debug_assert!(
+            items.len() < sql_helpers::MAX_BIND_PARAMS,
+            "freshness batch (items={} + 1 channel_id bind = {} total binds) exceeds MAX_BIND_PARAMS={}",
+            items.len(),
+            items.len() + 1,
+            sql_helpers::MAX_BIND_PARAMS,
+        );
+        // The IN-clause placeholders share the same `AssertSqlSafe`
+        // audit surface as `sql_helpers::row_placeholders`: only `?`
+        // and `,` ever appear, no caller-provided strings. The shape
+        // here is a flat `(?,?,?)` (not `(?),(?)`), so we build it
+        // inline rather than via `row_placeholders` which is tuned
+        // for VALUES-style INSERTs.
         let placeholders = std::iter::repeat_n("?", items.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -250,29 +281,96 @@ async fn upsert_channel_videos(
         q.fetch_all(&mut *tx).await?.into_iter().collect()
     };
 
+    // INVARIANT: the parent `channels` row exists by the time we get
+    // here. Every code path that triggers this function (allowlist
+    // POST, RSS refresher's `claim_due_sources` SELECT, channel
+    // backfill loop, GC reseed) seeds the `channels` row before
+    // queuing work for it. The FK on `channel_videos.channel_id`
+    // (added in migration 025) is the production canary — a violation
+    // surfaces as a hard INSERT failure rather than silent data drift.
+
+    // Propagate `channels.channel_title` once per RSS poll, not once
+    // per item. YouTube emits the channel title on every entry of a
+    // feed (they're all the same value), so without this hoist a
+    // 25-item feed issued 25 identical UPDATEs against the same row.
+    //
+    // **First-wins** by design: `find_map` returns on the first non-
+    // blank `channel_title` it sees. In practice every item in a
+    // single feed batch carries the *same* title (YouTube emits the
+    // channel name verbatim on every `<entry>`), so "first" and
+    // "most recent" coincide. The one edge case where they diverge
+    // is a channel rename observed mid-page-pull (two batches from
+    // YouTube with a rename event in between); in that case
+    // whichever batch the refresher polls last wins the persisted
+    // value, and first-wins-within-a-batch is correct because
+    // YouTube's batch is internally consistent.
+    //
+    // Skip-when-equal: poll-to-poll the title is almost always
+    // unchanged, and SQLite's UPDATE still produces a WAL frame even
+    // when no column value changes. `WHERE channel_title IS NOT ?`
+    // uses SQLite's null-safe `IS NOT` comparator so a stored NULL vs
+    // a non-null candidate is also caught, and the UPDATE silently
+    // affects zero rows (and writes no WAL frame) on a match. This
+    // collapses the previous SELECT-then-conditional-UPDATE into a
+    // single statement with the same I/O profile on the steady-state
+    // path and one fewer round-trip on the rename path.
+    let feed_channel_title = items
+        .iter()
+        .find_map(|i| i.channel_title.as_deref().filter(|s| !s.is_empty()));
+    if let Some(ct) = feed_channel_title {
+        // Propagate the error rather than swallowing it: the
+        // invariant above guarantees the row exists, so any failure
+        // here (deadlock, broken transaction) is a real bug we want
+        // surfaced rather than masked by a later opaque "transaction
+        // not active" error from the next statement.
+        sqlx::query(
+            "UPDATE channels SET channel_title = ? \
+              WHERE channel_id = ? AND channel_title IS NOT ?",
+        )
+        .bind(ct)
+        .bind(channel_id)
+        .bind(ct)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     for item in items {
+        // Upsert the canonical `videos` row first. `channel_id` /
+        // thumbnail are refreshed via NULLIF inside the helper so the
+        // RSS-supplied data overrides earlier sightings when present.
+        // Filter empty strings to None to uphold the
+        // `models::video::upsert` caller contract (see the
+        // "INSERT-side NULLIF" comment in src/models/video.rs). The
+        // INSERT path doesn't wrap binds in NULLIF, so a `Some("")`
+        // would persist an empty thumbnail on the first sighting of a
+        // new video — harmless (UI COALESCEs back to blank) but
+        // contract-violating.
+        crate::models::video::upsert(
+            &mut *tx,
+            &item.video_id,
+            Some(item.title.as_str()).filter(|s| !s.is_empty()),
+            item.channel_id.as_deref().or(Some(channel_id)),
+            None,
+            item.thumbnail_url.as_deref().filter(|s| !s.is_empty()),
+        )
+        .await?;
+
         sqlx::query(
             "INSERT INTO channel_videos \
-                 (channel_id, video_id, title, channel_title, published_at, published_raw, \
-                  thumbnail_url, first_seen_at, last_seen_at, source, is_deleted) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, 0) \
+                 (channel_id, video_id, published_at, published_raw, \
+                  first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 0) \
              ON CONFLICT(channel_id, video_id) DO UPDATE SET \
-                 title          = excluded.title, \
-                 channel_title  = COALESCE(excluded.channel_title, channel_videos.channel_title), \
-                 published_at   = COALESCE(channel_videos.published_at, excluded.published_at), \
-                 published_raw  = COALESCE(channel_videos.published_raw, excluded.published_raw), \
-                 thumbnail_url  = COALESCE(excluded.thumbnail_url, channel_videos.thumbnail_url), \
-                 last_seen_at   = excluded.last_seen_at, \
-                 source         = excluded.source, \
-                 is_deleted     = 0",
+                 published_at  = COALESCE(channel_videos.published_at, excluded.published_at), \
+                 published_raw = COALESCE(channel_videos.published_raw, excluded.published_raw), \
+                 last_seen_at  = excluded.last_seen_at, \
+                 source        = excluded.source, \
+                 is_deleted    = 0",
         )
         .bind(channel_id)
         .bind(&item.video_id)
-        .bind(&item.title)
-        .bind(&item.channel_title)
         .bind(item.published_at)
         .bind(&item.published_raw)
-        .bind(&item.thumbnail_url)
         .bind(now)
         .bind(source)
         .execute(&mut *tx)
@@ -315,8 +413,8 @@ pub async fn record_poll_success(pool: &SqlitePool, args: PollSuccess<'_>) -> Ap
         now,
     } = args;
     sqlx::query(
-        "UPDATE channel_sync_state SET \
-             channel_title          = COALESCE(?, channel_title), \
+        "UPDATE channels SET \
+             channel_title          = COALESCE(NULLIF(?, ''), channel_title), \
              rss_etag               = ?, \
              rss_last_modified      = ?, \
              rss_last_polled_at     = ?, \
@@ -352,7 +450,7 @@ pub async fn record_poll_deferred(
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              rss_last_polled_at = ?, \
              rss_last_error     = ?, \
              rss_next_poll_at   = ? \
@@ -379,7 +477,7 @@ pub async fn record_poll_skipped(
     next_poll_at: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              rss_last_error         = ?, \
              rss_consecutive_errors = 0, \
              rss_next_poll_at       = ? \
@@ -404,7 +502,7 @@ pub async fn record_poll_failure(
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              rss_last_polled_at     = ?, \
              rss_last_error         = ?, \
              rss_consecutive_errors = rss_consecutive_errors + 1, \
@@ -433,7 +531,7 @@ pub async fn record_source_dead(
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE channel_sync_state SET \
+        "UPDATE channels SET \
              rss_last_polled_at     = ?, \
              rss_last_error         = ?, \
              rss_consecutive_errors = 0, \
@@ -459,7 +557,7 @@ pub async fn record_sidecar_fallback_dispatched(
     now: i64,
 ) -> AppResult<()> {
     sqlx::query(
-        "UPDATE channel_sync_state SET last_sidecar_fallback_at = ? \
+        "UPDATE channels SET last_sidecar_fallback_at = ? \
          WHERE channel_id = ?",
     )
     .bind(now)
@@ -474,7 +572,7 @@ pub async fn record_sidecar_fallback_dispatched(
 pub async fn sidecar_fallbacks_in_last_hour(pool: &SqlitePool, now: i64) -> AppResult<i64> {
     let cutoff = now - 3600;
     let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channel_sync_state \
+        "SELECT COUNT(*) FROM channels \
          WHERE last_sidecar_fallback_at IS NOT NULL \
            AND last_sidecar_fallback_at >= ?",
     )
@@ -496,9 +594,9 @@ pub async fn claim_due_sources(
 ) -> AppResult<Vec<DueSource>> {
     let leased_until = now.saturating_add(lease_secs);
     let rows = sqlx::query_as::<_, DueSource>(
-        "UPDATE channel_sync_state SET rss_next_poll_at = ? \
+        "UPDATE channels SET rss_next_poll_at = ? \
           WHERE channel_id IN ( \
-              SELECT channel_id FROM channel_sync_state \
+              SELECT channel_id FROM channels \
                WHERE rss_next_poll_at <= ? \
                ORDER BY rss_next_poll_at ASC \
                LIMIT ? \
@@ -542,14 +640,16 @@ pub async fn feed_for_child(
              SELECT channel_id FROM allowlisted_channels WHERE child_account_id = ?1 \
          ), \
          candidates AS ( \
-             SELECT cv.video_id, cv.title, cv.channel_id, cv.channel_title, \
-                    cv.thumbnail_url, cv.published_raw, cv.published_at, \
+             SELECT cv.video_id, v.title, cv.channel_id, ch.channel_title, \
+                    v.thumbnail_url, cv.published_raw, cv.published_at, \
                     cv.last_seen_at, \
                     ROW_NUMBER() OVER ( \
                         PARTITION BY cv.video_id \
                         ORDER BY COALESCE(cv.published_at, cv.last_seen_at) DESC, cv.last_seen_at DESC \
                     ) AS rn \
                FROM channel_videos cv \
+               JOIN videos v ON v.video_id = cv.video_id \
+               LEFT JOIN channels ch ON ch.channel_id = cv.channel_id \
                JOIN allowed a ON a.channel_id = cv.channel_id \
               WHERE cv.is_deleted = 0 \
                 AND NOT EXISTS ( \
@@ -591,7 +691,7 @@ pub async fn feed_for_child(
 /// in a single round-trip.
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct FeedRefresherCapacityCounts {
-    /// Total rows in `channel_sync_state`.
+    /// Total rows in `channels`.
     pub total_sources: i64,
     /// Sources whose `rss_next_poll_at <= now` *right now*.
     pub queue_depth: i64,
@@ -602,7 +702,7 @@ pub struct FeedRefresherCapacityCounts {
 }
 
 /// Compute the per-table capacity counts. All four counts come from
-/// a single query plan against `channel_sync_state`.
+/// a single query plan against `channels`.
 pub async fn capacity_counts(
     pool: &SqlitePool,
     now: i64,
@@ -617,7 +717,7 @@ pub async fn capacity_counts(
                  AS polls_last_hour, \
              COALESCE(SUM(CASE WHEN last_sidecar_fallback_at >= ? THEN 1 ELSE 0 END), 0) \
                  AS sidecar_fallbacks_last_hour \
-           FROM channel_sync_state",
+           FROM channels",
     )
     .bind(now)
     .bind(hour_ago)
@@ -645,7 +745,7 @@ pub async fn list_source_status(pool: &SqlitePool) -> AppResult<Vec<ChannelSyncS
                 s.backfill_status, s.backfill_last_completed_at, \
                 s.backfill_last_error, s.backfill_consecutive_errors, \
                 s.backfill_next_at \
-           FROM channel_sync_state s \
+           FROM channels s \
            LEFT JOIN ( \
                 SELECT channel_id, \
                        SUM(CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END) AS item_count, \
@@ -695,10 +795,13 @@ mod tests {
     }
 
     async fn allow_channel(pool: &SqlitePool, child: i64, channel_id: &str) {
+        // Seed the parent `channels` row first (FK).
+        upsert_channel_with_metadata(pool, channel_id, Some("X"), None, None)
+            .await
+            .unwrap();
         sqlx::query(
-            "INSERT INTO allowlisted_channels \
-                (child_account_id, channel_id, channel_title, added_by) \
-             VALUES (?, ?, 'X', ?)",
+            "INSERT INTO allowlisted_channels (child_account_id, channel_id, added_by) \
+             VALUES (?, ?, ?)",
         )
         .bind(child)
         .bind(channel_id)
@@ -725,7 +828,7 @@ mod tests {
         let pool = setup_db().await;
         upsert_channel(&pool, "UC1").await.unwrap();
         upsert_channel(&pool, "UC1").await.unwrap();
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channel_sync_state")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -772,10 +875,13 @@ mod tests {
         let pool = setup_db().await;
         upsert_channel(&pool, "UC1").await.unwrap();
         // Seed a tombstoned row.
+        crate::models::video::upsert_stub(&pool, "vTomb")
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO channel_videos \
-                 (channel_id, video_id, title, first_seen_at, last_seen_at, source, is_deleted) \
-             VALUES ('UC1', 'vTomb', 'title', 100, 100, 'backfill', 1)",
+                 (channel_id, video_id, first_seen_at, last_seen_at, source, is_deleted) \
+             VALUES ('UC1', 'vTomb', 100, 100, 'backfill', 1)",
         )
         .execute(&pool)
         .await
@@ -948,7 +1054,7 @@ mod tests {
             .await
             .unwrap();
         let errs: i64 = sqlx::query_scalar(
-            "SELECT rss_consecutive_errors FROM channel_sync_state WHERE channel_id='UC1'",
+            "SELECT rss_consecutive_errors FROM channels WHERE channel_id='UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -971,7 +1077,7 @@ mod tests {
 
         let (errs, etag, title): (i64, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT rss_consecutive_errors, rss_etag, channel_title \
-               FROM channel_sync_state WHERE channel_id='UC1'",
+               FROM channels WHERE channel_id='UC1'",
         )
         .fetch_one(&pool)
         .await
@@ -986,7 +1092,7 @@ mod tests {
         let pool = setup_db().await;
         upsert_channel(&pool, "UCkeep").await.unwrap();
         sqlx::query(
-            "UPDATE channel_sync_state SET rss_consecutive_errors = 2 \
+            "UPDATE channels SET rss_consecutive_errors = 2 \
               WHERE channel_id = 'UCkeep'",
         )
         .execute(&pool)
@@ -1000,7 +1106,7 @@ mod tests {
         let (errs, last_polled, last_err, next): (i64, Option<i64>, Option<String>, i64) =
             sqlx::query_as(
                 "SELECT rss_consecutive_errors, rss_last_polled_at, rss_last_error, rss_next_poll_at \
-                   FROM channel_sync_state WHERE channel_id='UCkeep'",
+                   FROM channels WHERE channel_id='UCkeep'",
             )
             .fetch_one(&pool)
             .await
@@ -1028,7 +1134,7 @@ mod tests {
 
         let (errs, next, err): (i64, i64, Option<String>) = sqlx::query_as(
             "SELECT rss_consecutive_errors, rss_next_poll_at, rss_last_error \
-               FROM channel_sync_state WHERE channel_id='UCdead'",
+               FROM channels WHERE channel_id='UCdead'",
         )
         .fetch_one(&pool)
         .await
@@ -1046,7 +1152,7 @@ mod tests {
             .await
             .unwrap();
         let ts: Option<i64> = sqlx::query_scalar(
-            "SELECT last_sidecar_fallback_at FROM channel_sync_state \
+            "SELECT last_sidecar_fallback_at FROM channels \
               WHERE channel_id='UCfb'",
         )
         .fetch_one(&pool)
@@ -1070,7 +1176,7 @@ mod tests {
         }
         let now: i64 = 100_000;
         sqlx::query(
-            "UPDATE channel_sync_state SET rss_next_poll_at = ?, rss_last_polled_at = ? \
+            "UPDATE channels SET rss_next_poll_at = ?, rss_last_polled_at = ? \
               WHERE channel_id = 'UCq1'",
         )
         .bind(now - 60)
@@ -1079,7 +1185,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE channel_sync_state SET rss_next_poll_at = ?, rss_last_polled_at = ? \
+            "UPDATE channels SET rss_next_poll_at = ?, rss_last_polled_at = ? \
               WHERE channel_id = 'UCq2'",
         )
         .bind(now + 1800)
@@ -1087,7 +1193,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE channel_sync_state SET rss_next_poll_at = ? WHERE channel_id = 'UCq3'")
+        sqlx::query("UPDATE channels SET rss_next_poll_at = ? WHERE channel_id = 'UCq3'")
             .bind(now + 3600)
             .execute(&pool)
             .await

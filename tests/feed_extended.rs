@@ -4,7 +4,10 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::boot_with_parent_and_child;
+use common::{
+    allowlist_channel, allowlist_video, boot_with_parent_and_child, seed_channel_video,
+    seed_watch_history,
+};
 use hometube::models::account::AccountType;
 
 // ---------------------------------------------------------------------------
@@ -18,37 +21,45 @@ async fn continue_watching_returns_seeded_history_with_access_check() {
     let parent_id = app.parent_id.unwrap();
 
     // Seed watch history.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-ok', 'Allowed', NULL, 'Ch', 300, 120, 1000)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-ok",
+        Some("Allowed"),
+        None,
+        Some("Ch"),
+        None,
+        Some(300),
+        120,
+        Some(1000),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Allowlist the video.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-ok', 'Allowed', ?)",
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-ok",
+        Some("Allowed"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Seed a non-allowlisted video in history.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-noallow', 'Hidden', NULL, 'Ch2', 200, 50, 999)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-noallow",
+        Some("Hidden"),
+        None,
+        Some("Ch2"),
+        None,
+        Some(200),
+        50,
+        Some(999),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/feed/continue-watching").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -83,29 +94,20 @@ async fn continue_watching_drops_effectively_finished_videos() {
         ("vid-no-dur", None, 30i64, 1000i64),
     ];
     for (video_id, duration, progress, ts) in seeds {
-        sqlx::query(
-            "INSERT INTO watch_history (child_account_id, video_id, video_title, \
-             video_thumbnail_url, channel_title, duration_seconds, progress_seconds, \
-             last_watched_at) VALUES (?, ?, 'T', NULL, 'Ch', ?, ?, ?)",
+        seed_watch_history(
+            &app.pool,
+            child_id,
+            video_id,
+            Some("T"),
+            None,
+            Some("Ch"),
+            None,
+            duration,
+            progress,
+            Some(ts),
         )
-        .bind(child_id)
-        .bind(video_id)
-        .bind(duration)
-        .bind(progress)
-        .bind(ts)
-        .execute(&app.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-             VALUES (?, ?, 'T', ?)",
-        )
-        .bind(child_id)
-        .bind(video_id)
-        .bind(parent_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+        .await;
+        allowlist_video(&app.pool, child_id, parent_id, video_id, Some("T"), None).await;
     }
 
     let res = app.server.get("/api/feed/continue-watching").await;
@@ -150,54 +152,55 @@ async fn continue_watching_includes_channel_allowlisted_videos() {
     let parent_id = app.parent_id.unwrap();
 
     // Allowlist a channel, NOT the individual video.
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'ch-allow', 'My Channel', ?)",
+    allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "ch-allow",
+        Some("My Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
-    // (a) New-style row: channel_id stored directly on watch_history.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, channel_id, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-new', 'Direct', NULL, 'My Channel', 'ch-allow', 600, 120, 1002)",
+    // (a) New-style row: video carries channel_id directly via `videos`.
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-new",
+        Some("Direct"),
+        Some("ch-allow"),
+        Some("My Channel"),
+        None,
+        Some(600),
+        120,
+        Some(1002),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
-    // (b) Legacy row: channel_id NULL on watch_history but resolvable
-    // via channel_videos (the refresher cache).
-    sqlx::query(
-        "INSERT INTO channel_sync_state (channel_id, channel_title) \
-         VALUES ('ch-allow', 'My Channel')",
+    // (b) Legacy row: `videos.channel_id` NULL on the watch_history
+    // entry but resolvable via `channel_videos` (the refresher cache).
+    seed_channel_video(
+        &app.pool,
+        "ch-allow",
+        Some("My Channel"),
+        "vid-legacy",
+        Some("Legacy"),
+        Some(1),
+        "rss",
     )
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO channel_videos \
-            (channel_id, video_id, title, channel_title, thumbnail_url, published_at, \
-             first_seen_at, last_seen_at, source) \
-         VALUES ('ch-allow', 'vid-legacy', 'Legacy', 'My Channel', NULL, 1, 1, 1, 'rss')",
+    .await;
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-legacy",
+        Some("Legacy"),
+        None,
+        Some("My Channel"),
+        None,
+        Some(600),
+        90,
+        Some(1001),
     )
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-legacy', 'Legacy', NULL, 'My Channel', 600, 90, 1001)",
-    )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/feed/continue-watching").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -215,6 +218,108 @@ async fn continue_watching_includes_channel_allowlisted_videos() {
     assert!(
         ids.contains(&"vid-legacy"),
         "legacy row with NULL channel_id must resolve via channel_videos, got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn continue_watching_lazy_backfill_persists_channel_id() {
+    // Regression for the chunked CTE backfill in
+    // `backfill_video_channel_ids`. The earlier `UPDATE … FROM
+    // (VALUES …) AS src(vid, cid) …` form was rejected by SQLite at
+    // parse time (no column-list aliases on VALUES table aliases), so
+    // the helper silently no-op'd on every call — `tracing::debug!`
+    // swallowed the failure and the live response was already
+    // populated from the in-memory map. This test re-reads
+    // `videos.channel_id` after a feed call to confirm the write-back
+    // actually happened, which is the invariant the docstring's
+    // "each row pays this lookup at most once" claim depends on.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "ch-backfill",
+        Some("Backfill Ch"),
+    )
+    .await;
+
+    // Set up the legacy-stub scenario: channel_videos has the
+    // resolved channel_id, videos.channel_id is NULL. This is the
+    // shape only the lazy backfill can repair.
+    seed_channel_video(
+        &app.pool,
+        "ch-backfill",
+        Some("Backfill Ch"),
+        "vid-bf",
+        Some("Backfill"),
+        Some(1),
+        "rss",
+    )
+    .await;
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-bf",
+        Some("Backfill"),
+        None,
+        Some("Backfill Ch"),
+        None,
+        Some(600),
+        90,
+        Some(1001),
+    )
+    .await;
+
+    // Force videos.channel_id back to NULL: both seed helpers above
+    // funnel through `models::video::upsert`, which (correctly)
+    // populates channel_id from any source that supplies it. To
+    // simulate the legacy-stub shape we need to roll the column
+    // back to NULL after the seeds so the lazy backfill has
+    // something to repair. This SQL touch bypasses the production
+    // upsert because the production helper has no path that NULLs a
+    // populated channel_id — that's the schema invariant the lazy
+    // backfill exists to enforce in the opposite direction.
+    sqlx::query("UPDATE videos SET channel_id = NULL WHERE video_id = ?")
+        .bind("vid-bf")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    // Pre-condition: confirm the stub really is NULL before the call.
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT channel_id FROM videos WHERE video_id = ?")
+            .bind("vid-bf")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert!(
+        before.is_none(),
+        "test fixture must start with NULL channel_id, got {before:?}"
+    );
+
+    // Trigger the lazy backfill via the continue-watching route.
+    let res = app.server.get("/api/feed/continue-watching").await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+
+    // Post-condition: the chunked CTE UPDATE must have populated
+    // videos.channel_id so the next call short-circuits without
+    // re-reading channel_videos. If this assert fires, the SQL is
+    // probably wrong again (parse error swallowed by the warn-once
+    // path) — check the `tracing::warn!` log emitted by
+    // `backfill_video_channel_ids`.
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT channel_id FROM videos WHERE video_id = ?")
+            .bind("vid-bf")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after.as_deref(),
+        Some("ch-backfill"),
+        "lazy backfill must persist channel_id to videos, got {after:?}"
     );
 }
 
@@ -238,36 +343,35 @@ async fn continue_watching_excludes_completed_videos() {
     let parent_id = app.parent_id.unwrap();
 
     // Completed.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-done', 'Done', NULL, 'Ch', 100, 100, 3000)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-done",
+        Some("Done"),
+        None,
+        Some("Ch"),
+        None,
+        Some(100),
+        100,
+        Some(3000),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
     // In-progress.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-half', 'Half', NULL, 'Ch', 100, 30, 3001)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-half",
+        Some("Half"),
+        None,
+        Some("Ch"),
+        None,
+        Some(100),
+        30,
+        Some(3001),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
     for vid in ["vid-done", "vid-half"] {
-        sqlx::query(
-            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-             VALUES (?, ?, 'T', ?)",
-        )
-        .bind(child_id)
-        .bind(vid)
-        .bind(parent_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+        allowlist_video(&app.pool, child_id, parent_id, vid, Some("T"), None).await;
     }
 
     let body: serde_json::Value = app.server.get("/api/feed/continue-watching").await.json();
@@ -291,50 +395,53 @@ async fn watch_again_returns_only_completed_videos() {
     let parent_id = app.parent_id.unwrap();
 
     // Completed video (100% watched).
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-done', 'Done', NULL, 'Ch', 300, 300, 2000)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-done",
+        Some("Done"),
+        None,
+        Some("Ch"),
+        None,
+        Some(300),
+        300,
+        Some(2000),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // In-progress (50%). Should NOT appear.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-half', 'Half', NULL, 'Ch', 300, 150, 2001)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-half",
+        Some("Half"),
+        None,
+        Some("Ch"),
+        None,
+        Some(300),
+        150,
+        Some(2001),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Older completed (95% — at the ratio threshold).
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-old', 'Old', NULL, 'Ch', 100, 95, 1500)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-old",
+        Some("Old"),
+        None,
+        Some("Ch"),
+        None,
+        Some(100),
+        95,
+        Some(1500),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Allowlist all three so access control isn't the filter.
     for vid in ["vid-done", "vid-half", "vid-old"] {
-        sqlx::query(
-            "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-             VALUES (?, ?, 'T', ?)",
-        )
-        .bind(child_id)
-        .bind(vid)
-        .bind(parent_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+        allowlist_video(&app.pool, child_id, parent_id, vid, Some("T"), None).await;
     }
 
     let res = app.server.get("/api/feed/watch-again").await;
@@ -356,15 +463,19 @@ async fn watch_again_excludes_access_revoked_videos() {
     let child_id = auth.account_id;
 
     // Completed but no allowlist entry — access denied.
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, video_thumbnail_url, \
-         channel_title, duration_seconds, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-revoked', 'Revoked', NULL, 'Ch', 100, 100, 1)",
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-revoked",
+        Some("Revoked"),
+        None,
+        Some("Ch"),
+        None,
+        Some(100),
+        100,
+        Some(1),
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/feed/watch-again").await;
     assert_eq!(res.status_code(), StatusCode::OK);

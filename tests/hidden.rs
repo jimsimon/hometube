@@ -125,15 +125,15 @@ async fn can_child_view_denies_hidden_even_if_allowlisted() {
     let parent_id = app.parent_id.unwrap();
 
     // Allowlist the video first.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-allow', 'Title', ?)",
+    common::allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-allow",
+        Some("Title"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Pre-hide check: visible.
     assert!(can_child_view(&app.pool, child_id, "vid-allow", None)

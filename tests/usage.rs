@@ -47,10 +47,13 @@ async fn progress_updates_watch_history_without_touching_usage_log() {
         .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 
-    // watch_history populated with the exact position.
+    // watch_history populated with the exact position; duration_seconds
+    // now lives on the canonical `videos` row.
     let row: (i64, i64) = sqlx::query_as(
-        "SELECT progress_seconds, duration_seconds \
-         FROM watch_history WHERE child_account_id = ? AND video_id = 'vid-pos'",
+        "SELECT wh.progress_seconds, v.duration_seconds \
+         FROM watch_history wh \
+         JOIN videos v ON v.video_id = wh.video_id \
+         WHERE wh.child_account_id = ? AND wh.video_id = 'vid-pos'",
     )
     .bind(child_id)
     .fetch_one(&app.pool)

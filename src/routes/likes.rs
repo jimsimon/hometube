@@ -86,18 +86,25 @@ type LikeRowTuple = (
 // considered (`video_likes` doesn't track playlist membership) — same
 // caveat documented on [`LikeRow::visible`].
 
+// Metadata is hydrated from the shared `videos` + `channels` tables
+// (migrations 024 + 025). The visibility CASE uses `v.channel_id`
+// — which the upserts on POST keep current — instead of a denormalised
+// per-like column.
 const LIKE_LIST_SQL: &str = concat!(
-    "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-            l.channel_id, l.channel_title, l.duration_seconds, l.liked_at, \
+    "SELECT l.id, l.video_id, v.title AS video_title, \
+            v.thumbnail_url AS video_thumbnail_url, \
+            v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
+     JOIN videos v ON v.video_id = l.video_id \
+     LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
        ON c.child_account_id = l.child_account_id \
-      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+      AND v.channel_id IS NOT NULL AND c.channel_id = v.channel_id \
      LEFT JOIN blocked_videos b \
        ON b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
      LEFT JOIN hidden_videos h \
@@ -107,17 +114,20 @@ const LIKE_LIST_SQL: &str = concat!(
 );
 
 const LIKE_ONE_SQL: &str = concat!(
-    "SELECT l.id, l.video_id, l.video_title, l.video_thumbnail_url, \
-            l.channel_id, l.channel_title, l.duration_seconds, l.liked_at, \
+    "SELECT l.id, l.video_id, v.title AS video_title, \
+            v.thumbnail_url AS video_thumbnail_url, \
+            v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
+     JOIN videos v ON v.video_id = l.video_id \
+     LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
        ON c.child_account_id = l.child_account_id \
-      AND l.channel_id IS NOT NULL AND c.channel_id = l.channel_id \
+      AND v.channel_id IS NOT NULL AND c.channel_id = v.channel_id \
      LEFT JOIN blocked_videos b \
        ON b.child_account_id = l.child_account_id AND b.video_id = l.video_id \
      LEFT JOIN hidden_videos h \
@@ -198,29 +208,41 @@ pub async fn like(
     // subsequent re-like with the real value isn't blocked by COALESCE.
     let duration_seconds = duration_seconds.filter(|d| *d > 0);
 
+    // Seed `videos` (and `channels` when the client supplied channel
+    // metadata) so the JOINs in `LIKE_ONE_SQL` resolve. Empty strings
+    // are treated as missing — upsert keeps any previously-stored
+    // values via its NULLIF guards.
+    let mut tx = state.db.begin().await?;
+    if let Some(cid) = channel_id.as_deref() {
+        crate::services::feed_cache::upsert_channel_with_metadata(
+            &mut *tx,
+            cid,
+            channel_title.as_deref(),
+            None,
+            None,
+        )
+        .await?;
+    }
+    crate::models::video::upsert(
+        &mut *tx,
+        &video_id,
+        title.as_deref(),
+        channel_id.as_deref(),
+        duration_seconds,
+        thumb.as_deref(),
+    )
+    .await?;
     sqlx::query(
-        "INSERT INTO video_likes \
-            (child_account_id, video_id, video_title, video_thumbnail_url, \
-             channel_id, channel_title, duration_seconds, is_deleted) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0) \
+        "INSERT INTO video_likes (child_account_id, video_id, is_deleted) \
+         VALUES (?, ?, 0) \
          ON CONFLICT(child_account_id, video_id) DO UPDATE SET \
-            video_title = COALESCE(excluded.video_title, video_likes.video_title), \
-            video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, video_likes.video_thumbnail_url), \
-            channel_id = COALESCE(excluded.channel_id, video_likes.channel_id), \
-            channel_title = COALESCE(excluded.channel_title, video_likes.channel_title), \
-            duration_seconds = COALESCE(excluded.duration_seconds, video_likes.duration_seconds), \
-            is_deleted = 0, \
-            updated_at = unixepoch()",
+            is_deleted = 0, updated_at = unixepoch()",
     )
     .bind(current.id)
     .bind(&video_id)
-    .bind(&title)
-    .bind(&thumb)
-    .bind(&channel_id)
-    .bind(&channel_title)
-    .bind(duration_seconds)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     let row: LikeRowTuple = sqlx::query_as(LIKE_ONE_SQL)
         .bind(current.id)

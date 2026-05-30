@@ -111,6 +111,29 @@ async fn put_known_preset_updates_schedule() {
 }
 
 #[tokio::test]
+async fn put_empty_body_is_400() {
+    // A PUT with neither `enabled` nor `schedule_preset` is rejected
+    // up front. Without the gate the route would round-trip an empty
+    // transaction and return the current row, which is
+    // indistinguishable from a successful update from the caller's
+    // perspective — a "did you mean anything?" gate makes the contract
+    // explicit. We assert the negative path on a real seeded job id
+    // (not an arbitrary number) so the failure mode can't be confused
+    // with a "row not found" 404.
+    let app = boot_with_cron_seeded().await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs LIMIT 1")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let res = app
+        .server
+        .put(&format!("/api/cron/jobs/{id}"))
+        .json(&json!({}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn put_unsupported_preset_is_400() {
     let app = boot_with_cron_seeded().await;
     let id: i64 = sqlx::query_scalar("SELECT id FROM cron_jobs WHERE name = 'ytdlp_update'")

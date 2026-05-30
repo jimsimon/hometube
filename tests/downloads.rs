@@ -17,39 +17,45 @@ async fn list_returns_seeded_rows() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
 
-    sqlx::query(
-        "INSERT INTO offline_downloads \
-            (child_account_id, video_id, video_title, quality_label, status) \
-         VALUES (?, 'vid-1', 'Hello', '720p', 'complete')",
+    common::seed_offline_download(
+        &app.pool,
+        child_id,
+        "vid11111111",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        "720p",
+        "complete",
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/downloads").await;
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
-    assert_eq!(body[0]["video_id"], "vid-1");
+    assert_eq!(body[0]["video_id"], "vid11111111");
 }
 
 #[tokio::test]
 async fn update_status_to_complete() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
-    sqlx::query(
-        "INSERT INTO offline_downloads \
-            (child_account_id, video_id, video_title, quality_label, status) \
-         VALUES (?, 'vid-1', 'Hello', '720p', 'pending')",
+    common::seed_offline_download(
+        &app.pool,
+        child_id,
+        "vid11111111",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        "720p",
+        "pending",
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app
         .server
-        .put("/api/downloads/vid-1")
+        .put("/api/downloads/vid11111111")
         .json(&json!({ "status": "complete", "quality": "720p" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
@@ -58,7 +64,7 @@ async fn update_status_to_complete() {
         "SELECT status FROM offline_downloads WHERE child_account_id = ? AND video_id = ?",
     )
     .bind(child_id)
-    .bind("vid-1")
+    .bind("vid11111111")
     .fetch_one(&app.pool)
     .await
     .unwrap();
@@ -81,7 +87,7 @@ async fn child_with_downloads_disabled_cannot_create() {
     let res = app
         .server
         .post("/api/downloads")
-        .json(&json!({ "video_id": "vid-1", "quality": "720p" }))
+        .json(&json!({ "video_id": "vid11111111", "quality": "720p" }))
         .await;
     assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
 }
@@ -90,16 +96,19 @@ async fn child_with_downloads_disabled_cannot_create() {
 async fn delete_marks_row_deleted() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
-    sqlx::query(
-        "INSERT INTO offline_downloads \
-            (child_account_id, video_id, video_title, quality_label, status) \
-         VALUES (?, 'vid-1', 'Hello', '720p', 'complete')",
+    common::seed_offline_download(
+        &app.pool,
+        child_id,
+        "vid11111111",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        "720p",
+        "complete",
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
-    let res = app.server.delete("/api/downloads/vid-1").await;
+    let res = app.server.delete("/api/downloads/vid11111111").await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
 }

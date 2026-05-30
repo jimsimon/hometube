@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{boot, insert_account};
+use common::{allowlist_channel, allowlist_video, boot, insert_account, seed_video};
 use hometube::models::account::AccountType;
 use hometube::services::access::can_child_view;
 
@@ -21,15 +21,15 @@ async fn allowlisted_video_is_allowed() {
     let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
     let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-allow', 'allow', ?)",
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-allow",
+        Some("allow"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let allowed = can_child_view(&app.pool, child_id, "vid-allow", None)
         .await
@@ -43,15 +43,7 @@ async fn allowlisted_channel_is_allowed() {
     let child_id = insert_account(&app.pool, "C", AccountType::Child).await;
     let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'chan-1', 'C1', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    allowlist_channel(&app.pool, child_id, parent_id, "chan-1", Some("C1")).await;
 
     let allowed = can_child_view(&app.pool, child_id, "vid-x", Some("chan-1"))
         .await
@@ -66,26 +58,20 @@ async fn blocked_overrides_allowlist() {
     let parent_id = insert_account(&app.pool, "P", AccountType::Parent).await;
 
     // Allowlisted via direct video AND channel...
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-block', 't', ?)",
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "vid-block",
+        Some("t"),
+        Some("chan-1"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'chan-1', 'C', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
+    allowlist_channel(&app.pool, child_id, parent_id, "chan-1", Some("C")).await;
 
-    // ...but explicitly blocked.
+    // ...but explicitly blocked. `videos` row already seeded above; just
+    // add the per-child block.
+    seed_video(&app.pool, "vid-block", Some("t"), Some("chan-1")).await;
     sqlx::query(
         "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by) \
          VALUES (?, 'vid-block', ?)",

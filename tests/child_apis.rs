@@ -9,7 +9,10 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::boot_with_parent_and_child;
+use common::{
+    allowlist_channel, allowlist_video, boot_with_parent_and_child, seed_blocked, seed_like,
+    seed_watch_history,
+};
 use hometube::models::account::AccountType;
 use serde_json::json;
 
@@ -20,23 +23,28 @@ async fn feed_continue_watching_returns_seeded_history() {
 
     // Need an allowlist entry, since `continue_watching` filters by
     // `can_child_view`.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'Hello', ?)",
+    allowlist_video(
+        &app.pool,
+        child_id,
+        app.parent_id.unwrap(),
+        "vid-1",
+        Some("Hello"),
+        None,
     )
-    .bind(child_id)
-    .bind(app.parent_id.unwrap())
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, progress_seconds, last_watched_at) \
-         VALUES (?, 'vid-1', 'Hello', 60, unixepoch())",
+    .await;
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-1",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        None,
+        60,
+        None,
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/feed/continue-watching").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -55,32 +63,21 @@ async fn feed_continue_watching_filters_blocked_videos() {
     let parent_id = app.parent_id.unwrap();
 
     // Allowlist + watch-history a video, then block it.
-    sqlx::query(
-        "INSERT INTO allowlisted_videos (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'vid-1', 'T', ?)",
+    allowlist_video(&app.pool, child_id, parent_id, "vid-1", Some("T"), None).await;
+    seed_watch_history(
+        &app.pool,
+        child_id,
+        "vid-1",
+        Some("T"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO watch_history (child_account_id, video_id, video_title, last_watched_at) \
-         VALUES (?, 'vid-1', 'T', unixepoch())",
-    )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO blocked_videos (child_account_id, video_id, blocked_by) \
-         VALUES (?, 'vid-1', ?)",
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
+    seed_blocked(&app.pool, child_id, parent_id, "vid-1", Some("T")).await;
 
     let res = app.server.get("/api/feed/continue-watching").await;
     let body: serde_json::Value = res.json();
@@ -164,16 +161,14 @@ async fn subscriptions_list_marks_inbound_youtube_invisible_until_allowlisted() 
     .execute(&app.pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO allowlisted_channels \
-            (child_account_id, channel_id, channel_title, added_by) \
-         VALUES (?, 'app-allowed', 'Good Channel', ?)",
+    allowlist_channel(
+        &app.pool,
+        child_id,
+        parent_id,
+        "app-allowed",
+        Some("Good Channel"),
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/subscriptions").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -233,14 +228,17 @@ async fn subscriptions_unsubscribe_404_when_not_found() {
 async fn unlike_seeded_row() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
-    sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
-         VALUES (?, 'vid-1', 'Hello')",
+    seed_like(
+        &app.pool,
+        child_id,
+        "vid-1",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        None,
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.delete("/api/likes/vid-1").await;
     assert_eq!(res.status_code(), StatusCode::NO_CONTENT);
@@ -257,14 +255,17 @@ async fn unlike_404_for_missing() {
 async fn likes_list_returns_seeded_rows() {
     let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
     let child_id = auth.account_id;
-    sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
-         VALUES (?, 'vid-1', 'Hello')",
+    seed_like(
+        &app.pool,
+        child_id,
+        "vid-1",
+        Some("Hello"),
+        None,
+        None,
+        None,
+        None,
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/likes").await;
     assert_eq!(res.status_code(), StatusCode::OK);
@@ -279,34 +280,39 @@ async fn likes_list_marks_inbound_youtube_likes_invisible_until_allowlisted() {
     let parent_id = app.parent_id.unwrap();
 
     // Like — not allowlisted.
-    sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
-         VALUES (?, 'yt-hidden', 'Hidden')",
+    seed_like(
+        &app.pool,
+        child_id,
+        "yt-hidden",
+        Some("Hidden"),
+        None,
+        None,
+        None,
+        None,
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     // Like that we'll also allowlist as a video.
-    sqlx::query(
-        "INSERT INTO video_likes (child_account_id, video_id, video_title) \
-         VALUES (?, 'app-allowed', 'Allowed')",
+    seed_like(
+        &app.pool,
+        child_id,
+        "app-allowed",
+        Some("Allowed"),
+        None,
+        None,
+        None,
+        None,
     )
-    .bind(child_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO allowlisted_videos \
-            (child_account_id, video_id, video_title, added_by) \
-         VALUES (?, 'app-allowed', 'Allowed', ?)",
+    .await;
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "app-allowed",
+        Some("Allowed"),
+        None,
     )
-    .bind(child_id)
-    .bind(parent_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    .await;
 
     let res = app.server.get("/api/likes").await;
     assert_eq!(res.status_code(), StatusCode::OK);
