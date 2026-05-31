@@ -91,6 +91,7 @@ import {
   saveVideoToOpfs,
 } from "../services/offline.js";
 import {
+  formatRelativeDate,
   normalizeThumbnailUrl,
   type CaptionTrack,
   type ChildSettings,
@@ -457,6 +458,11 @@ export class VideoPlayer extends LitElement {
       }
       .meta .channel {
         color: var(--wa-color-text-quiet);
+      }
+      .meta .published {
+        color: var(--wa-color-text-quiet);
+        font-size: 0.9rem;
+        margin-top: 0.15rem;
       }
       .chrome {
         display: flex;
@@ -1407,6 +1413,11 @@ export class VideoPlayer extends LitElement {
             <h1>${this.metadata.title ?? "Untitled"}</h1>
             ${this.metadata.channel_title
               ? html`<div class="channel">${this.metadata.channel_title}</div>`
+              : null}
+            ${formatRelativeDate(this.metadata.published_at)
+              ? html`<div class="published">
+                  ${formatRelativeDate(this.metadata.published_at)}
+                </div>`
               : null}
             <div class="chrome">
               ${this.preview

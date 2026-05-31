@@ -25,6 +25,7 @@ interface Card {
   channelTitle: string | null;
   durationSeconds: number | null;
   progress: number;
+  publishedAt: number | null;
 }
 
 @customElement("hometube-video-row")
@@ -101,6 +102,7 @@ export class VideoRow extends LitElement {
             it.duration_seconds && it.duration_seconds > 0
               ? Math.min(1, it.progress_seconds / it.duration_seconds)
               : 0,
+          publishedAt: it.published_at,
         }));
       } else if (this.feed === "watch-again") {
         const items = await api.get<WatchAgainItem[]>("/api/feed/watch-again");
@@ -113,6 +115,7 @@ export class VideoRow extends LitElement {
           // Videos in this feed are already complete; render without
           // an in-progress indicator.
           progress: 0,
+          publishedAt: it.published_at,
         }));
       } else {
         const items = await api.get<NewVideoItem[]>("/api/feed/new-videos");
@@ -123,6 +126,7 @@ export class VideoRow extends LitElement {
           channelTitle: it.channel_title,
           durationSeconds: null,
           progress: 0,
+          publishedAt: it.published_at,
         }));
       }
     } catch (err) {
@@ -152,6 +156,7 @@ export class VideoRow extends LitElement {
                         .thumbnailUrl=${c.thumbnailUrl}
                         .channelTitle=${c.channelTitle}
                         .duration=${c.durationSeconds}
+                        .publishedAt=${c.publishedAt}
                         progress=${c.progress}
                       ></hometube-video-card>
                     `,

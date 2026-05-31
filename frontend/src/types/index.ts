@@ -57,6 +57,8 @@ export interface HiddenVideo {
   video_thumbnail_url: string | null;
   duration_seconds: number | null;
   hidden_at: number;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
 }
 
 export interface ChildSettings {
@@ -133,6 +135,8 @@ export interface ContinueWatchingItem {
   duration_seconds: number | null;
   progress_seconds: number;
   last_watched_at: number;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
 }
 
 export interface WatchAgainItem {
@@ -142,6 +146,8 @@ export interface WatchAgainItem {
   channel_title: string | null;
   duration_seconds: number | null;
   last_watched_at: number;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
 }
 
 export interface NewVideoItem {
@@ -150,7 +156,8 @@ export interface NewVideoItem {
   channel_id: string | null;
   channel_title: string | null;
   thumbnail_url: string | null;
-  published_at: string | null;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
   source_kind: "channel";
   source_id: string;
 }
@@ -162,6 +169,8 @@ export interface VideoMetadata {
   channel_title: string | null;
   duration_seconds: number | null;
   thumbnail_url: string | null;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
 }
 
 export interface StreamResponse {
@@ -253,6 +262,8 @@ export interface LikeRow {
    */
   duration_seconds: number | null;
   liked_at: number;
+  /** Source publish date (unix seconds), or null when unknown. */
+  published_at: number | null;
   /**
    * `true` when the liked video is reachable through the child's
    * allowlist (direct video allowlist; `video_likes` doesn't carry
@@ -298,6 +309,65 @@ export function normalizeThumbnailUrl(url: string | null | undefined): string | 
   const trimmed = url.trim();
   if (!trimmed) return null;
   return trimmed.startsWith("//") ? `https:${trimmed}` : trimmed;
+}
+
+/**
+ * Format a publish date as a short relative label ("3 days ago").
+ *
+ * Accepts the several shapes the APIs hand us:
+ * - a unix-seconds number (likes/hidden/feeds/player metadata),
+ * - a numeric unix-seconds string (the channel-videos endpoint), or
+ * - an ISO-8601 / RFC-3339 string (sidecar-sourced rows).
+ *
+ * Returns `""` for missing or unparseable input. As a last resort a
+ * non-numeric human string (e.g. a relative "3 days ago" snapshot the
+ * backend couldn't normalise) is echoed back as-is rather than dropped.
+ */
+export function formatRelativeDate(value: number | string | null | undefined): string {
+  if (value == null) return "";
+
+  let unixMs: number | null = null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "";
+    unixMs = value * 1000;
+  } else {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (/^\d+$/.test(trimmed)) {
+      unixMs = Number(trimmed) * 1000;
+    } else {
+      const parsed = Date.parse(trimmed);
+      // Unparseable but non-empty: surface the source string as-is.
+      if (Number.isNaN(parsed)) return trimmed;
+      unixMs = parsed;
+    }
+  }
+
+  if (unixMs == null || !Number.isFinite(unixMs)) return "";
+
+  const diffSeconds = Math.round((Date.now() - unixMs) / 1000);
+  // Clamp small negatives (clock skew / approximate dates in the future).
+  if (diffSeconds < 45) return "just now";
+
+  const units: [number, string][] = [
+    [60, "minute"],
+    [60 * 60, "hour"],
+    [60 * 60 * 24, "day"],
+    [60 * 60 * 24 * 7, "week"],
+    [60 * 60 * 24 * 30, "month"],
+    [60 * 60 * 24 * 365, "year"],
+  ];
+
+  let label = "just now";
+  for (let i = units.length - 1; i >= 0; i--) {
+    const [seconds, name] = units[i];
+    if (diffSeconds >= seconds) {
+      const n = Math.floor(diffSeconds / seconds);
+      label = `${n} ${name}${n === 1 ? "" : "s"} ago`;
+      break;
+    }
+  }
+  return label;
 }
 
 /** Best-effort thumbnail-pick helper used across components. */

@@ -215,6 +215,7 @@ export class ChannelDetail extends LitElement {
                       title=${v.title}
                       thumbnail-url=${pickThumbnail(v.thumbnails) ?? ""}
                       channel-title=${v.channel_title ?? ""}
+                      .publishedAt=${v.published_at}
                     ></hometube-video-card>
                   `,
                 )}

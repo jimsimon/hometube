@@ -32,6 +32,9 @@ pub struct HiddenVideo {
     pub video_thumbnail_url: Option<String>,
     pub duration_seconds: Option<i64>,
     pub hidden_at: i64,
+    /// Source publish date as unix seconds, joined from
+    /// `channel_videos`. `None` when the video has no archive row.
+    pub published_at: Option<i64>,
 }
 
 /// `GET /api/hidden`.
@@ -47,10 +50,13 @@ pub async fn list(
                 ch.channel_title, \
                 v.thumbnail_url AS video_thumbnail_url, \
                 v.duration_seconds, \
-                hv.hidden_at \
+                hv.hidden_at, \
+                cv.published_at \
          FROM hidden_videos hv \
          JOIN videos v ON v.video_id = hv.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN channel_videos cv \
+           ON cv.video_id = hv.video_id AND cv.channel_id = v.channel_id \
          WHERE hv.child_account_id = ? \
          ORDER BY hv.hidden_at DESC",
     )
@@ -126,10 +132,12 @@ pub async fn add(
     let row: HiddenVideo = sqlx::query_as(
         "SELECT hv.id, hv.video_id, v.title AS video_title, v.channel_id, \
                 ch.channel_title, v.thumbnail_url AS video_thumbnail_url, \
-                v.duration_seconds, hv.hidden_at \
+                v.duration_seconds, hv.hidden_at, cv.published_at \
          FROM hidden_videos hv \
          JOIN videos v ON v.video_id = hv.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN channel_videos cv \
+           ON cv.video_id = hv.video_id AND cv.channel_id = v.channel_id \
          WHERE hv.child_account_id = ? AND hv.video_id = ?",
     )
     .bind(current.id)

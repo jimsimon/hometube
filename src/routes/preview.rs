@@ -33,6 +33,12 @@ pub async fn preview_video(
         .get_or_extract(&state.db, &state.config, &video_id)
         .await?;
     let thumb = pick_thumb(&result);
+    let published_at = crate::routes::videos::lookup_published_at(
+        &state.db,
+        &video_id,
+        result.channel_id.as_deref(),
+    )
+    .await;
     Ok(Json(VideoMetadata {
         id: result.id.clone(),
         title: result.title.clone(),
@@ -40,6 +46,7 @@ pub async fn preview_video(
         channel_title: result.channel_title.clone(),
         duration_seconds: result.duration,
         thumbnail_url: thumb,
+        published_at,
     }))
 }
 

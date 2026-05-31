@@ -18,7 +18,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
-import { normalizeThumbnailUrl } from "../types/index.js";
+import { formatRelativeDate, normalizeThumbnailUrl } from "../types/index.js";
 
 @customElement("hometube-video-card")
 export class VideoCard extends LitElement {
@@ -44,6 +44,14 @@ export class VideoCard extends LitElement {
   /** 0..1 progress indicator (continue-watching). */
   @property({ type: Number })
   progress = 0;
+
+  /**
+   * Source publish date. Rendered as a relative "3 days ago" label.
+   * Accepts a unix-seconds number, a numeric unix string, or an ISO
+   * string; `null` hides the line.
+   */
+  @property({ attribute: "published-at" })
+  publishedAt: number | string | null = null;
 
   /** "default" (link + Hide action) or "hidden" (no link, Unhide action). */
   @property({ type: String })
@@ -131,6 +139,10 @@ export class VideoCard extends LitElement {
     }
     .channel {
       font-size: 0.85rem;
+      color: var(--wa-color-text-quiet);
+    }
+    .published {
+      font-size: 0.8rem;
       color: var(--wa-color-text-quiet);
     }
     .kebab {
@@ -330,7 +342,13 @@ export class VideoCard extends LitElement {
       </div>
       <div class="title">${this.title}</div>
       ${this.channelTitle ? html`<div class="channel">${this.channelTitle}</div>` : null}
+      ${this.renderPublished()}
     `;
+  }
+
+  private renderPublished() {
+    const label = formatRelativeDate(this.publishedAt);
+    return label ? html`<div class="published">${label}</div>` : null;
   }
 
   override render() {
