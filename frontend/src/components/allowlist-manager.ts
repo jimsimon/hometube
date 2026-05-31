@@ -16,6 +16,7 @@ import { customElement, property, query, state } from "lit/decorators.js";
 import { ApiError, api } from "../services/api.js";
 import { debounce } from "../services/debounce.js";
 import {
+  channelThumbnailProxyUrl,
   pickThumbnail,
   type AllowlistedChannel,
   type AllowlistedVideo,
@@ -454,7 +455,9 @@ export class AllowlistManager extends LitElement {
               <hometube-content-card
                 variant="compact"
                 title=${c.channel_title}
-                .thumbnailUrl=${c.channel_thumbnail_url}
+                .thumbnailUrl=${c.channel_thumbnail_url
+                  ? channelThumbnailProxyUrl(c.channel_id)
+                  : c.channel_thumbnail_url}
               >
                 <wa-button
                   size="small"

@@ -11,7 +11,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
-import { pickThumbnail } from "../types/index.js";
+import { channelThumbnailProxyUrl, pickThumbnail } from "../types/index.js";
 import type { ChannelInfo, ChannelVideosPage } from "../types/index.js";
 
 import "./subscribe-button.js";
@@ -172,6 +172,12 @@ export class ChannelDetail extends LitElement {
 
   private avatar(): string | null {
     if (!this.info) return null;
+    // Serve via the cache proxy when the channel has an avatar; the
+    // channel is always backend-known here (the page only loads for an
+    // allowlisted/subscribed channel).
+    if (pickThumbnail(this.info.thumbnails) && this.channelId) {
+      return channelThumbnailProxyUrl(this.channelId);
+    }
     return pickThumbnail(this.info.thumbnails);
   }
 

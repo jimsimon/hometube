@@ -313,3 +313,49 @@ async fn list_videos_pagination_survives_blocked_row_in_first_page() {
         "page 2 must be non-empty when more rows exist"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Channel thumbnail proxy (`GET /api/proxy/channel-thumbnail/:id`)
+// ---------------------------------------------------------------------------
+
+/// A channel we've never recorded (no stored avatar URL) is a clean
+/// 404 — the proxy can't synthesise an upstream URL from the ID alone,
+/// unlike video thumbnails.
+#[tokio::test]
+async fn channel_thumbnail_proxy_404_when_no_stored_url() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let res = app
+        .server
+        .get("/api/proxy/channel-thumbnail/UCneverseen")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// A cache hit is served straight off disk as `image/jpeg`, without any
+/// upstream fetch (so the test needs no network).
+#[tokio::test]
+async fn channel_thumbnail_proxy_serves_cached_bytes() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Child).await;
+
+    let bytes = b"cached-channel-avatar";
+    hometube::services::thumbnail_store::put_channel(
+        &app.pool,
+        app.cache_dir.path().to_str().unwrap(),
+        "UCcached",
+        bytes,
+    )
+    .await
+    .unwrap();
+
+    let res = app
+        .server
+        .get("/api/proxy/channel-thumbnail/UCcached")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    assert_eq!(
+        res.header("content-type"),
+        "image/jpeg",
+        "cached channel avatars are served as image/jpeg"
+    );
+    assert_eq!(res.as_bytes().as_ref(), bytes);
+}

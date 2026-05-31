@@ -9,7 +9,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 
-import { normalizeThumbnailUrl } from "../types/index.js";
+import { channelThumbnailProxyUrl, normalizeThumbnailUrl } from "../types/index.js";
 
 import "./subscribe-button.js";
 
@@ -89,7 +89,13 @@ export class ChannelCard extends LitElement {
 
   override render() {
     const href = this.channelId ? `/child/channel/${encodeURIComponent(this.channelId)}` : "#";
-    const thumbSrc = normalizeThumbnailUrl(this.thumbnailUrl);
+    // Route through the cache proxy when we both have a channel ID and
+    // know the channel actually has an avatar (a non-empty
+    // `thumbnailUrl`). Without a stored avatar the proxy would 404, so
+    // fall back to the placeholder instead of requesting a broken image.
+    const directThumb = normalizeThumbnailUrl(this.thumbnailUrl);
+    const thumbSrc =
+      directThumb && this.channelId ? channelThumbnailProxyUrl(this.channelId) : directThumb;
     return html`
       <div class="card">
         <a href=${href} aria-label=${this.title}>
