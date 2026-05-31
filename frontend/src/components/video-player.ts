@@ -1415,9 +1415,7 @@ export class VideoPlayer extends LitElement {
               ? html`<div class="channel">${this.metadata.channel_title}</div>`
               : null}
             ${formatRelativeDate(this.metadata.published_at)
-              ? html`<div class="published">
-                  ${formatRelativeDate(this.metadata.published_at)}
-                </div>`
+              ? html`<div class="published">${formatRelativeDate(this.metadata.published_at)}</div>`
               : null}
             <div class="chrome">
               ${this.preview
