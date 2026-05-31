@@ -463,7 +463,10 @@ async fn backfill_video_channel_ids(
 /// position via the heartbeat path before the player has emitted any
 /// progress update. Promoting such rows to "finished" would surface
 /// videos the child never actually watched.
-fn is_effectively_finished(progress_seconds: i64, duration_seconds: Option<i64>) -> bool {
+pub(crate) fn is_effectively_finished(
+    progress_seconds: i64,
+    duration_seconds: Option<i64>,
+) -> bool {
     let Some(duration) = duration_seconds else {
         return false;
     };
