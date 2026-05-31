@@ -44,7 +44,7 @@ cargo build --release --features test-login
 cd e2e && npm install && npx playwright test
 ```
 
-## One-liner pre-push check
+## One-liner quick pre-push check (excludes coverage + release/build gates)
 
 ```bash
 ( cd frontend && npm run lint && npm run format:check && npm run typecheck && npm test ) \

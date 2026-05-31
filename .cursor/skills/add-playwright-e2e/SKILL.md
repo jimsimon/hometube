@@ -66,6 +66,9 @@ cargo build --release --features test-login
 # 2. Run the suite
 cd e2e && npm install && npx playwright test
 # npm run test:headed   # to watch in a browser
+
+# 3. Clean up the background server when done
+pkill -f 'target/release/hometube'
 ```
 
 CI builds frontend + release server with `--features test-login`, starts it,

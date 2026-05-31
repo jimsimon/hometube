@@ -41,7 +41,11 @@ auto-discovers one entry per file in `frontend/src/components/`.
    ```
 
    Then place the element in the page markup: `<hometube-<name>></hometube-<name>>`.
-   The `/assets/` prefix is the base path the Rust server mounts `dist/` at.
+   The `/assets/` prefix is where the Rust router nests the configured
+   `static_dir` (default `frontend/dist`) via
+   `nest_service("/assets", ServeDir::new(&static_dir))` in `src/routes/mod.rs`,
+   so `/assets/<file>` resolves to whatever `static_dir` points at. (Service
+   worker files like `/sw.js` are served from the document root, not `/assets`.)
 
 4. **Add a colocated test** `frontend/src/components/<name>.test.ts` (see the
    `write-vitest-browser-test` skill and `frontend/src/components/error-banner.test.ts`).
@@ -58,4 +62,5 @@ npm run typecheck
 npm run lint
 npm run format:check
 npm test
+npm run test:coverage   # if added to coverage.include, confirms thresholds pass
 ```

@@ -25,7 +25,7 @@ in `src/routes/mod.rs`.
    - Return `AppResult<T>` (alias for `Result<T, AppError>` from
      `crate::error`). Use `AppError::NotFound`, `Forbidden`, `BadRequest(..)`,
      etc.; `sqlx::Error` and `reqwest::Error` convert via `?` automatically.
-   - Add a `/// `METHOD /path`` doc comment.
+   - Add a `/// METHOD /path` doc comment (e.g. `/// POST /api/likes/{video_id}`).
 
 3. **Register the route** in `src/routes/mod.rs` `router()` inside the correct
    sub-router so the right middleware gate applies:
