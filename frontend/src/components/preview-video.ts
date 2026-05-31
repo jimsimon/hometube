@@ -21,7 +21,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 import { ApiError, api } from "../services/api.js";
-import type { VideoMetadata } from "../types/index.js";
+import { normalizeThumbnailUrl, type VideoMetadata } from "../types/index.js";
 
 import "./loading-spinner.js";
 import "./error-banner.js";
@@ -139,8 +139,8 @@ export class PreviewVideo extends LitElement {
     return html`
       <article aria-label=${`Preview of ${meta.title ?? meta.id}`}>
         <a href=${previewHref} class="thumb-wrap" title="Watch full preview">
-          ${meta.thumbnail_url
-            ? html`<img src=${meta.thumbnail_url} alt="" loading="lazy" />`
+          ${normalizeThumbnailUrl(meta.thumbnail_url)
+            ? html`<img src=${normalizeThumbnailUrl(meta.thumbnail_url)!} alt="" loading="lazy" />`
             : nothing}
           <div class="play-icon" aria-hidden="true">▶</div>
         </a>
