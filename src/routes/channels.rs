@@ -307,6 +307,31 @@ async fn enforce_channel_access(
     Err(AppError::Forbidden)
 }
 
+/// Normalise an upstream `Content-Type` and confirm it's a raster image
+/// this proxy is willing to reflect.
+///
+/// Returns the canonical, `'static` media-type string on success, or
+/// `None` to signal "reject". A missing/blank header defaults to JPEG —
+/// YouTube's thumbnail CDNs occasionally omit it. `text/html` and
+/// `image/svg+xml` are deliberately rejected: both can carry active
+/// content, and this is a same-origin proxy.
+fn allowed_thumbnail_media_type(raw: Option<&str>) -> Option<&'static str> {
+    let media_type = match raw {
+        // Strip any `; charset=…` parameter and normalise case.
+        Some(s) => s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase(),
+        None => return Some("image/jpeg"),
+    };
+    match media_type.as_str() {
+        "" | "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        "image/gif" => Some("image/gif"),
+        "image/avif" => Some("image/avif"),
+        "image/bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
 /// `GET /api/proxy/channel-thumbnail/:channelId` — serve a channel
 /// avatar through the on-disk `thumbnail_cache`, mirroring the video
 /// thumbnail proxy (`videos::get_thumbnail`).
@@ -385,14 +410,25 @@ pub async fn get_channel_thumbnail(
         .map_err(AppError::Http)?;
     let res = client.get(&url).send().await.map_err(AppError::Http)?;
     let status = res.status();
-    // Reuse the upstream content type when it's a valid header value;
-    // fall back to image/jpeg rather than panicking on a malformed
-    // upstream header.
-    let content_type = res
+
+    // Gate on the media *type*, not just the host. `is_safe_thumbnail_url`
+    // controls *where* the bytes come from; this controls *what* they
+    // are. Because this is a same-origin proxy, reflecting an upstream
+    // `text/html` or `image/svg+xml` (both script-capable) would be a
+    // content-injection vector — so only ever emit raster images.
+    let raw_content_type = res
         .headers()
         .get(header::CONTENT_TYPE)
-        .and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok())
-        .unwrap_or_else(|| HeaderValue::from_static("image/jpeg"));
+        .and_then(|v| v.to_str().ok());
+    let Some(media_type) = allowed_thumbnail_media_type(raw_content_type) else {
+        tracing::debug!(
+            %channel_id,
+            ?raw_content_type,
+            "channel thumbnail: rejecting non-raster upstream media type"
+        );
+        return Err(AppError::NotFound);
+    };
+    let content_type = HeaderValue::from_static(media_type);
 
     // Only cache small, successful responses; avatars are a few KB.
     // Mirrors the ceiling in `videos::get_thumbnail`.
@@ -429,5 +465,62 @@ pub async fn get_channel_thumbnail(
             .headers_mut()
             .insert(header::CONTENT_TYPE, content_type);
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_thumbnail_media_type;
+
+    #[test]
+    fn accepts_raster_image_types() {
+        for ct in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/avif",
+            "image/bmp",
+        ] {
+            assert_eq!(allowed_thumbnail_media_type(Some(ct)), Some(ct));
+        }
+    }
+
+    #[test]
+    fn normalises_case_and_charset_parameter() {
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("Image/JPEG; charset=binary")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("  image/png ")),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_defaults_to_jpeg() {
+        assert_eq!(allowed_thumbnail_media_type(None), Some("image/jpeg"));
+        assert_eq!(allowed_thumbnail_media_type(Some("")), Some("image/jpeg"));
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("   ")),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn rejects_active_content_types() {
+        // The crux of the fix: HTML and SVG can carry script and must
+        // never be reflected from this same-origin proxy.
+        assert_eq!(allowed_thumbnail_media_type(Some("text/html")), None);
+        assert_eq!(allowed_thumbnail_media_type(Some("image/svg+xml")), None);
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("application/octet-stream")),
+            None
+        );
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("text/html; charset=utf-8")),
+            None
+        );
     }
 }
