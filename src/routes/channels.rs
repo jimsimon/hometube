@@ -14,14 +14,19 @@
 //! `403 Forbidden`.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, HeaderValue},
+    response::Response,
     Json,
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
+use crate::routes::allowlist::{is_safe_thumbnail_url, normalize_thumbnail_url};
 use crate::routes::search::{decode_page_token, encode_page_token, PageCursor};
 // Note: `can_child_view` is no longer needed here — `list_videos`
 // applies its blocked/hidden filters inline in the main SQL query
@@ -300,4 +305,222 @@ async fn enforce_channel_access(
         return Ok(());
     }
     Err(AppError::Forbidden)
+}
+
+/// Normalise an upstream `Content-Type` and confirm it's a raster image
+/// this proxy is willing to reflect.
+///
+/// Returns the canonical, `'static` media-type string on success, or
+/// `None` to signal "reject". A missing/blank header defaults to JPEG —
+/// YouTube's thumbnail CDNs occasionally omit it. `text/html` and
+/// `image/svg+xml` are deliberately rejected: both can carry active
+/// content, and this is a same-origin proxy.
+fn allowed_thumbnail_media_type(raw: Option<&str>) -> Option<&'static str> {
+    let media_type = match raw {
+        // Strip any `; charset=…` parameter and normalise case.
+        Some(s) => s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase(),
+        None => return Some("image/jpeg"),
+    };
+    match media_type.as_str() {
+        "" | "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        "image/gif" => Some("image/gif"),
+        "image/avif" => Some("image/avif"),
+        "image/bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// `GET /api/proxy/channel-thumbnail/:channelId` — serve a channel
+/// avatar through the on-disk `thumbnail_cache`, mirroring the video
+/// thumbnail proxy (`videos::get_thumbnail`).
+///
+/// Cache hits read straight off disk (and bump `last_accessed_at` for
+/// LRU). On a miss we resolve the upstream avatar URL from
+/// `channels.channel_thumbnail_url` (falling back to a denormalised
+/// copy on `child_subscriptions`), re-validate it against the same
+/// YouTube-CDN allowlist the parent add path uses, fetch it, populate
+/// the cache, and serve the bytes.
+///
+/// Unlike video thumbnails — whose URL is derivable from the ID
+/// (`i.ytimg.com/vi/<id>/…`) — channel avatars live on
+/// `googleusercontent.com` / `ggpht.com` and can only be resolved from
+/// the stored URL, so a channel we've never recorded is a clean
+/// `404`. No HMAC / access check: avatars are inherently public and
+/// the route shares the proxy rate limiter.
+pub async fn get_channel_thumbnail(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+) -> AppResult<Response> {
+    // 1. Cache hit fast-path.
+    if let Some(path) = crate::services::thumbnail_store::get_channel(&state.db, &channel_id).await
+    {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let mut response = Response::new(Body::from(bytes));
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+                return Ok(response);
+            }
+            Err(err) => {
+                tracing::debug!(%channel_id, %err, "channel thumbnail cache read failed; falling back to upstream");
+            }
+        }
+    }
+
+    // 2. Cache miss: resolve the stored upstream URL. Prefer the
+    //    canonical `channels` row; fall back to a subscription's
+    //    denormalised copy for channels that exist only there.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE( \
+             (SELECT channel_thumbnail_url FROM channels \
+               WHERE channel_id = ?1 AND channel_thumbnail_url IS NOT NULL), \
+             (SELECT channel_thumbnail_url FROM child_subscriptions \
+               WHERE channel_id = ?1 AND channel_thumbnail_url IS NOT NULL \
+               LIMIT 1))",
+    )
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+
+    let url = normalize_thumbnail_url(&stored.ok_or(AppError::NotFound)?);
+    // Defence in depth: the add/subscribe paths already validate before
+    // persisting, but re-check so a row written by an older/looser code
+    // path can't turn this proxy into an open SSRF/redirector.
+    if !is_safe_thumbnail_url(&url) {
+        return Err(AppError::NotFound);
+    }
+
+    // Bound the upstream fetch: a slow/unresponsive CDN must not pin a
+    // request task open indefinitely.
+    //
+    // Disable redirect following. We only validated the initial `url`
+    // against the YouTube-CDN host allowlist; a 3xx to an arbitrary host
+    // would otherwise be followed automatically, defeating
+    // `is_safe_thumbnail_url` and turning this proxy into an SSRF
+    // vector. Legitimate avatar URLs (ytimg/ggpht/googleusercontent) are
+    // served directly, so blocking redirects costs us nothing.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(AppError::Http)?;
+    let res = client.get(&url).send().await.map_err(AppError::Http)?;
+    let status = res.status();
+
+    // Gate on the media *type*, not just the host. `is_safe_thumbnail_url`
+    // controls *where* the bytes come from; this controls *what* they
+    // are. Because this is a same-origin proxy, reflecting an upstream
+    // `text/html` or `image/svg+xml` (both script-capable) would be a
+    // content-injection vector — so only ever emit raster images.
+    let raw_content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let Some(media_type) = allowed_thumbnail_media_type(raw_content_type) else {
+        tracing::debug!(
+            %channel_id,
+            ?raw_content_type,
+            "channel thumbnail: rejecting non-raster upstream media type"
+        );
+        return Err(AppError::NotFound);
+    };
+    let content_type = HeaderValue::from_static(media_type);
+
+    // Only cache small, successful responses; avatars are a few KB.
+    // Mirrors the ceiling in `videos::get_thumbnail`.
+    const CHANNEL_THUMBNAIL_CACHE_MAX_BYTES: u64 = 1024 * 1024;
+    let content_length: Option<u64> = res
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+    let cacheable = status.is_success()
+        && matches!(content_length, Some(n) if n <= CHANNEL_THUMBNAIL_CACHE_MAX_BYTES);
+
+    if cacheable {
+        let bytes = res.bytes().await.map_err(AppError::Http)?;
+        let _ = crate::services::thumbnail_store::put_channel(
+            &state.db,
+            &state.config.cache_dir,
+            &channel_id,
+            &bytes,
+        )
+        .await;
+        let mut response = Response::new(Body::from(bytes));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+        Ok(response)
+    } else {
+        let stream = res.bytes_stream().map_err(std::io::Error::other);
+        let body = Body::from_stream(stream);
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_thumbnail_media_type;
+
+    #[test]
+    fn accepts_raster_image_types() {
+        for ct in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/avif",
+            "image/bmp",
+        ] {
+            assert_eq!(allowed_thumbnail_media_type(Some(ct)), Some(ct));
+        }
+    }
+
+    #[test]
+    fn normalises_case_and_charset_parameter() {
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("Image/JPEG; charset=binary")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("  image/png ")),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_defaults_to_jpeg() {
+        assert_eq!(allowed_thumbnail_media_type(None), Some("image/jpeg"));
+        assert_eq!(allowed_thumbnail_media_type(Some("")), Some("image/jpeg"));
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("   ")),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn rejects_active_content_types() {
+        // The crux of the fix: HTML and SVG can carry script and must
+        // never be reflected from this same-origin proxy.
+        assert_eq!(allowed_thumbnail_media_type(Some("text/html")), None);
+        assert_eq!(allowed_thumbnail_media_type(Some("image/svg+xml")), None);
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("application/octet-stream")),
+            None
+        );
+        assert_eq!(
+            allowed_thumbnail_media_type(Some("text/html; charset=utf-8")),
+            None
+        );
+    }
 }

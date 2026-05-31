@@ -116,7 +116,7 @@ const MAX_DESCRIPTION_LEN: usize = 8192;
 /// from a search result is rejected with `400`. We only rewrite a bare
 /// `//` prefix — a `http://` URL is left as-is so the validator still
 /// rejects it.
-fn normalize_thumbnail_url(url: &str) -> String {
+pub(crate) fn normalize_thumbnail_url(url: &str) -> String {
     let trimmed = url.trim();
     match trimmed.strip_prefix("//") {
         Some(rest) => format!("https://{rest}"),
@@ -132,7 +132,7 @@ fn normalize_thumbnail_url(url: &str) -> String {
 /// else protects child UIs from rendering an attacker-controlled
 /// host via `<img src>` if a malicious parent (or compromised parent
 /// session) injects a body-data forgery.
-fn is_safe_thumbnail_url(url: &str) -> bool {
+pub(crate) fn is_safe_thumbnail_url(url: &str) -> bool {
     let url = url.trim();
     if url.is_empty() || url.len() > MAX_THUMBNAIL_URL_LEN {
         return false;
