@@ -19,6 +19,46 @@ use crate::error::{AppError, AppResult};
 /// Default timeout for any single yt-dlp invocation.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `ETXTBSY` ("Text file busy") raw OS error number on Linux.
+const ETXTBSY: i32 = 26;
+
+/// Maximum number of times we re-attempt a spawn that failed with
+/// `ETXTBSY` before giving up and surfacing the error.
+const ETXTBSY_MAX_RETRIES: u32 = 5;
+
+/// Run `cmd.output()` under `dur`, transparently retrying on `ETXTBSY`.
+///
+/// `ETXTBSY` surfaces when the binary being `exec`'d is still open for
+/// writing somewhere on the system. In production that happens when an
+/// [`update_binary`] swap races a concurrent extraction; in the test
+/// suite it happens when a sibling test thread is mid `fork`/`exec` and
+/// has briefly inherited a writable fd to a freshly written yt-dlp
+/// shim. Both are transient and clear within a few milliseconds, so a
+/// short bounded retry turns an otherwise-flaky hard failure into a
+/// transparent recovery.
+///
+/// The signature mirrors `timeout(dur, cmd.output())` so call sites keep
+/// their own distinct timeout / spawn-failure error messages.
+async fn output_with_etxtbsy_retry(
+    cmd: &mut Command,
+    dur: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let mut attempt: u32 = 0;
+    loop {
+        match timeout(dur, cmd.output()).await {
+            Ok(Err(e)) if e.raw_os_error() == Some(ETXTBSY) && attempt < ETXTBSY_MAX_RETRIES => {
+                attempt += 1;
+                warn!(
+                    attempt,
+                    "yt-dlp spawn hit ETXTBSY (text file busy); retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(20 * u64::from(attempt))).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Default timeout for a channel-archive `--flat-playlist` run. Larger
 /// than [`DEFAULT_TIMEOUT`] because the subprocess paginates through
 /// InnerTube continuations for the entire channel, and very large
@@ -238,7 +278,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     cmd.arg(&url);
     debug!(?cmd, %video_id, "running yt-dlp");
 
-    let output = timeout(DEFAULT_TIMEOUT, cmd.output())
+    let output = output_with_etxtbsy_retry(&mut cmd, DEFAULT_TIMEOUT)
         .await
         .map_err(|_| AppError::Other(anyhow::anyhow!("yt-dlp timed out after 30s")))?
         .map_err(|e| AppError::Other(anyhow::anyhow!("spawning yt-dlp: {e}")))?;
@@ -412,7 +452,7 @@ pub async fn flat_playlist_channel(
     cmd.arg(&url);
     debug!(?cmd, %channel_id, "running yt-dlp --flat-playlist");
 
-    let output = timeout(tunables.timeout, cmd.output())
+    let output = output_with_etxtbsy_retry(&mut cmd, tunables.timeout)
         .await
         .map_err(|_| {
             AppError::Other(anyhow::anyhow!(
@@ -632,7 +672,7 @@ pub async fn extract_subtitles(cfg: &Config, video_id: &str, lang: &str) -> AppR
     cmd.arg(&url);
     debug!(?cmd, %video_id, %lang, "running yt-dlp for subtitles");
 
-    let output = timeout(DEFAULT_TIMEOUT, cmd.output())
+    let output = output_with_etxtbsy_retry(&mut cmd, DEFAULT_TIMEOUT)
         .await
         .map_err(|_| AppError::Other(anyhow::anyhow!("yt-dlp timed out after 30s")))?
         .map_err(|e| AppError::Other(anyhow::anyhow!("spawning yt-dlp: {e}")))?;

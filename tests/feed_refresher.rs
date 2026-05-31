@@ -377,18 +377,24 @@ async fn fallback_writes_items_when_rss_fails_and_sidecar_returns_items() {
 
     let handle = tokio::spawn(feed_refresher::run(app.pool.clone()));
 
+    // Wait on `rss_last_success_at` being set rather than on the
+    // `channel_videos` row. The fallback path writes the items first
+    // and records poll success (which sets `rss_last_success_at` and
+    // clears the error counter) last, so gating on the row and aborting
+    // immediately races that final write. Gating on the last write
+    // guarantees every earlier write has committed before we abort.
     let pool = app.pool.clone();
-    wait_until("fallback item appears in channel_videos", move || {
+    wait_until("fallback success recorded on channel row", move || {
         let pool = pool.clone();
         Box::pin(async move {
-            let n: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM channel_videos \
-                 WHERE channel_id='UCfb1' AND video_id='vid-from-sidecar'",
+            let last_success: Option<i64> = sqlx::query_scalar(
+                "SELECT rss_last_success_at FROM channels WHERE channel_id='UCfb1'",
             )
             .fetch_one(&pool)
             .await
-            .unwrap_or(0);
-            n == 1
+            .ok()
+            .flatten();
+            last_success.is_some()
         })
     })
     .await;
@@ -407,6 +413,19 @@ async fn fallback_writes_items_when_rss_fails_and_sidecar_returns_items() {
     assert!(last_success.is_some(), "rss_last_success_at must be set");
     assert_eq!(errs, 0, "errors must be reset on fallback success");
     assert!(fb.is_some(), "last_sidecar_fallback_at must be persisted");
+
+    // The fallback's whole point: the sidecar item landed in the feed.
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM channel_videos \
+         WHERE channel_id='UCfb1' AND video_id='vid-from-sidecar'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        n, 1,
+        "sidecar fallback item must be written to channel_videos"
+    );
 }
 
 #[tokio::test]
