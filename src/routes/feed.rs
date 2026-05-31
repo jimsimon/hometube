@@ -87,13 +87,18 @@ pub async fn continue_watching(
                 v.thumbnail_url AS video_thumbnail_url, \
                 ch.channel_title, \
                 v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
-                cv.published_at, \
+                COALESCE( \
+                    (SELECT cv.published_at FROM channel_videos cv \
+                      WHERE cv.video_id = wh.video_id AND cv.channel_id = v.channel_id \
+                        AND cv.published_at IS NOT NULL LIMIT 1), \
+                    (SELECT cv.published_at FROM channel_videos cv \
+                      WHERE cv.video_id = wh.video_id AND cv.published_at IS NOT NULL \
+                      ORDER BY cv.last_seen_at DESC LIMIT 1) \
+                ) AS published_at, \
                 v.channel_id \
          FROM watch_history wh \
          JOIN videos v ON v.video_id = wh.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
-         LEFT JOIN channel_videos cv \
-           ON cv.video_id = wh.video_id AND cv.channel_id = v.channel_id \
          WHERE wh.child_account_id = ? \
          ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
@@ -238,13 +243,18 @@ pub async fn watch_again(
                 v.thumbnail_url AS video_thumbnail_url, \
                 ch.channel_title, \
                 v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
-                cv.published_at, \
+                COALESCE( \
+                    (SELECT cv.published_at FROM channel_videos cv \
+                      WHERE cv.video_id = wh.video_id AND cv.channel_id = v.channel_id \
+                        AND cv.published_at IS NOT NULL LIMIT 1), \
+                    (SELECT cv.published_at FROM channel_videos cv \
+                      WHERE cv.video_id = wh.video_id AND cv.published_at IS NOT NULL \
+                      ORDER BY cv.last_seen_at DESC LIMIT 1) \
+                ) AS published_at, \
                 v.channel_id \
          FROM watch_history wh \
          JOIN videos v ON v.video_id = wh.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
-         LEFT JOIN channel_videos cv \
-           ON cv.video_id = wh.video_id AND cv.channel_id = v.channel_id \
          WHERE wh.child_account_id = ? \
          ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
