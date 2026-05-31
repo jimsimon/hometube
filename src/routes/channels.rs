@@ -14,14 +14,19 @@
 //! `403 Forbidden`.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::header,
+    response::Response,
     Json,
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentAccount;
+use crate::routes::allowlist::{is_safe_thumbnail_url, normalize_thumbnail_url};
 use crate::routes::search::{decode_page_token, encode_page_token, PageCursor};
 // Note: `can_child_view` is no longer needed here — `list_videos`
 // applies its blocked/hidden filters inline in the main SQL query
@@ -300,4 +305,112 @@ async fn enforce_channel_access(
         return Ok(());
     }
     Err(AppError::Forbidden)
+}
+
+/// `GET /api/proxy/channel-thumbnail/:channelId` — serve a channel
+/// avatar through the on-disk `thumbnail_cache`, mirroring the video
+/// thumbnail proxy (`videos::get_thumbnail`).
+///
+/// Cache hits read straight off disk (and bump `last_accessed_at` for
+/// LRU). On a miss we resolve the upstream avatar URL from
+/// `channels.channel_thumbnail_url` (falling back to a denormalised
+/// copy on `child_subscriptions`), re-validate it against the same
+/// YouTube-CDN allowlist the parent add path uses, fetch it, populate
+/// the cache, and serve the bytes.
+///
+/// Unlike video thumbnails — whose URL is derivable from the ID
+/// (`i.ytimg.com/vi/<id>/…`) — channel avatars live on
+/// `googleusercontent.com` / `ggpht.com` and can only be resolved from
+/// the stored URL, so a channel we've never recorded is a clean
+/// `404`. No HMAC / access check: avatars are inherently public and
+/// the route shares the proxy rate limiter.
+pub async fn get_channel_thumbnail(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+) -> AppResult<Response> {
+    // 1. Cache hit fast-path.
+    if let Some(path) = crate::services::thumbnail_store::get_channel(&state.db, &channel_id).await {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let mut response = Response::new(Body::from(bytes));
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, "image/jpeg".parse().unwrap());
+                return Ok(response);
+            }
+            Err(err) => {
+                tracing::debug!(%channel_id, %err, "channel thumbnail cache read failed; falling back to upstream");
+            }
+        }
+    }
+
+    // 2. Cache miss: resolve the stored upstream URL. Prefer the
+    //    canonical `channels` row; fall back to a subscription's
+    //    denormalised copy for channels that exist only there.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE( \
+             (SELECT channel_thumbnail_url FROM channels \
+               WHERE channel_id = ?1 AND channel_thumbnail_url IS NOT NULL), \
+             (SELECT channel_thumbnail_url FROM child_subscriptions \
+               WHERE channel_id = ?1 AND channel_thumbnail_url IS NOT NULL \
+               LIMIT 1))",
+    )
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+
+    let url = normalize_thumbnail_url(&stored.ok_or(AppError::NotFound)?);
+    // Defence in depth: the add/subscribe paths already validate before
+    // persisting, but re-check so a row written by an older/looser code
+    // path can't turn this proxy into an open SSRF/redirector.
+    if !is_safe_thumbnail_url(&url) {
+        return Err(AppError::NotFound);
+    }
+
+    let res = reqwest::get(&url).await.map_err(AppError::Http)?;
+    let status = res.status();
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    // Only cache small, successful responses; avatars are a few KB.
+    // Mirrors the ceiling in `videos::get_thumbnail`.
+    const CHANNEL_THUMBNAIL_CACHE_MAX_BYTES: u64 = 1024 * 1024;
+    let content_length: Option<u64> = res
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+    let cacheable = status.is_success()
+        && matches!(content_length, Some(n) if n <= CHANNEL_THUMBNAIL_CACHE_MAX_BYTES);
+
+    if cacheable {
+        let bytes = res.bytes().await.map_err(AppError::Http)?;
+        let _ = crate::services::thumbnail_store::put_channel(
+            &state.db,
+            &state.config.cache_dir,
+            &channel_id,
+            &bytes,
+        )
+        .await;
+        let mut response = Response::new(Body::from(bytes));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        Ok(response)
+    } else {
+        let stream = res.bytes_stream().map_err(std::io::Error::other);
+        let body = Body::from_stream(stream);
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        Ok(response)
+    }
 }
