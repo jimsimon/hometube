@@ -211,12 +211,7 @@ pub async fn put_channel(
 /// Shared write body for [`put`] / [`put_channel`]. `key` is the
 /// `thumbnail_cache.video_id` primary key; `path` is the already-built
 /// (and validated, via the public wrappers) on-disk destination.
-async fn put_by_key(
-    pool: &SqlitePool,
-    key: &str,
-    path: PathBuf,
-    bytes: &[u8],
-) -> AppResult<()> {
+async fn put_by_key(pool: &SqlitePool, key: &str, path: PathBuf, bytes: &[u8]) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             warn!(error = %e, "thumbnail_store: failed to create thumbnails dir");
@@ -482,7 +477,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(n, 2, "video + channel entries must not overwrite each other");
+        assert_eq!(
+            n, 2,
+            "video + channel entries must not overwrite each other"
+        );
     }
 
     #[tokio::test]

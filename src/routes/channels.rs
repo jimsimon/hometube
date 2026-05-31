@@ -329,7 +329,8 @@ pub async fn get_channel_thumbnail(
     Path(channel_id): Path<String>,
 ) -> AppResult<Response> {
     // 1. Cache hit fast-path.
-    if let Some(path) = crate::services::thumbnail_store::get_channel(&state.db, &channel_id).await {
+    if let Some(path) = crate::services::thumbnail_store::get_channel(&state.db, &channel_id).await
+    {
         match tokio::fs::read(&path).await {
             Ok(bytes) => {
                 let mut response = Response::new(Body::from(bytes));
