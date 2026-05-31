@@ -1387,7 +1387,7 @@ export class VideoPlayer extends LitElement {
     }
     const posterUrl = normalizeThumbnailUrl(this.metadata?.thumbnail_url);
     const posterStyle = this.audioOnly && posterUrl ? `background-image: url(${posterUrl});` : "";
-    const publishedLabel = this.metadata ? formatRelativeDate(this.metadata.published_at) : "";
+    const publishedLabel = formatRelativeDate(this.metadata?.published_at);
     return html`
       <div class="player-shell">
         <div class="shaka-container" style=${posterStyle}>

@@ -48,9 +48,11 @@ export class VideoCard extends LitElement {
   /**
    * Source publish date. Rendered as a relative "3 days ago" label.
    * Accepts a unix-seconds number, a numeric unix string, or an ISO
-   * string; `null` hides the line.
+   * string; `null` hides the line. Property-only binding (no reflected
+   * attribute) since callers always pass it via `.publishedAt=` and the
+   * string-only attribute path would otherwise coerce numbers to strings.
    */
-  @property({ attribute: "published-at" })
+  @property({ attribute: false })
   publishedAt: number | string | null = null;
 
   /** "default" (link + Hide action) or "hidden" (no link, Unhide action). */
