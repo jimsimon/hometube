@@ -371,8 +371,16 @@ pub async fn get_channel_thumbnail(
 
     // Bound the upstream fetch: a slow/unresponsive CDN must not pin a
     // request task open indefinitely.
+    //
+    // Disable redirect following. We only validated the initial `url`
+    // against the YouTube-CDN host allowlist; a 3xx to an arbitrary host
+    // would otherwise be followed automatically, defeating
+    // `is_safe_thumbnail_url` and turning this proxy into an SSRF
+    // vector. Legitimate avatar URLs (ytimg/ggpht/googleusercontent) are
+    // served directly, so blocking redirects costs us nothing.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(AppError::Http)?;
     let res = client.get(&url).send().await.map_err(AppError::Http)?;
