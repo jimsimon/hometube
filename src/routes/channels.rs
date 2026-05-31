@@ -336,7 +336,7 @@ pub async fn get_channel_thumbnail(
                 let mut response = Response::new(Body::from(bytes));
                 response
                     .headers_mut()
-                    .insert(header::CONTENT_TYPE, "image/jpeg".parse().unwrap());
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
                 return Ok(response);
             }
             Err(err) => {
