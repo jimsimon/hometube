@@ -254,6 +254,10 @@ pub fn router(state: AppState) -> Router {
             "/api/proxy/thumbnail/{video_id}",
             get(videos::get_thumbnail),
         )
+        .route(
+            "/api/proxy/channel-thumbnail/{channel_id}",
+            get(channels::get_channel_thumbnail),
+        )
         .route_layer(axum::middleware::from_fn(
             crate::middleware::rate_limit::rate_limit_proxies,
         ));

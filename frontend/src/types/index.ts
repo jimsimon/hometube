@@ -370,6 +370,26 @@ export function formatRelativeDate(value: number | string | null | undefined): s
   return label;
 }
 
+/**
+ * Build the server-side proxy URL for a channel's avatar.
+ *
+ * Channel avatars are hot-linked from YouTube's CDN
+ * (`yt3.ggpht.com` / `googleusercontent.com`) by default. Routing them
+ * through `/api/proxy/channel-thumbnail/:channelId` serves them from the
+ * on-disk thumbnail cache instead — the same cache the video thumbnail
+ * proxy uses — so the browser never touches YouTube directly and a warm
+ * cache survives the upstream URL rotating.
+ *
+ * Returns `null` for an empty/missing `channelId` so callers can fall
+ * back to a placeholder. Only call this when the channel is known to the
+ * backend (allowlisted / subscribed); for live, not-yet-stored channels
+ * (parent search/preview) keep the direct CDN URL — the proxy would 404.
+ */
+export function channelThumbnailProxyUrl(channelId: string | null | undefined): string | null {
+  if (!channelId) return null;
+  return `/api/proxy/channel-thumbnail/${encodeURIComponent(channelId)}`;
+}
+
 /** Best-effort thumbnail-pick helper used across components. */
 export function pickThumbnail(thumbs: Record<string, { url: string }>): string | null {
   for (const key of ["maxres", "high", "standard", "medium", "default"]) {
