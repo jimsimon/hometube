@@ -112,7 +112,8 @@ pub async fn get_metadata(
 
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
-    let published_at = lookup_published_at(&state.db, &video_id, result.channel_id.as_deref()).await;
+    let published_at =
+        lookup_published_at(&state.db, &video_id, result.channel_id.as_deref()).await;
 
     Ok(Json(VideoMetadata {
         id: result.id.clone(),
