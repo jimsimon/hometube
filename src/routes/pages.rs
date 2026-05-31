@@ -763,6 +763,41 @@ pub struct VideoPageQuery {
     pub t: Option<i64>,
 }
 
+/// Look up the saved playback position for `child_id` + `video_id`.
+///
+/// Returns the `watch_history.progress_seconds` to resume from, or `0`
+/// when there is no row, the position is zero, the video is
+/// "effectively finished" (so the child starts over rather than landing
+/// in the unwatched tail), or the lookup fails. A DB error is treated
+/// as "no saved position" so a transient hiccup just starts the video
+/// from the beginning rather than failing the page render.
+async fn resolve_resume_position(db: &SqlitePool, child_id: i64, video_id: &str) -> i64 {
+    let row: Option<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT wh.progress_seconds, v.duration_seconds \
+         FROM watch_history wh \
+         JOIN videos v ON v.video_id = wh.video_id \
+         WHERE wh.child_account_id = ? AND wh.video_id = ?",
+    )
+    .bind(child_id)
+    .bind(video_id)
+    .fetch_optional(db)
+    .await
+    .unwrap_or(None);
+
+    match row {
+        Some((progress_seconds, duration_seconds))
+            if progress_seconds > 0
+                && !crate::routes::feed::is_effectively_finished(
+                    progress_seconds,
+                    duration_seconds,
+                ) =>
+        {
+            progress_seconds
+        }
+        _ => 0,
+    }
+}
+
 /// `GET /child/video/:videoId`.
 ///
 /// Resolves allowlist + extraction status up front. On extraction
@@ -793,13 +828,21 @@ pub async fn child_video(
             let allowed = can_child_view(&state.db, c.id, &video_id, result.channel_id.as_deref())
                 .await
                 .unwrap_or(false);
+            // An explicit `?t=` deep link wins; otherwise resume from the
+            // saved `watch_history` position (e.g. clicking a card in the
+            // "Continue watching" row). Falls back to 0 when there's no
+            // progress to resume.
+            let start_at = match q.t {
+                Some(t) => t.max(0),
+                None => resolve_resume_position(&state.db, c.id, &video_id).await,
+            };
             let tpl = ChildVideoTemplate {
                 display_name: c.display_name,
                 downloads_enabled,
                 video_id,
                 from: q.from.unwrap_or_default(),
                 unavailable: !allowed,
-                start_at: q.t.unwrap_or(0).max(0),
+                start_at,
                 video_title: result.title.clone().unwrap_or_default(),
                 channel_id: result.channel_id.clone().unwrap_or_default(),
                 channel_title: result.channel_title.clone().unwrap_or_default(),
