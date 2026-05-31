@@ -106,6 +106,10 @@ services:
   # if you want deliberate upgrades instead of recreate-time drift.
   pot-server:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
+    # Run tini as PID 1 so Node receives SIGTERM cleanly on stop/restart;
+    # without it the container ignores SIGTERM and the daemon falls back
+    # to a ~10s SIGKILL on every shutdown.
+    init: true
     restart: unless-stopped
     # No healthcheck: the upstream image is minimal and ships without
     # wget or curl, so there's no in-container way to probe it. The
