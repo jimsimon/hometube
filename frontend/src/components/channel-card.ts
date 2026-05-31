@@ -94,9 +94,8 @@ export class ChannelCard extends LitElement {
     // `thumbnailUrl`). Without a stored avatar the proxy would 404, so
     // fall back to the placeholder instead of requesting a broken image.
     const directThumb = normalizeThumbnailUrl(this.thumbnailUrl);
-    const thumbSrc = directThumb && this.channelId
-      ? channelThumbnailProxyUrl(this.channelId)
-      : directThumb;
+    const thumbSrc =
+      directThumb && this.channelId ? channelThumbnailProxyUrl(this.channelId) : directThumb;
     return html`
       <div class="card">
         <a href=${href} aria-label=${this.title}>
