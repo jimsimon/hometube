@@ -380,5 +380,6 @@ export function entryToCardItem(e: OfflineEntry): ContinueWatchingItem {
     duration_seconds: e.durationSeconds,
     progress_seconds: 0,
     last_watched_at: Math.floor(e.downloadedAt / 1000),
+    published_at: null,
   };
 }

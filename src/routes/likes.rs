@@ -53,6 +53,10 @@ pub struct LikeRow {
     pub channel_title: Option<String>,
     pub duration_seconds: Option<i64>,
     pub liked_at: i64,
+    /// Source publish date as unix seconds, joined from
+    /// `channel_videos`. `None` when the liked video has no archive row
+    /// (e.g. liked straight from search and never seen in a feed).
+    pub published_at: Option<i64>,
     /// `true` when the child can currently play the liked video.
     /// Matches the SQL-expressible portion of `can_child_view`: the
     /// video must be allowlisted (directly or via the captured
@@ -73,6 +77,7 @@ type LikeRowTuple = (
     Option<String>,
     Option<i64>,
     i64,
+    Option<i64>,
     i64,
 );
 
@@ -94,12 +99,14 @@ const LIKE_LIST_SQL: &str = concat!(
     "SELECT l.id, l.video_id, v.title AS video_title, \
             v.thumbnail_url AS video_thumbnail_url, \
             v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
+            vpa.published_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      JOIN videos v ON v.video_id = l.video_id \
      LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+     LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
@@ -117,12 +124,14 @@ const LIKE_ONE_SQL: &str = concat!(
     "SELECT l.id, l.video_id, v.title AS video_title, \
             v.thumbnail_url AS video_thumbnail_url, \
             v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
+            vpa.published_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      JOIN videos v ON v.video_id = l.video_id \
      LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+     LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
@@ -145,6 +154,7 @@ fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
         channel_title,
         duration_seconds,
         liked_at,
+        published_at,
         visible,
     ) = tuple;
     LikeRow {
@@ -156,6 +166,7 @@ fn row_from_tuple(tuple: LikeRowTuple) -> LikeRow {
         channel_title,
         duration_seconds,
         liked_at,
+        published_at,
         visible: visible != 0,
     }
 }

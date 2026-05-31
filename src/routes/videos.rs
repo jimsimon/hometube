@@ -53,6 +53,9 @@ pub struct VideoMetadata {
     pub channel_title: Option<String>,
     pub duration_seconds: Option<f64>,
     pub thumbnail_url: Option<String>,
+    /// Source publish date as unix seconds, looked up from
+    /// `channel_videos`. `None` when no archive row carries a date.
+    pub published_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +112,9 @@ pub async fn get_metadata(
 
     enforce_access(&state.db, &current, &video_id, &result).await?;
 
+    let published_at =
+        lookup_published_at(&state.db, &video_id, result.channel_id.as_deref()).await;
+
     Ok(Json(VideoMetadata {
         id: result.id.clone(),
         title: result.title.clone(),
@@ -116,7 +122,41 @@ pub async fn get_metadata(
         channel_title: result.channel_title.clone(),
         duration_seconds: result.duration,
         thumbnail_url: pick_thumbnail(&result),
+        published_at,
     }))
+}
+
+/// Best-effort lookup of a video's source publish date (unix seconds)
+/// from `channel_videos`. A video can be archived under more than one
+/// channel, so prefer the row matching the extracted `channel_id`, then
+/// fall back to the most recently seen row that carries a date. Returns
+/// `None` (rather than erroring) when nothing matches or the query
+/// fails, since the date is purely informational.
+///
+/// The list/feed read paths express the same "prefer matching channel,
+/// else most-recently-seen" rule through the `video_published_at` view
+/// (migration 027). This player path keeps its own parameterised query
+/// because it resolves a date from an extraction-time `channel_id` for
+/// videos that may not yet have a canonical `videos` row, which the
+/// `videos`-based view cannot serve.
+pub(crate) async fn lookup_published_at(
+    pool: &SqlitePool,
+    video_id: &str,
+    channel_id: Option<&str>,
+) -> Option<i64> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT published_at FROM channel_videos \
+         WHERE video_id = ? AND published_at IS NOT NULL \
+         ORDER BY (channel_id = ?) DESC, last_seen_at DESC \
+         LIMIT 1",
+    )
+    .bind(video_id)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 // ---------------------------------------------------------------------------

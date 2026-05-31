@@ -91,6 +91,7 @@ import {
   saveVideoToOpfs,
 } from "../services/offline.js";
 import {
+  formatRelativeDate,
   normalizeThumbnailUrl,
   type CaptionTrack,
   type ChildSettings,
@@ -457,6 +458,11 @@ export class VideoPlayer extends LitElement {
       }
       .meta .channel {
         color: var(--wa-color-text-quiet);
+      }
+      .meta .published {
+        color: var(--wa-color-text-quiet);
+        font-size: 0.9rem;
+        margin-top: 0.15rem;
       }
       .chrome {
         display: flex;
@@ -1381,6 +1387,7 @@ export class VideoPlayer extends LitElement {
     }
     const posterUrl = normalizeThumbnailUrl(this.metadata?.thumbnail_url);
     const posterStyle = this.audioOnly && posterUrl ? `background-image: url(${posterUrl});` : "";
+    const publishedLabel = formatRelativeDate(this.metadata?.published_at);
     return html`
       <div class="player-shell">
         <div class="shaka-container" style=${posterStyle}>
@@ -1408,6 +1415,7 @@ export class VideoPlayer extends LitElement {
             ${this.metadata.channel_title
               ? html`<div class="channel">${this.metadata.channel_title}</div>`
               : null}
+            ${publishedLabel ? html`<div class="published">${publishedLabel}</div>` : null}
             <div class="chrome">
               ${this.preview
                 ? nothing

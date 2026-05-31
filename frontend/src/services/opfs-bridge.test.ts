@@ -19,6 +19,7 @@ const META: VideoMetadata = {
   channel_title: null,
   duration_seconds: 0,
   thumbnail_url: null,
+  published_at: null,
 };
 
 async function clearOpfs(): Promise<void> {

@@ -93,6 +93,7 @@ export class HiddenPage extends LitElement {
               .channelId=${v.channel_id}
               .channelTitle=${v.channel_title}
               .duration=${v.duration_seconds}
+              .publishedAt=${v.published_at}
             ></hometube-video-card>
           `,
         )}

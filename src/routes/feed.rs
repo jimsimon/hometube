@@ -62,6 +62,9 @@ pub struct ContinueWatchingItem {
     pub duration_seconds: Option<i64>,
     pub progress_seconds: i64,
     pub last_watched_at: i64,
+    /// Source publish date as unix seconds, joined from
+    /// `channel_videos`. `None` when the video has no archive row.
+    pub published_at: Option<i64>,
     /// Skipped from the JSON wire shape (the row component doesn't need
     /// it) but required server-side so the access check can recognise
     /// channel-allowlisted videos.
@@ -84,10 +87,12 @@ pub async fn continue_watching(
                 v.thumbnail_url AS video_thumbnail_url, \
                 ch.channel_title, \
                 v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
+                vpa.published_at, \
                 v.channel_id \
          FROM watch_history wh \
          JOIN videos v ON v.video_id = wh.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
          WHERE wh.child_account_id = ? \
          ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
@@ -203,6 +208,9 @@ pub struct WatchAgainItem {
     pub channel_title: Option<String>,
     pub duration_seconds: Option<i64>,
     pub last_watched_at: i64,
+    /// Source publish date as unix seconds, joined from
+    /// `channel_videos`. `None` when the video has no archive row.
+    pub published_at: Option<i64>,
     /// Server-side only: rows in this feed are by definition finished,
     /// so the UI doesn't render a progress bar. Kept on the struct for
     /// SQL hydration / future use, but omitted from the wire shape.
@@ -229,10 +237,12 @@ pub async fn watch_again(
                 v.thumbnail_url AS video_thumbnail_url, \
                 ch.channel_title, \
                 v.duration_seconds, wh.progress_seconds, wh.last_watched_at, \
+                vpa.published_at, \
                 v.channel_id \
          FROM watch_history wh \
          JOIN videos v ON v.video_id = wh.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
          WHERE wh.child_account_id = ? \
          ORDER BY wh.last_watched_at DESC \
          LIMIT ?",
@@ -493,7 +503,9 @@ pub struct NewVideoItem {
     pub channel_id: Option<String>,
     pub channel_title: Option<String>,
     pub thumbnail_url: Option<String>,
-    pub published_at: Option<String>,
+    /// Source publish date as unix seconds. `None` when the cache row
+    /// never resolved a timestamp.
+    pub published_at: Option<i64>,
     pub source_kind: String, // "channel"
     pub source_id: String,
 }

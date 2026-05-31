@@ -628,8 +628,8 @@ pub async fn feed_for_child(
         channel_id: String,
         channel_title: Option<String>,
         thumbnail_url: Option<String>,
-        published_raw: Option<String>,
         #[allow(dead_code)]
+        published_raw: Option<String>,
         published_at: Option<i64>,
     }
 
@@ -678,7 +678,7 @@ pub async fn feed_for_child(
             channel_id: Some(r.channel_id.clone()),
             channel_title: r.channel_title,
             thumbnail_url: r.thumbnail_url,
-            published_at: r.published_raw,
+            published_at: r.published_at,
             source_kind: KIND_CHANNEL.to_string(),
             source_id: r.channel_id,
         });
