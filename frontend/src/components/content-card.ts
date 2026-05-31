@@ -18,6 +18,8 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 
+import { normalizeThumbnailUrl } from "../types/index.js";
+
 @customElement("hometube-content-card")
 export class ContentCard extends LitElement {
   @property({ type: String })
@@ -166,11 +168,10 @@ export class ContentCard extends LitElement {
   }
 
   private renderThumb() {
+    const src = normalizeThumbnailUrl(this.thumbnailUrl);
     return html`
       <div class="thumb">
-        ${this.thumbnailUrl
-          ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
-          : nothing}
+        ${src ? html`<img src=${src} alt="" loading="lazy" />` : nothing}
         ${this.variant === "full" && this.duration != null
           ? html`<span class="duration">${this.formatDuration(this.duration)}</span>`
           : nothing}

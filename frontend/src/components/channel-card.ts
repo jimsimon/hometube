@@ -9,6 +9,8 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 
+import { normalizeThumbnailUrl } from "../types/index.js";
+
 import "./subscribe-button.js";
 
 @customElement("hometube-channel-card")
@@ -87,11 +89,12 @@ export class ChannelCard extends LitElement {
 
   override render() {
     const href = this.channelId ? `/child/channel/${encodeURIComponent(this.channelId)}` : "#";
+    const thumbSrc = normalizeThumbnailUrl(this.thumbnailUrl);
     return html`
       <div class="card">
         <a href=${href} aria-label=${this.title}>
-          ${this.thumbnailUrl
-            ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />`
+          ${thumbSrc
+            ? html`<img src=${thumbSrc} alt="" loading="lazy" />`
             : html`<div class="placeholder" aria-hidden="true"></div>`}
           <div class="title">${this.title || "Channel"}</div>
         </a>

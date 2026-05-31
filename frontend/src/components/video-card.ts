@@ -18,6 +18,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { api, ApiError } from "../services/api.js";
+import { normalizeThumbnailUrl } from "../types/index.js";
 
 @customElement("hometube-video-card")
 export class VideoCard extends LitElement {
@@ -314,9 +315,10 @@ export class VideoCard extends LitElement {
 
   private renderBody() {
     const pct = Math.max(0, Math.min(100, this.progress * 100));
+    const thumbSrc = normalizeThumbnailUrl(this.thumbnailUrl);
     return html`
       <div class="thumb">
-        ${this.thumbnailUrl ? html`<img src=${this.thumbnailUrl} alt="" loading="lazy" />` : null}
+        ${thumbSrc ? html`<img src=${thumbSrc} alt="" loading="lazy" />` : null}
         ${this.duration != null
           ? html`<span class="duration">${this.formatDuration(this.duration)}</span>`
           : null}

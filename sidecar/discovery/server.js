@@ -29,6 +29,18 @@ async function getClient() {
 // Thumbnail helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Promote a protocol-relative URL (`//host/path`) to an explicit
+ * `https://` URL. youtubei.js returns channel avatar thumbnails in
+ * protocol-relative form; HomeTube stores and validates these URLs
+ * server-side (the allowlist add rejects anything that isn't an
+ * explicit `https://` YouTube host), so we normalise at the source.
+ */
+function normalizeThumbnailUrl(url) {
+  if (typeof url !== "string") return url;
+  return url.startsWith("//") ? `https:${url}` : url;
+}
+
 /** Convert a youtubei.js Thumbnail[] array into the { size: { url, width, height } } map HomeTube expects. */
 function mapThumbnails(thumbnails) {
   if (!thumbnails || !Array.isArray(thumbnails) || thumbnails.length === 0)
@@ -41,7 +53,7 @@ function mapThumbnails(thumbnails) {
   const names = ["default", "medium", "high", "standard", "maxres"];
   for (let i = 0; i < sorted.length && i < names.length; i++) {
     out[names[i]] = {
-      url: sorted[i].url,
+      url: normalizeThumbnailUrl(sorted[i].url),
       width: sorted[i].width || null,
       height: sorted[i].height || null,
     };

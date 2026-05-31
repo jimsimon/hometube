@@ -105,6 +105,25 @@ const MAX_THUMBNAIL_URL_LEN: usize = 2048;
 /// unicode headroom.
 const MAX_DESCRIPTION_LEN: usize = 8192;
 
+/// Promote a protocol-relative thumbnail URL (`//host/path`) to an
+/// explicit `https://` URL, leaving everything else untouched.
+///
+/// youtubei.js returns channel avatar URLs in protocol-relative form
+/// (e.g. `//yt3.ggpht.com/...` or `//yt3.googleusercontent.com/...`).
+/// A browser resolves these against the page scheme, but
+/// [`is_safe_thumbnail_url`] deliberately requires an explicit
+/// `https://` prefix, so without this normalisation every channel add
+/// from a search result is rejected with `400`. We only rewrite a bare
+/// `//` prefix — a `http://` URL is left as-is so the validator still
+/// rejects it.
+fn normalize_thumbnail_url(url: &str) -> String {
+    let trimmed = url.trim();
+    match trimmed.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => trimmed.to_string(),
+    }
+}
+
 /// Validate that a body-supplied thumbnail URL is `https://` and
 /// (loosely) a YouTube-controlled host. Body data flows from the
 /// parent search response which is generated server-side from a
@@ -210,12 +229,20 @@ pub async fn add_channel(
             )));
         }
     }
-    let body_thumb = body
+    // Normalise protocol-relative URLs (`//host/path`) up front. The
+    // discovery sidecar surfaces YouTube channel avatars in
+    // protocol-relative form (e.g. `//yt3.ggpht.com/...`), the parent
+    // search response forwards them verbatim, and the allowlist POST
+    // body carries them through to here. Promoting them to an explicit
+    // `https://` URL keeps the DB free of scheme-relative values and
+    // lets `is_safe_thumbnail_url` stay strict about requiring https.
+    let body_thumb: Option<String> = body
         .channel_thumbnail_url
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if let Some(u) = body_thumb {
+        .filter(|s| !s.is_empty())
+        .map(normalize_thumbnail_url);
+    if let Some(u) = body_thumb.as_deref() {
         // Reject body-supplied thumbnail URLs that don't point at a
         // YouTube-controlled host. Rendered child-side via <img src>
         // so this is a small-but-real XSS/SSRF surface if a malicious
@@ -297,7 +324,7 @@ pub async fn add_channel(
         .ok_or_else(|| {
             AppError::BadRequest("channel_title required (sidecar lookup also failed)".into())
         })?;
-    let thumb = body_thumb.map(str::to_string).or_else(|| {
+    let thumb = body_thumb.or_else(|| {
         info.as_ref()
             .and_then(|i| preferred_thumbnail(&i.thumbnails))
     });
@@ -718,6 +745,47 @@ fn parse_video_id(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_thumbnail_url_promotes_protocol_relative_to_https() {
+        // The exact shape youtubei.js returns for channel avatars.
+        assert_eq!(
+            normalize_thumbnail_url(
+                "//yt3.ggpht.com/uRsSTL57uPu9svBF2d6ilYHqAxKR=s176-c-k-c0x00ffffff-no-rj-mo"
+            ),
+            "https://yt3.ggpht.com/uRsSTL57uPu9svBF2d6ilYHqAxKR=s176-c-k-c0x00ffffff-no-rj-mo"
+        );
+        assert_eq!(
+            normalize_thumbnail_url("//yt3.googleusercontent.com/ytc/AIdro_x=s88"),
+            "https://yt3.googleusercontent.com/ytc/AIdro_x=s88"
+        );
+        // Already-explicit https URLs pass through untouched.
+        assert_eq!(
+            normalize_thumbnail_url("https://i.ytimg.com/vi/x/hqdefault.jpg"),
+            "https://i.ytimg.com/vi/x/hqdefault.jpg"
+        );
+        // http:// is NOT rewritten — the validator must still reject it.
+        assert_eq!(
+            normalize_thumbnail_url("http://i.ytimg.com/vi/x/hqdefault.jpg"),
+            "http://i.ytimg.com/vi/x/hqdefault.jpg"
+        );
+    }
+
+    #[test]
+    fn protocol_relative_youtube_avatar_passes_after_normalization() {
+        // Regression: a protocol-relative channel avatar from the
+        // discovery sidecar must be accepted once normalised. Before the
+        // fix this was rejected with 400, blocking every channel add.
+        let raw = "//yt3.ggpht.com/QQzt4UB9VlT5zHh=s176-c-k-c0x00ffffff-no-rj-mo";
+        assert!(
+            !is_safe_thumbnail_url(raw),
+            "raw protocol-relative URL is (correctly) not yet https"
+        );
+        assert!(
+            is_safe_thumbnail_url(&normalize_thumbnail_url(raw)),
+            "normalised protocol-relative YouTube avatar must validate"
+        );
+    }
 
     #[test]
     fn is_safe_thumbnail_url_accepts_real_youtube_hosts() {

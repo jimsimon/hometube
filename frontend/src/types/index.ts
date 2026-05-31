@@ -280,11 +280,34 @@ export interface SleepTimerRow {
   expires_at: number | null;
 }
 
+/**
+ * Promote a protocol-relative thumbnail URL (`//host/path`) to an
+ * explicit `https://` URL, returning `null` for empty/missing input.
+ *
+ * YouTube (via the discovery sidecar) returns channel avatars — and
+ * sometimes video thumbnails — in protocol-relative form. A browser
+ * resolves these against the page scheme, so on an `http://` dev origin
+ * `//yt3.ggpht.com/...` becomes `http://yt3.ggpht.com/...`, which
+ * YouTube's CDN refuses and the `<img>` renders broken. Pinning these
+ * to `https://` makes thumbnails load regardless of the page scheme and
+ * regardless of whether the value came live from search or from a row
+ * persisted before the sidecar normalisation landed.
+ */
+export function normalizeThumbnailUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("//") ? `https:${trimmed}` : trimmed;
+}
+
 /** Best-effort thumbnail-pick helper used across components. */
 export function pickThumbnail(thumbs: Record<string, { url: string }>): string | null {
   for (const key of ["maxres", "high", "standard", "medium", "default"]) {
-    const t = thumbs[key];
-    if (t) return t.url;
+    // Fall through to the next-best resolution when a present entry has
+    // an empty/whitespace URL, so a blank top key can't shadow a usable
+    // lower one. `normalizeThumbnailUrl` returns null for empty input.
+    const normalized = normalizeThumbnailUrl(thumbs[key]?.url);
+    if (normalized) return normalized;
   }
   return null;
 }

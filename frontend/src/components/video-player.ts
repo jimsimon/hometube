@@ -90,7 +90,13 @@ import {
   getStorageEstimate,
   saveVideoToOpfs,
 } from "../services/offline.js";
-import type { CaptionTrack, ChildSettings, StreamResponse, VideoMetadata } from "../types/index.js";
+import {
+  normalizeThumbnailUrl,
+  type CaptionTrack,
+  type ChildSettings,
+  type StreamResponse,
+  type VideoMetadata,
+} from "../types/index.js";
 
 import "./sleep-timer.js";
 import "./like-button.js";
@@ -1373,14 +1379,12 @@ export class VideoPlayer extends LitElement {
     if (this.error) {
       return html`<hometube-error-banner .message=${this.error}></hometube-error-banner>`;
     }
-    const posterStyle =
-      this.audioOnly && this.metadata?.thumbnail_url
-        ? `background-image: url(${this.metadata.thumbnail_url});`
-        : "";
+    const posterUrl = normalizeThumbnailUrl(this.metadata?.thumbnail_url);
+    const posterStyle = this.audioOnly && posterUrl ? `background-image: url(${posterUrl});` : "";
     return html`
       <div class="player-shell">
         <div class="shaka-container" style=${posterStyle}>
-          <video autoplay .poster=${this.metadata?.thumbnail_url ?? ""}></video>
+          <video autoplay .poster=${posterUrl ?? ""}></video>
         </div>
         ${this.continuePromptOpen
           ? html`
