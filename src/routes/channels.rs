@@ -16,7 +16,7 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::header,
+    http::{header, HeaderValue},
     response::Response,
     Json,
 };
@@ -369,14 +369,22 @@ pub async fn get_channel_thumbnail(
         return Err(AppError::NotFound);
     }
 
-    let res = reqwest::get(&url).await.map_err(AppError::Http)?;
+    // Bound the upstream fetch: a slow/unresponsive CDN must not pin a
+    // request task open indefinitely.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(AppError::Http)?;
+    let res = client.get(&url).send().await.map_err(AppError::Http)?;
     let status = res.status();
+    // Reuse the upstream content type when it's a valid header value;
+    // fall back to image/jpeg rather than panicking on a malformed
+    // upstream header.
     let content_type = res
         .headers()
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
+        .and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("image/jpeg"));
 
     // Only cache small, successful responses; avatars are a few KB.
     // Mirrors the ceiling in `videos::get_thumbnail`.
@@ -402,7 +410,7 @@ pub async fn get_channel_thumbnail(
         *response.status_mut() = status;
         response
             .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            .insert(header::CONTENT_TYPE, content_type);
         Ok(response)
     } else {
         let stream = res.bytes_stream().map_err(std::io::Error::other);
@@ -411,7 +419,7 @@ pub async fn get_channel_thumbnail(
         *response.status_mut() = status;
         response
             .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            .insert(header::CONTENT_TYPE, content_type);
         Ok(response)
     }
 }
