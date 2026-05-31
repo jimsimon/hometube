@@ -37,6 +37,15 @@ describe("pickThumbnail", () => {
     ).toBe("https://yt3.ggpht.com/big=s176");
   });
 
+  it("falls through an empty top-resolution URL to the next usable one", () => {
+    expect(
+      pickThumbnail({
+        maxres: { url: "" },
+        high: { url: "//host/x" },
+      }),
+    ).toBe("https://host/x");
+  });
+
   it("returns null when no thumbnails are present", () => {
     expect(pickThumbnail({})).toBeNull();
   });

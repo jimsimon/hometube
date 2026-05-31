@@ -303,8 +303,11 @@ export function normalizeThumbnailUrl(url: string | null | undefined): string | 
 /** Best-effort thumbnail-pick helper used across components. */
 export function pickThumbnail(thumbs: Record<string, { url: string }>): string | null {
   for (const key of ["maxres", "high", "standard", "medium", "default"]) {
-    const t = thumbs[key];
-    if (t) return normalizeThumbnailUrl(t.url);
+    // Fall through to the next-best resolution when a present entry has
+    // an empty/whitespace URL, so a blank top key can't shadow a usable
+    // lower one. `normalizeThumbnailUrl` returns null for empty input.
+    const normalized = normalizeThumbnailUrl(thumbs[key]?.url);
+    if (normalized) return normalized;
   }
   return null;
 }
