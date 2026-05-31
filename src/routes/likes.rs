@@ -99,20 +99,14 @@ const LIKE_LIST_SQL: &str = concat!(
     "SELECT l.id, l.video_id, v.title AS video_title, \
             v.thumbnail_url AS video_thumbnail_url, \
             v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
-            COALESCE( \
-                (SELECT cv.published_at FROM channel_videos cv \
-                  WHERE cv.video_id = l.video_id AND cv.channel_id = v.channel_id \
-                    AND cv.published_at IS NOT NULL LIMIT 1), \
-                (SELECT cv.published_at FROM channel_videos cv \
-                  WHERE cv.video_id = l.video_id AND cv.published_at IS NOT NULL \
-                  ORDER BY cv.last_seen_at DESC LIMIT 1) \
-            ) AS published_at, \
+            vpa.published_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      JOIN videos v ON v.video_id = l.video_id \
      LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+     LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \
@@ -130,20 +124,14 @@ const LIKE_ONE_SQL: &str = concat!(
     "SELECT l.id, l.video_id, v.title AS video_title, \
             v.thumbnail_url AS video_thumbnail_url, \
             v.channel_id, ch.channel_title, v.duration_seconds, l.liked_at, \
-            COALESCE( \
-                (SELECT cv.published_at FROM channel_videos cv \
-                  WHERE cv.video_id = l.video_id AND cv.channel_id = v.channel_id \
-                    AND cv.published_at IS NOT NULL LIMIT 1), \
-                (SELECT cv.published_at FROM channel_videos cv \
-                  WHERE cv.video_id = l.video_id AND cv.published_at IS NOT NULL \
-                  ORDER BY cv.last_seen_at DESC LIMIT 1) \
-            ) AS published_at, \
+            vpa.published_at, \
             CASE WHEN (a.id IS NOT NULL OR c.id IS NOT NULL) \
                   AND b.id IS NULL AND h.id IS NULL \
                  THEN 1 ELSE 0 END AS visible \
      FROM video_likes l \
      JOIN videos v ON v.video_id = l.video_id \
      LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+     LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
      LEFT JOIN allowlisted_videos a \
        ON a.child_account_id = l.child_account_id AND a.video_id = l.video_id \
      LEFT JOIN allowlisted_channels c \

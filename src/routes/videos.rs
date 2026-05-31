@@ -132,6 +132,13 @@ pub async fn get_metadata(
 /// fall back to the most recently seen row that carries a date. Returns
 /// `None` (rather than erroring) when nothing matches or the query
 /// fails, since the date is purely informational.
+///
+/// The list/feed read paths express the same "prefer matching channel,
+/// else most-recently-seen" rule through the `video_published_at` view
+/// (migration 027). This player path keeps its own parameterised query
+/// because it resolves a date from an extraction-time `channel_id` for
+/// videos that may not yet have a canonical `videos` row, which the
+/// `videos`-based view cannot serve.
 pub(crate) async fn lookup_published_at(
     pool: &SqlitePool,
     video_id: &str,

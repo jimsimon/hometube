@@ -51,17 +51,11 @@ pub async fn list(
                 v.thumbnail_url AS video_thumbnail_url, \
                 v.duration_seconds, \
                 hv.hidden_at, \
-                COALESCE( \
-                    (SELECT cv.published_at FROM channel_videos cv \
-                      WHERE cv.video_id = hv.video_id AND cv.channel_id = v.channel_id \
-                        AND cv.published_at IS NOT NULL LIMIT 1), \
-                    (SELECT cv.published_at FROM channel_videos cv \
-                      WHERE cv.video_id = hv.video_id AND cv.published_at IS NOT NULL \
-                      ORDER BY cv.last_seen_at DESC LIMIT 1) \
-                ) AS published_at \
+                vpa.published_at \
          FROM hidden_videos hv \
          JOIN videos v ON v.video_id = hv.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
          WHERE hv.child_account_id = ? \
          ORDER BY hv.hidden_at DESC",
     )
@@ -138,17 +132,11 @@ pub async fn add(
         "SELECT hv.id, hv.video_id, v.title AS video_title, v.channel_id, \
                 ch.channel_title, v.thumbnail_url AS video_thumbnail_url, \
                 v.duration_seconds, hv.hidden_at, \
-                COALESCE( \
-                    (SELECT cv.published_at FROM channel_videos cv \
-                      WHERE cv.video_id = hv.video_id AND cv.channel_id = v.channel_id \
-                        AND cv.published_at IS NOT NULL LIMIT 1), \
-                    (SELECT cv.published_at FROM channel_videos cv \
-                      WHERE cv.video_id = hv.video_id AND cv.published_at IS NOT NULL \
-                      ORDER BY cv.last_seen_at DESC LIMIT 1) \
-                ) AS published_at \
+                vpa.published_at \
          FROM hidden_videos hv \
          JOIN videos v ON v.video_id = hv.video_id \
          LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+         LEFT JOIN video_published_at vpa ON vpa.video_id = v.video_id \
          WHERE hv.child_account_id = ? AND hv.video_id = ?",
     )
     .bind(current.id)
