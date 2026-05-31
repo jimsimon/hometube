@@ -136,12 +136,11 @@ export class PreviewVideo extends LitElement {
         : null;
 
     const previewHref = `/parent/preview/video/${encodeURIComponent(this.videoId)}`;
+    const thumbSrc = normalizeThumbnailUrl(meta.thumbnail_url);
     return html`
       <article aria-label=${`Preview of ${meta.title ?? meta.id}`}>
         <a href=${previewHref} class="thumb-wrap" title="Watch full preview">
-          ${normalizeThumbnailUrl(meta.thumbnail_url)
-            ? html`<img src=${normalizeThumbnailUrl(meta.thumbnail_url)!} alt="" loading="lazy" />`
-            : nothing}
+          ${thumbSrc ? html`<img src=${thumbSrc} alt="" loading="lazy" />` : nothing}
           <div class="play-icon" aria-hidden="true">▶</div>
         </a>
         <div>
