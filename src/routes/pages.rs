@@ -772,7 +772,7 @@ pub struct VideoPageQuery {
 /// as "no saved position" so a transient hiccup just starts the video
 /// from the beginning rather than failing the page render.
 async fn resolve_resume_position(db: &SqlitePool, child_id: i64, video_id: &str) -> i64 {
-    let row: Option<(i64, Option<i64>)> = sqlx::query_as(
+    let row: Option<(i64, Option<i64>)> = match sqlx::query_as(
         "SELECT wh.progress_seconds, v.duration_seconds \
          FROM watch_history wh \
          JOIN videos v ON v.video_id = wh.video_id \
@@ -782,7 +782,18 @@ async fn resolve_resume_position(db: &SqlitePool, child_id: i64, video_id: &str)
     .bind(video_id)
     .fetch_optional(db)
     .await
-    .unwrap_or(None);
+    {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                child_id,
+                video_id,
+                error = %err,
+                "failed to read watch_history resume position; starting at 0"
+            );
+            None
+        }
+    };
 
     match row {
         Some((progress_seconds, duration_seconds))
