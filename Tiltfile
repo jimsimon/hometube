@@ -98,7 +98,20 @@ local_resource(
 # port 4416 (same as the deployed compose stack).
 local_resource(
     'pot-server',
-    serve_cmd='docker run --rm -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest',
+    # `docker run` only attaches a client to a daemon-owned container, so
+    # Tilt's teardown (SIGTERM then SIGKILL of this process) doesn't stop
+    # the container — it orphans it, leaking port 4416 and blocking the
+    # next `tilt up`. Three things keep restarts clean:
+    #   - `docker rm -f` reaps any orphan from a prior run before we
+    #     re-bind 4416 (this is what actually breaks the leak cycle).
+    #   - `--name` makes that orphan deterministically removable.
+    #   - `exec` hands Tilt's signal to the docker client (not the shell)
+    #     and `--init` runs tini as PID 1 so the container stops promptly.
+    serve_cmd='''
+        docker rm -f hometube-pot-server >/dev/null 2>&1 || true
+        exec docker run --rm --init --name hometube-pot-server \\
+            -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest
+    ''',
     labels=['deps'],
     readiness_probe=probe(
         period_secs=5,
