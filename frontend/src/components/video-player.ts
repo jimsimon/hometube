@@ -509,7 +509,8 @@ export class VideoPlayer extends LitElement {
         color: white;
         border-color: transparent;
       }
-      .download-button[disabled] {
+      .download-button[disabled],
+      .audio-toggle[disabled] {
         opacity: 0.7;
         cursor: progress;
       }
@@ -518,6 +519,14 @@ export class VideoPlayer extends LitElement {
 
   /** Guard against concurrent load() calls (connectedCallback + updated race). */
   private loadInFlight = false;
+
+  /**
+   * Guard against concurrent attachSource() calls (e.g. a rapid
+   * audio-only toggle) so overlapping destroy/recreate cycles can't
+   * race on the same <video> element. Reactive so the toggle button
+   * can disable itself while a re-attach is pending.
+   */
+  @state() private attachSourceInFlight = false;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -641,8 +650,22 @@ export class VideoPlayer extends LitElement {
    * used when re-attaching mid-playback (e.g. the audio-only toggle) so
    * playback continues from the live playhead instead of snapping back
    * to the original `start-at`. When omitted, `this.startAt` is used.
+   *
+   * Guarded by `attachSourceInFlight` so overlapping invocations (e.g.
+   * a rapid audio-only double-tap) can't run concurrent
+   * `destroyPlayer()` / `new Shaka.Player()` cycles on the same element.
    */
   private async attachSource(resumeAt?: number): Promise<void> {
+    if (this.attachSourceInFlight) return;
+    this.attachSourceInFlight = true;
+    try {
+      await this.attachSourceInner(resumeAt);
+    } finally {
+      this.attachSourceInFlight = false;
+    }
+  }
+
+  private async attachSourceInner(resumeAt?: number): Promise<void> {
     if (!this.videoEl || !this.containerEl) return;
 
     // Destroy any existing player instance (e.g. on videoId change).
@@ -1063,6 +1086,9 @@ export class VideoPlayer extends LitElement {
   }
 
   private toggleAudioOnly = (): void => {
+    // Ignore taps while a (re)attach is still pending so we don't kick
+    // off overlapping destroyPlayer()/new Shaka.Player() cycles.
+    if (this.attachSourceInFlight) return;
     this.audioOnly = !this.audioOnly;
     try {
       localStorage.setItem(AUDIO_ONLY_KEY, String(this.audioOnly));
@@ -1472,6 +1498,7 @@ export class VideoPlayer extends LitElement {
                 type="button"
                 class="audio-toggle"
                 aria-pressed=${this.audioOnly ? "true" : "false"}
+                ?disabled=${this.attachSourceInFlight}
                 @click=${this.toggleAudioOnly}
               >
                 ${this.audioOnly ? "Show video" : "Audio only"}
