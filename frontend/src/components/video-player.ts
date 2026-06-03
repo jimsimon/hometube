@@ -634,7 +634,15 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  private async attachSource(): Promise<void> {
+  /**
+   * (Re)attach the shaka player to the current source.
+   *
+   * `resumeAt` overrides the deep-link/resume position for this load —
+   * used when re-attaching mid-playback (e.g. the audio-only toggle) so
+   * playback continues from the live playhead instead of snapping back
+   * to the original `start-at`. When omitted, `this.startAt` is used.
+   */
+  private async attachSource(resumeAt?: number): Promise<void> {
     if (!this.videoEl || !this.containerEl) return;
 
     // Destroy any existing player instance (e.g. on videoId change).
@@ -880,9 +888,10 @@ export class VideoPlayer extends LitElement {
     // glitch: a manual post-load seek races shaka's own playhead
     // initialization, which starts at 0. Passing startTime here makes
     // shaka establish the playhead and buffer from that point directly.
+    const resumePosition = resumeAt ?? this.startAt;
     const startTime =
-      this.startAt != null && Number.isFinite(this.startAt) && this.startAt > 0
-        ? this.startAt
+      resumePosition != null && Number.isFinite(resumePosition) && resumePosition > 0
+        ? resumePosition
         : undefined;
 
     // Load the appropriate source.
@@ -1060,7 +1069,10 @@ export class VideoPlayer extends LitElement {
     } catch {
       // localStorage unavailable.
     }
-    void this.attachSource();
+    // Capture the live playhead before re-attaching so playback resumes
+    // where the user is, not at the original deep-link/resume position.
+    const resumeAt = this.videoEl?.currentTime;
+    void this.attachSource(Number.isFinite(resumeAt) ? resumeAt : undefined);
   };
 
   private onVolumeChange = (): void => {
