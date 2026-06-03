@@ -874,13 +874,24 @@ export class VideoPlayer extends LitElement {
       // localStorage unavailable — use browser default.
     }
 
+    // Resume position passed to shaka's load(). Letting shaka set the
+    // initial playhead (rather than seeking via video.currentTime after
+    // load() resolves) avoids the "jump to resume, then snap back to 0"
+    // glitch: a manual post-load seek races shaka's own playhead
+    // initialization, which starts at 0. Passing startTime here makes
+    // shaka establish the playhead and buffer from that point directly.
+    const startTime =
+      this.startAt != null && Number.isFinite(this.startAt) && this.startAt > 0
+        ? this.startAt
+        : undefined;
+
     // Load the appropriate source.
     if (this.audioOnly) {
       const audioUrl = this.bestAudioUrl();
       if (audioUrl) {
         // Explicit mimeType prevents shaka from guessing based on the
         // proxy URL (which has no file extension).
-        await player.load(audioUrl, undefined, "audio/webm");
+        await player.load(audioUrl, startTime, "audio/webm");
       }
     } else {
       // When casting is enabled, load the server-minted cast manifest
@@ -915,7 +926,7 @@ export class VideoPlayer extends LitElement {
       // Explicitly specify the MIME type so shaka doesn't have to guess
       // from the URL or Content-Type header (which may be text/xml or
       // application/octet-stream depending on the server config).
-      await player.load(manifestUrl, undefined, "application/dash+xml");
+      await player.load(manifestUrl, startTime, "application/dash+xml");
     }
 
     // Add caption tracks (non-fatal — some languages may 404).
@@ -951,11 +962,6 @@ export class VideoPlayer extends LitElement {
     // relying on shaka's own "textchanged" event (which only fires
     // from shaka's internal text management path).
     this.videoEl.textTracks.addEventListener("change", this.onCaptionChange);
-
-    // Seek to start position if specified.
-    if (this.startAt != null && Number.isFinite(this.startAt)) {
-      this.videoEl.currentTime = this.startAt;
-    }
 
     // Lock playback rate if needed.
     if (this.settings?.playback_speed_locked) {
