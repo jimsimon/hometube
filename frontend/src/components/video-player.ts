@@ -509,7 +509,8 @@ export class VideoPlayer extends LitElement {
         color: white;
         border-color: transparent;
       }
-      .download-button[disabled] {
+      .download-button[disabled],
+      .audio-toggle[disabled] {
         opacity: 0.7;
         cursor: progress;
       }
@@ -518,6 +519,14 @@ export class VideoPlayer extends LitElement {
 
   /** Guard against concurrent load() calls (connectedCallback + updated race). */
   private loadInFlight = false;
+
+  /**
+   * Guard against concurrent attachSource() calls (e.g. a rapid
+   * audio-only toggle) so overlapping destroy/recreate cycles can't
+   * race on the same <video> element. Reactive so the toggle button
+   * can disable itself while a re-attach is pending.
+   */
+  @state() private attachSourceInFlight = false;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -634,7 +643,29 @@ export class VideoPlayer extends LitElement {
     }
   }
 
-  private async attachSource(): Promise<void> {
+  /**
+   * (Re)attach the shaka player to the current source.
+   *
+   * `resumeAt` overrides the deep-link/resume position for this load —
+   * used when re-attaching mid-playback (e.g. the audio-only toggle) so
+   * playback continues from the live playhead instead of snapping back
+   * to the original `start-at`. When omitted, `this.startAt` is used.
+   *
+   * Guarded by `attachSourceInFlight` so overlapping invocations (e.g.
+   * a rapid audio-only double-tap) can't run concurrent
+   * `destroyPlayer()` / `new Shaka.Player()` cycles on the same element.
+   */
+  private async attachSource(resumeAt?: number): Promise<void> {
+    if (this.attachSourceInFlight) return;
+    this.attachSourceInFlight = true;
+    try {
+      await this.attachSourceInner(resumeAt);
+    } finally {
+      this.attachSourceInFlight = false;
+    }
+  }
+
+  private async attachSourceInner(resumeAt?: number): Promise<void> {
     if (!this.videoEl || !this.containerEl) return;
 
     // Destroy any existing player instance (e.g. on videoId change).
@@ -874,13 +905,25 @@ export class VideoPlayer extends LitElement {
       // localStorage unavailable — use browser default.
     }
 
+    // Resume position passed to shaka's load(). Letting shaka set the
+    // initial playhead (rather than seeking via video.currentTime after
+    // load() resolves) avoids the "jump to resume, then snap back to 0"
+    // glitch: a manual post-load seek races shaka's own playhead
+    // initialization, which starts at 0. Passing startTime here makes
+    // shaka establish the playhead and buffer from that point directly.
+    const resumePosition = resumeAt ?? this.startAt;
+    const startTime =
+      resumePosition != null && Number.isFinite(resumePosition) && resumePosition > 0
+        ? resumePosition
+        : undefined;
+
     // Load the appropriate source.
     if (this.audioOnly) {
       const audioUrl = this.bestAudioUrl();
       if (audioUrl) {
         // Explicit mimeType prevents shaka from guessing based on the
         // proxy URL (which has no file extension).
-        await player.load(audioUrl, undefined, "audio/webm");
+        await player.load(audioUrl, startTime, "audio/webm");
       }
     } else {
       // When casting is enabled, load the server-minted cast manifest
@@ -915,7 +958,7 @@ export class VideoPlayer extends LitElement {
       // Explicitly specify the MIME type so shaka doesn't have to guess
       // from the URL or Content-Type header (which may be text/xml or
       // application/octet-stream depending on the server config).
-      await player.load(manifestUrl, undefined, "application/dash+xml");
+      await player.load(manifestUrl, startTime, "application/dash+xml");
     }
 
     // Add caption tracks (non-fatal — some languages may 404).
@@ -951,11 +994,6 @@ export class VideoPlayer extends LitElement {
     // relying on shaka's own "textchanged" event (which only fires
     // from shaka's internal text management path).
     this.videoEl.textTracks.addEventListener("change", this.onCaptionChange);
-
-    // Seek to start position if specified.
-    if (this.startAt != null && Number.isFinite(this.startAt)) {
-      this.videoEl.currentTime = this.startAt;
-    }
 
     // Lock playback rate if needed.
     if (this.settings?.playback_speed_locked) {
@@ -1048,13 +1086,19 @@ export class VideoPlayer extends LitElement {
   }
 
   private toggleAudioOnly = (): void => {
+    // Ignore taps while a (re)attach is still pending so we don't kick
+    // off overlapping destroyPlayer()/new Shaka.Player() cycles.
+    if (this.attachSourceInFlight) return;
     this.audioOnly = !this.audioOnly;
     try {
       localStorage.setItem(AUDIO_ONLY_KEY, String(this.audioOnly));
     } catch {
       // localStorage unavailable.
     }
-    void this.attachSource();
+    // Capture the live playhead before re-attaching so playback resumes
+    // where the user is, not at the original deep-link/resume position.
+    const resumeAt = this.videoEl?.currentTime;
+    void this.attachSource(Number.isFinite(resumeAt) ? resumeAt : undefined);
   };
 
   private onVolumeChange = (): void => {
@@ -1454,6 +1498,7 @@ export class VideoPlayer extends LitElement {
                 type="button"
                 class="audio-toggle"
                 aria-pressed=${this.audioOnly ? "true" : "false"}
+                ?disabled=${this.attachSourceInFlight}
                 @click=${this.toggleAudioOnly}
               >
                 ${this.audioOnly ? "Show video" : "Audio only"}
