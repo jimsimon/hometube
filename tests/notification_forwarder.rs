@@ -8,8 +8,8 @@ use hometube::models::account::AccountType;
 use hometube::services::notification_forwarders::{self, ForwarderConfig, ForwardingSettings};
 use hometube::services::notifications;
 use serde_json::json;
-use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 #[tokio::test]
 async fn get_config_returns_default_when_unset() {
@@ -189,5 +189,95 @@ async fn test_endpoint_hits_provider() {
     assert_eq!(res.status_code(), StatusCode::OK);
     let body: serde_json::Value = res.json();
     assert_eq!(body["ok"], true);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn apprise_test_omits_tag_when_unconfigured() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let server = MockServer::start().await;
+    // Assert the outbound payload carries no `tag` field — sending
+    // HomeTube's internal notification type as an Apprise tag filtered
+    // delivery to nothing and was rejected with HTTP 400 by some
+    // Apprise versions.
+    Mock::given(method("POST"))
+        .and(path("/notify/family"))
+        .and(|req: &Request| {
+            serde_json::from_slice::<serde_json::Value>(&req.body)
+                .map(|v| v.get("tag").is_none())
+                .unwrap_or(false)
+        })
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    notification_forwarders::save(
+        &app.pool,
+        &ForwardingSettings {
+            enabled: true,
+            provider: Some(ForwarderConfig::Apprise {
+                base_url: server.uri(),
+                config_key: Some("family".into()),
+                urls: None,
+                tag: None,
+                basic_auth_user: None,
+                basic_auth_password: None,
+            }),
+            enabled_types: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let res = app
+        .server
+        .post("/api/notifications/config/test")
+        .json(&json!({}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["ok"], true, "test failed: {:?}", body["error"]);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn apprise_test_forwards_configured_tag() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/notify/family"))
+        .and(body_partial_json(json!({ "tag": "kids, parents" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    notification_forwarders::save(
+        &app.pool,
+        &ForwardingSettings {
+            enabled: true,
+            provider: Some(ForwarderConfig::Apprise {
+                base_url: server.uri(),
+                config_key: Some("family".into()),
+                urls: None,
+                tag: Some("kids, parents".into()),
+                basic_auth_user: None,
+                basic_auth_password: None,
+            }),
+            enabled_types: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let res = app
+        .server
+        .post("/api/notifications/config/test")
+        .json(&json!({}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["ok"], true, "test failed: {:?}", body["error"]);
     server.verify().await;
 }
