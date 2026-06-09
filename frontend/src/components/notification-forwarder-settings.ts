@@ -40,6 +40,7 @@ interface AppriseConfig {
   base_url: string;
   config_key?: string | null;
   urls?: string | null;
+  tag?: string | null;
   basic_auth_user?: string | null;
   basic_auth_password?: string | null;
 }
@@ -222,6 +223,7 @@ export class NotificationForwarderSettings extends LitElement {
         base_url: "",
         config_key: "",
         urls: "",
+        tag: "",
       };
     }
     this.settings = { ...this.settings, provider };
@@ -397,6 +399,14 @@ export class NotificationForwarderSettings extends LitElement {
           @input=${(e: Event) =>
             this.updateProvider({ urls: (e.target as HTMLTextAreaElement).value })}
         ></textarea>
+        <label for="apprise-tag">Tag</label>
+        <input
+          id="apprise-tag"
+          type="text"
+          .value=${p.tag ?? ""}
+          placeholder="(optional, e.g. 'kids, parents')"
+          @input=${(e: Event) => this.updateProvider({ tag: (e.target as HTMLInputElement).value })}
+        />
         <label for="apprise-user">Basic auth user</label>
         <input
           id="apprise-user"
@@ -418,7 +428,9 @@ export class NotificationForwarderSettings extends LitElement {
       </div>
       <p class="hint">
         Provide either a stateful config key (saved server-side via apprise-api) or one or more
-        stateless URLs.
+        stateless URLs. The optional tag filters delivery to matching Apprise endpoints; leave it
+        blank to notify every configured URL. Separate tags with a comma to OR them or a space to
+        AND them.
       </p>
     `;
   }

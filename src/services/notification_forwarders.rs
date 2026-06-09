@@ -57,6 +57,13 @@ pub enum ForwarderConfig {
         config_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         urls: Option<String>,
+        /// Optional Apprise tag expression. When set, only the
+        /// stored/stateless URLs matching the tag are notified. When
+        /// unset, Apprise notifies every configured URL. HomeTube must
+        /// never send its internal notification-type string here — that
+        /// would filter delivery to a tag the operator never assigned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         basic_auth_user: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,12 +154,14 @@ pub fn redact(settings: &ForwardingSettings) -> ForwardingSettings {
             base_url,
             config_key,
             urls,
+            tag,
             basic_auth_user,
             basic_auth_password,
         } => ForwarderConfig::Apprise {
             base_url,
             config_key,
             urls,
+            tag,
             basic_auth_user,
             basic_auth_password: basic_auth_password.map(|_| SECRET_PLACEHOLDER.to_string()),
         },
@@ -267,6 +276,7 @@ pub fn validate(settings: &ForwardingSettings) -> AppResult<()> {
                 base_url,
                 config_key,
                 urls,
+                tag,
                 ..
             } => {
                 check_url(base_url)?;
@@ -287,6 +297,15 @@ pub fn validate(settings: &ForwardingSettings) -> AppResult<()> {
                     if !k.is_empty() && !is_safe_apprise_key(k) {
                         return Err(AppError::BadRequest(
                             "apprise config_key may only contain letters, digits, '-' and '_'"
+                                .into(),
+                        ));
+                    }
+                }
+                if let Some(t) = tag.as_deref() {
+                    if !t.trim().is_empty() && !is_safe_apprise_tag(t) {
+                        return Err(AppError::BadRequest(
+                            "apprise tag may only contain letters, digits, spaces and the \
+                             characters '-' '_' ',' '|' '&' '+'"
                                 .into(),
                         ));
                     }
@@ -312,6 +331,15 @@ fn is_safe_apprise_key(k: &str) -> bool {
     !k.is_empty()
         && k.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Permit the character set Apprise itself accepts in a tag expression:
+/// tag names (letters, digits, `-`, `_`) combined with the OR (`,`/`|`)
+/// and AND (` `/`&`/`+`) operators. Keeps the value safe to embed in a
+/// JSON payload without breaking Apprise's tag parser.
+fn is_safe_apprise_tag(t: &str) -> bool {
+    t.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | ',' | '|' | '&' | '+'))
 }
 
 fn check_url(url: &str) -> AppResult<()> {
@@ -503,6 +531,7 @@ async fn send_apprise(
         base_url,
         config_key,
         urls,
+        tag,
         basic_auth_user,
         basic_auth_password,
     } = provider
@@ -523,8 +552,19 @@ async fn send_apprise(
         "title": msg.title,
         "body": msg.body,
         "type": apprise_type,
-        "tag": msg.kind,
     });
+    // Only forward an Apprise `tag` when the operator configured one.
+    // Apprise treats `tag` as a *filter* over the configured URLs, so
+    // sending HomeTube's internal notification-type string here would
+    // match nothing (and is rejected outright by some Apprise versions,
+    // surfacing as an HTTP 400). Omitting it lets Apprise notify every
+    // configured URL, which is the expected default.
+    if let Some(t) = tag.as_deref() {
+        let t = t.trim();
+        if !t.is_empty() {
+            body["tag"] = serde_json::Value::String(t.to_string());
+        }
+    }
     if let Some(u) = urls.as_deref() {
         if !u.trim().is_empty() {
             body["urls"] = serde_json::Value::String(u.to_string());
@@ -686,6 +726,7 @@ mod tests {
                     base_url: "https://apprise.example".into(),
                     config_key: Some(bad.into()),
                     urls: None,
+                    tag: None,
                     basic_auth_user: None,
                     basic_auth_password: None,
                 }),
@@ -705,12 +746,47 @@ mod tests {
                 base_url: "https://apprise.example".into(),
                 config_key: Some("family_kids-1".into()),
                 urls: None,
+                tag: None,
                 basic_auth_user: None,
                 basic_auth_password: None,
             }),
             enabled_types: vec![],
         };
         assert!(validate(&s).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_apprise_tag_expression() {
+        let s = ForwardingSettings {
+            enabled: true,
+            provider: Some(ForwarderConfig::Apprise {
+                base_url: "https://apprise.example".into(),
+                config_key: Some("family".into()),
+                urls: None,
+                tag: Some("kids, parents | admin".into()),
+                basic_auth_user: None,
+                basic_auth_password: None,
+            }),
+            enabled_types: vec![],
+        };
+        assert!(validate(&s).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_apprise_tag() {
+        let s = ForwardingSettings {
+            enabled: true,
+            provider: Some(ForwarderConfig::Apprise {
+                base_url: "https://apprise.example".into(),
+                config_key: Some("family".into()),
+                urls: None,
+                tag: Some("bad/tag".into()),
+                basic_auth_user: None,
+                basic_auth_password: None,
+            }),
+            enabled_types: vec![],
+        };
+        assert!(validate(&s).is_err());
     }
 
     #[test]
