@@ -21,6 +21,7 @@ async fn seed_metadata_json(pool: &sqlx::SqlitePool, video_id: &str, json: &serd
     .execute(pool)
     .await
     .unwrap();
+    common::mark_metadata_cache_current(pool).await;
 }
 
 fn base_metadata(video_id: &str, channel_id: &str) -> serde_json::Value {

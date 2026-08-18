@@ -10,17 +10,19 @@
 //! See [`get_or_extract`] for the lookup order: memory → DB → yt-dlp.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tracing::debug;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::services::setup::{get_config_value, set_config_value};
+use crate::services::setup::{get_config_value, set_config_value, KEY_YTDLP_COOKIES};
 use crate::services::ytdlp::{self, ExtractResult};
 
 /// `app_config` key controlling the metadata-cache TTL (in hours).
@@ -29,16 +31,37 @@ pub const KEY_METADATA_CACHE_TTL_HOURS: &str = "metadata_cache_ttl_hours";
 /// Default TTL when the key is unset.
 pub const DEFAULT_TTL_HOURS: i64 = 4;
 
+/// Refresh direct media URLs shortly before YouTube expires them so a
+/// manifest never points Shaka at a URL that will die during playback.
+const MEDIA_URL_EXPIRY_MARGIN_SECONDS: i64 = 5 * 60;
+
 #[derive(Clone)]
 pub struct CachedMetadata {
+    /// Monotonic time at which this process hydrated or extracted the entry.
     pub fetched_at: Instant,
+    expires_at: Instant,
     pub result: ExtractResult,
+    extractor_config_key: String,
 }
+
+type SharedExtractionResult = Result<ExtractResult, Arc<str>>;
+type ExtractionFlight = OnceCell<SharedExtractionResult>;
+type ExtractionFlightKey = (String, String);
+type ExtractionFlights = HashMap<ExtractionFlightKey, Weak<ExtractionFlight>>;
+type ExtractionCoordinator = Mutex<()>;
+type ExtractionCoordinators = HashMap<String, Weak<ExtractionCoordinator>>;
 
 /// Process-wide cache handle. Cheap to clone (`Arc<Mutex<...>>`).
 #[derive(Clone, Default)]
 pub struct VideoCache {
     inner: Arc<Mutex<HashMap<String, CachedMetadata>>>,
+    /// Per-video single-flight cells. Each cell retains the completed outcome,
+    /// including failures, until every caller waiting on that flight returns.
+    /// Weak values avoid retaining one cell for every video forever.
+    extraction_flights: Arc<Mutex<ExtractionFlights>>,
+    /// Per-video coordinators serialize extraction even when yt-dlp rotates
+    /// cookies and changes the extractor fingerprint during an active flight.
+    extraction_coordinators: Arc<Mutex<ExtractionCoordinators>>,
 }
 
 impl VideoCache {
@@ -54,47 +77,188 @@ impl VideoCache {
         cfg: &Config,
         video_id: &str,
     ) -> AppResult<ExtractResult> {
-        let ttl = current_ttl(pool).await;
+        let extractor_config_key = current_extractor_config_key(pool, cfg).await?;
+
+        if let Some(result) = self
+            .get_cached(pool, video_id, &extractor_config_key)
+            .await?
+        {
+            return Ok(result);
+        }
+
+        // A synthesized manifest can trigger several format requests at once.
+        // Same-configuration callers share success or failure through this
+        // cell. A separate per-video coordinator below serializes flights with
+        // different fingerprints, which matters when yt-dlp rotates cookies.
+        let flight_key = (video_id.to_string(), extractor_config_key.clone());
+        let extraction_flight = {
+            let mut flights = self.extraction_flights.lock().await;
+            flights.retain(|_, flight| flight.strong_count() > 0);
+            if let Some(flight) = flights.get(&flight_key).and_then(Weak::upgrade) {
+                flight
+            } else {
+                let flight = Arc::new(OnceCell::new());
+                flights.insert(flight_key, Arc::downgrade(&flight));
+                flight
+            }
+        };
+        let extraction_coordinator = self.extraction_coordinator(video_id).await;
+
+        let shared = extraction_flight
+            .get_or_init(|| async {
+                let _coordinator_guard = extraction_coordinator.lock().await;
+
+                // Another flight may have populated the cache while this one
+                // waited. Recompute the fingerprint because the prior yt-dlp
+                // run may also have rotated the canonical cookie jar.
+                let active_config_key = current_extractor_config_key(pool, cfg)
+                    .await
+                    .map_err(shared_error)?;
+                if let Some(result) = self
+                    .get_cached(pool, video_id, &active_config_key)
+                    .await
+                    .map_err(shared_error)?
+                {
+                    return Ok(result);
+                }
+
+                // Miss: shell out to yt-dlp. This is a normal cache fill, not
+                // an upstream-response retry. yt-dlp may update the canonical
+                // cookie jar, so fingerprint again afterward and store the
+                // result under the configuration that will be observed by the
+                // next request.
+                let result = ytdlp::extract(cfg, video_id).await.map_err(shared_error)?;
+                let now = Utc::now().timestamp();
+                if !media_urls_are_fresh(&result, now) {
+                    return Err(Arc::<str>::from(format!(
+                        "yt-dlp returned media URLs that expire within \
+                         {MEDIA_URL_EXPIRY_MARGIN_SECONDS} seconds"
+                    )));
+                }
+                let stored_config_key = current_extractor_config_key(pool, cfg)
+                    .await
+                    .map_err(shared_error)?;
+                let ttl = current_ttl(pool).await;
+                let expires_at = store_in_db(pool, video_id, &result, ttl, &stored_config_key)
+                    .await
+                    .map_err(shared_error)?;
+                self.inner.lock().await.insert(
+                    video_id.to_string(),
+                    CachedMetadata {
+                        fetched_at: Instant::now(),
+                        expires_at: instant_deadline(expires_at, now),
+                        result: result.clone(),
+                        extractor_config_key: stored_config_key,
+                    },
+                );
+                Ok(result)
+            })
+            .await
+            .clone();
+
+        shared.map_err(|message| AppError::Other(anyhow::anyhow!(message.to_string())))
+    }
+
+    async fn extraction_coordinator(&self, video_id: &str) -> Arc<ExtractionCoordinator> {
+        let mut coordinators = self.extraction_coordinators.lock().await;
+        coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
+        if let Some(coordinator) = coordinators.get(video_id).and_then(Weak::upgrade) {
+            coordinator
+        } else {
+            let coordinator = Arc::new(Mutex::new(()));
+            coordinators.insert(video_id.to_string(), Arc::downgrade(&coordinator));
+            coordinator
+        }
+    }
+
+    async fn get_cached(
+        &self,
+        pool: &SqlitePool,
+        video_id: &str,
+        extractor_config_key: &str,
+    ) -> AppResult<Option<ExtractResult>> {
+        let now = Utc::now().timestamp();
 
         // Layer 1: in-memory.
         {
-            let cache = self.inner.lock().await;
+            let mut cache = self.inner.lock().await;
             if let Some(entry) = cache.get(video_id) {
-                if entry.fetched_at.elapsed() < ttl {
+                if Instant::now() < entry.expires_at
+                    && entry.extractor_config_key == extractor_config_key
+                    && media_urls_are_fresh(&entry.result, now)
+                {
                     debug!(%video_id, "video metadata in-memory cache hit");
-                    return Ok(entry.result.clone());
+                    return Ok(Some(entry.result.clone()));
                 }
             }
+            cache.remove(video_id);
         }
 
         // Layer 2: DB.
-        if let Some(result) = load_from_db(pool, video_id).await? {
+        if let Some((result, expires_at)) =
+            load_from_db(pool, video_id, extractor_config_key, now).await?
+        {
             let mut cache = self.inner.lock().await;
             cache.insert(
                 video_id.to_string(),
                 CachedMetadata {
                     fetched_at: Instant::now(),
+                    expires_at: instant_deadline(expires_at, now),
                     result: result.clone(),
+                    extractor_config_key: extractor_config_key.to_string(),
                 },
             );
             debug!(%video_id, "video metadata DB cache hit");
-            return Ok(result);
+            return Ok(Some(result));
         }
 
-        // Miss: shell out to yt-dlp.
-        let result = ytdlp::extract(cfg, video_id).await?;
-        store_in_db(pool, video_id, &result, ttl).await?;
-        let mut cache = self.inner.lock().await;
-        cache.insert(
-            video_id.to_string(),
-            CachedMetadata {
-                fetched_at: Instant::now(),
-                result: result.clone(),
-            },
-        );
-
-        Ok(result)
+        Ok(None)
     }
+}
+
+/// Hash every input that can change yt-dlp's direct media URLs. The hash is
+/// persisted rather than the raw values so cookie contents never land in the
+/// metadata-cache table.
+pub async fn current_extractor_config_key(pool: &SqlitePool, cfg: &Config) -> AppResult<String> {
+    let cookies = get_config_value(pool, KEY_YTDLP_COOKIES)
+        .await?
+        .unwrap_or_default();
+    let ytdlp_version: Option<String> =
+        sqlx::query_scalar("SELECT current_version FROM ytdlp_info WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    let cookies_path = ytdlp::cookies_file_path();
+    let cookies_file_digest = match tokio::fs::read(&cookies_path).await {
+        Ok(body) => format!(
+            "present:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(body))
+        ),
+        Err(error) => format!("unavailable:{:?}", error.kind()),
+    };
+
+    let fields = [
+        cfg.ytdlp_path.clone(),
+        std::env::var("YTDLP_PLAYER_CLIENT")
+            .unwrap_or_else(|_| ytdlp::DEFAULT_PLAYER_CLIENTS.to_string()),
+        std::env::var("POT_SERVER_URL").unwrap_or_else(|_| "http://pot-server:4416".to_string()),
+        std::env::var("YTDLP_PLUGIN_DIR")
+            .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string()),
+        std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "deno".to_string()),
+        cookies_path.to_string_lossy().into_owned(),
+        cookies_file_digest,
+        ytdlp_version.unwrap_or_default(),
+        cookies,
+    ];
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"hometube-ytdlp-cache-v2\0");
+    for field in fields {
+        hasher.update(field.as_bytes());
+        hasher.update(b"\0");
+    }
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 
 /// Resolve the configured TTL — falls back to [`DEFAULT_TTL_HOURS`] on
@@ -109,22 +273,35 @@ async fn current_ttl(pool: &SqlitePool) -> Duration {
     Duration::from_secs((hours.max(0) as u64) * 3600)
 }
 
-async fn load_from_db(pool: &SqlitePool, video_id: &str) -> AppResult<Option<ExtractResult>> {
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT metadata_json, expires_at FROM video_metadata_cache WHERE video_id = ?",
+async fn load_from_db(
+    pool: &SqlitePool,
+    video_id: &str,
+    extractor_config_key: &str,
+    now: i64,
+) -> AppResult<Option<(ExtractResult, i64)>> {
+    let row: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT metadata_json, expires_at, extractor_config_key \
+         FROM video_metadata_cache WHERE video_id = ?",
     )
     .bind(video_id)
     .fetch_optional(pool)
     .await?;
-    let Some((json, expires_at)) = row else {
+    let Some((json, expires_at, cached_config_key)) = row else {
         return Ok(None);
     };
-    if expires_at <= Utc::now().timestamp() {
+    if expires_at <= now || cached_config_key != extractor_config_key {
         return Ok(None);
     }
     let result: ExtractResult = serde_json::from_str(&json)
         .map_err(|e| AppError::Other(anyhow::anyhow!("decoding cached metadata: {e}")))?;
-    Ok(Some(result))
+    if !media_urls_are_fresh(&result, now) {
+        return Ok(None);
+    }
+    let effective_expires_at = effective_cache_expiry(&result, expires_at);
+    if effective_expires_at <= now {
+        return Ok(None);
+    }
+    Ok(Some((result, effective_expires_at)))
 }
 
 async fn store_in_db(
@@ -132,26 +309,69 @@ async fn store_in_db(
     video_id: &str,
     result: &ExtractResult,
     ttl: Duration,
-) -> AppResult<()> {
+    extractor_config_key: &str,
+) -> AppResult<i64> {
     let json = serde_json::to_string(result)
         .map_err(|e| AppError::Other(anyhow::anyhow!("encoding metadata: {e}")))?;
     let now = Utc::now().timestamp();
-    let expires_at = now + ttl.as_secs() as i64;
+    let ttl_expires_at = now + ttl.as_secs() as i64;
+    let expires_at = effective_cache_expiry(result, ttl_expires_at);
     sqlx::query(
-        "INSERT INTO video_metadata_cache (video_id, metadata_json, cached_at, expires_at) \
-         VALUES (?, ?, ?, ?) \
+        "INSERT INTO video_metadata_cache \
+            (video_id, metadata_json, cached_at, expires_at, extractor_config_key) \
+         VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(video_id) DO UPDATE SET \
             metadata_json = excluded.metadata_json, \
             cached_at = excluded.cached_at, \
-            expires_at = excluded.expires_at",
+            expires_at = excluded.expires_at, \
+            extractor_config_key = excluded.extractor_config_key",
     )
     .bind(video_id)
     .bind(json)
     .bind(now)
     .bind(expires_at)
+    .bind(extractor_config_key)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(expires_at)
+}
+
+fn shared_error(error: AppError) -> Arc<str> {
+    Arc::from(error.to_string())
+}
+
+fn effective_cache_expiry(result: &ExtractResult, configured_expires_at: i64) -> i64 {
+    earliest_media_url_expiry(result)
+        .map(|expiry| expiry - MEDIA_URL_EXPIRY_MARGIN_SECONDS)
+        .map_or(configured_expires_at, |url_expiry| {
+            configured_expires_at.min(url_expiry)
+        })
+}
+
+fn instant_deadline(expires_at: i64, now: i64) -> Instant {
+    Instant::now() + Duration::from_secs(expires_at.saturating_sub(now).max(0) as u64)
+}
+
+fn earliest_media_url_expiry(result: &ExtractResult) -> Option<i64> {
+    result
+        .formats
+        .iter()
+        .filter_map(|format| format.url.as_deref())
+        .filter_map(media_url_expiry)
+        .min()
+}
+
+fn media_urls_are_fresh(result: &ExtractResult, now: i64) -> bool {
+    earliest_media_url_expiry(result)
+        .is_none_or(|expiry| expiry > now + MEDIA_URL_EXPIRY_MARGIN_SECONDS)
+}
+
+fn media_url_expiry(url: &str) -> Option<i64> {
+    let query = url.split_once('?')?.1.split('#').next().unwrap_or_default();
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "expire").then(|| value.parse().ok()).flatten()
+    })
 }
 
 /// Persist the metadata-cache TTL to `app_config`. Used by the parent
@@ -316,6 +536,11 @@ pub async fn recent_evictions(pool: &SqlitePool, limit: i64) -> AppResult<Vec<Ev
 /// "Unlimited") and the cache is still over the limit, evict by
 /// `last_accessed_at ASC` until under. Logged with reason
 /// `lru_size_limit` (one row per video, aggregating its segments).
+///
+/// Step 3 (metadata housekeeping): remove expired yt-dlp metadata rows that
+/// have no cached segments. Metadata for cached videos is retained because
+/// later cleanup runs still need its `channel_id` to evaluate channel
+/// allowlists.
 pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, String)> {
     let mut output = String::new();
     let mut evicted_videos: u64 = 0;
@@ -406,6 +631,23 @@ pub async fn cleanup_segment_cache(pool: &SqlitePool) -> AppResult<(String, Stri
         }
     } else {
         output.push_str("LRU eviction skipped (cache size set to Unlimited).\n");
+    }
+
+    let expired_metadata = sqlx::query(
+        "DELETE FROM video_metadata_cache \
+         WHERE expires_at <= unixepoch() \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM segment_cache \
+               WHERE segment_cache.video_id = video_metadata_cache.video_id \
+           )",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if expired_metadata > 0 {
+        output.push_str(&format!(
+            "Pruned {expired_metadata} expired metadata cache entries.\n"
+        ));
     }
 
     // Prune the eviction audit log so it can't grow unboundedly. Keep

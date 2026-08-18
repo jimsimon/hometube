@@ -41,6 +41,7 @@ async fn seed_metadata(pool: &sqlx::SqlitePool, video_id: &str, channel_id: &str
     .execute(pool)
     .await
     .unwrap();
+    common::mark_metadata_cache_current(pool).await;
 }
 
 #[tokio::test]
@@ -192,6 +193,7 @@ async fn stream_applies_max_quality_cap_for_child() {
     .execute(&app.pool)
     .await
     .unwrap();
+    common::mark_metadata_cache_current(&app.pool).await;
 
     common::allowlist_video(&app.pool, child_id, parent_id, "vid-2", Some("Title"), None).await;
 
