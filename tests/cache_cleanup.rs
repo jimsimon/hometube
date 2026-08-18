@@ -211,6 +211,39 @@ async fn cleanup_noop_when_empty() {
 }
 
 #[tokio::test]
+async fn cleanup_prunes_only_expired_metadata_rows() {
+    let app = boot().await;
+    let now = Utc::now().timestamp();
+    for (video_id, expires_at) in [("expired-meta", now - 1), ("fresh-meta", now + 3600)] {
+        let metadata = serde_json::json!({
+            "id": video_id,
+            "formats": [],
+            "thumbnails": []
+        });
+        sqlx::query(
+            "INSERT INTO video_metadata_cache (video_id, metadata_json, expires_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(video_id)
+        .bind(metadata.to_string())
+        .bind(expires_at)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let (_, output) = cleanup_segment_cache(&app.pool).await.unwrap();
+    assert!(output.contains("Pruned 1 expired metadata cache entries."));
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT video_id FROM video_metadata_cache ORDER BY video_id")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec!["fresh-meta"]);
+}
+
+#[tokio::test]
 async fn allowlist_eviction_logs_reason_with_timestamp() {
     let app = boot().await;
     seed_segment(&app.pool, "orphan-vid", 2048).await;

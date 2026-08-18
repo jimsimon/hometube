@@ -48,6 +48,7 @@ async fn seed_metadata(pool: &sqlx::SqlitePool, video_id: &str, format_id: &str)
     .execute(pool)
     .await
     .unwrap();
+    common::mark_metadata_cache_current(pool).await;
 }
 
 /// Seed format_box_ranges with total_bytes so cache-hit responses can
