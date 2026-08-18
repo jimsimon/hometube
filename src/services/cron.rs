@@ -612,20 +612,21 @@ pub async fn seed_default_jobs(pool: &SqlitePool) -> AppResult<()> {
     Ok(())
 }
 
-/// Seed the singleton `ytdlp_info` row if it doesn't already exist.
-/// Best-effort `--version` lookup so the parent UI shows something
-/// useful on first boot.
+/// Seed or reconcile the singleton `ytdlp_info` row.
+///
+/// The configured path can change between deployments (for example when a
+/// Docker image migrates yt-dlp into a writable volume), so every startup
+/// refreshes both the path and the best-effort `--version` result. This keeps
+/// the parent UI aligned with the executable the app will actually spawn.
 pub async fn seed_ytdlp_info(pool: &SqlitePool, cfg: &Config) -> AppResult<()> {
-    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ytdlp_info WHERE id = 1")
-        .fetch_one(pool)
-        .await?;
-    if exists > 0 {
-        return Ok(());
-    }
     let version = ytdlp::version(cfg).await.ok();
     sqlx::query(
         "INSERT INTO ytdlp_info (id, current_version, last_checked_at, binary_path) \
-         VALUES (1, ?, ?, ?)",
+         VALUES (1, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+            current_version = excluded.current_version, \
+            last_checked_at = excluded.last_checked_at, \
+            binary_path = excluded.binary_path",
     )
     .bind(version)
     .bind(Utc::now().timestamp())

@@ -95,13 +95,16 @@ RUN ARCH="$(dpkg --print-architecture)" \
 COPY --from=backend /app/target/release/hometube /usr/local/bin/hometube
 COPY --from=frontend /app/frontend/dist /app/static
 COPY migrations/ /app/migrations/
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/hometube-entrypoint
 
-# Download the latest yt-dlp release. The cron `ytdlp_update` job
-# refreshes this on schedule once the app is running.
-RUN curl -fsSL \
+# Download a bootstrap copy of the latest yt-dlp release. The entrypoint
+# copies it into the persistent, app-writable tools volume on first boot;
+# the cron `ytdlp_update` job then refreshes that copy in place.
+RUN mkdir -p /usr/local/lib/hometube \
+    && curl -fsSL \
         https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-        -o /usr/local/bin/yt-dlp \
-    && chmod +x /usr/local/bin/yt-dlp
+        -o /usr/local/lib/hometube/yt-dlp \
+    && chmod +x /usr/local/lib/hometube/yt-dlp
 
 # Install the bgutil PO token provider plugin for yt-dlp. This plugin
 # automatically fetches Proof-of-Origin tokens from the pot-server
@@ -139,7 +142,7 @@ EXPOSE 3000
 VOLUME ["/app/data/database", "/app/data/tools", "/app/data/cache"]
 
 ENV STATIC_DIR=/app/static \
-    YTDLP_PATH=/usr/local/bin/yt-dlp \
+    YTDLP_PATH=/app/data/tools/yt-dlp \
     YTDLP_PLUGIN_DIR=/usr/local/share/yt-dlp-plugins \
     YTDLP_COOKIES_PATH=/app/data/tools/cookies.txt \
     POT_SERVER_URL=http://pot-server:4416 \
@@ -150,4 +153,4 @@ ENV STATIC_DIR=/app/static \
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health || exit 1
 
-ENTRYPOINT ["hometube"]
+ENTRYPOINT ["hometube-entrypoint"]
