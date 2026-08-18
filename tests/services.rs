@@ -57,24 +57,29 @@ async fn seed_ytdlp_info_inserts_singleton() {
     // Re-seeding reconciles metadata without creating another row. Use a
     // missing path so the best-effort version probe has a deterministic
     // failure and clears the stale version.
-    sqlx::query("UPDATE ytdlp_info SET current_version = 'stale', binary_path = '/old/path'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE ytdlp_info \
+         SET current_version = 'stale', last_checked_at = 0, binary_path = '/old/path'",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
     cfg.ytdlp_path = "/definitely/missing/yt-dlp".to_string();
     seed_ytdlp_info(&app.pool, &cfg).await.unwrap();
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ytdlp_info")
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let row: (Option<String>, String) =
-        sqlx::query_as("SELECT current_version, binary_path FROM ytdlp_info WHERE id = 1")
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
+    let row: (Option<String>, i64, String) = sqlx::query_as(
+        "SELECT current_version, last_checked_at, binary_path FROM ytdlp_info WHERE id = 1",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1);
     assert_eq!(row.0, None);
-    assert_eq!(row.1, cfg.ytdlp_path);
+    assert!(row.1 > 0);
+    assert_eq!(row.2, cfg.ytdlp_path);
 }
 
 #[tokio::test]
