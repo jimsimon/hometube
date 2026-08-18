@@ -8,6 +8,6 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "youtubei.js": "~17.0.1"
+    "youtubei.js": "~18.0.0"
   }
 }
