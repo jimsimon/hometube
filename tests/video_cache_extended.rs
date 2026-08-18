@@ -40,6 +40,7 @@ async fn get_or_extract_uses_db_cache() {
     .execute(&app.pool)
     .await
     .unwrap();
+    common::mark_metadata_cache_current(&app.pool).await;
 
     let cache = VideoCache::new();
     let result = cache

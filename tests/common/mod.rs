@@ -116,6 +116,21 @@ pub async fn boot() -> TestApp {
     }
 }
 
+/// Mark seeded metadata rows as having been produced by the current yt-dlp
+/// configuration. Route tests insert synthetic extraction JSON directly;
+/// production rows receive this key from `VideoCache::store_in_db`.
+pub async fn mark_metadata_cache_current(pool: &SqlitePool) {
+    let cfg = Config::from_env().expect("config");
+    let key = hometube::services::video_cache::current_extractor_config_key(pool, &cfg)
+        .await
+        .expect("extractor config key");
+    sqlx::query("UPDATE video_metadata_cache SET extractor_config_key = ?")
+        .bind(key)
+        .execute(pool)
+        .await
+        .expect("stamp metadata extractor config");
+}
+
 /// Boot the app with a completed setup: one parent (and one child if
 /// `role == Child`), and a signed session cookie for the requested role
 /// pre-installed in the test server's jar.
