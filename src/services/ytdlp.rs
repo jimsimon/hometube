@@ -377,6 +377,11 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 /// bot-wall degrades to one slower extraction rather than an hour of
 /// failures.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
+    // Snapshot the cookie generation up front: a verdict reached by this
+    // extraction describes the jar it *started* with. If a parent uploads
+    // new cookies while yt-dlp is running, the verdict must not be
+    // recorded against the new jar.
+    let generation = sabr_session_generation();
     if sabr_only_session_active() {
         debug!(
             %video_id,
@@ -410,7 +415,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
                 "cookie-less yt-dlp retry recovered usable formats; \
                  the logged-in session is SABR-only; skipping cookie runs for a while"
             );
-            remember_sabr_only_session();
+            remember_sabr_only_session_for(generation);
             Ok(retry)
         }
         Ok(_) => {
@@ -491,36 +496,82 @@ async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppRes
 /// extraction attempt.
 pub const SABR_ONLY_SESSION_MEMO_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Process-wide "the logged-in session is SABR-only until" marker.
-/// `None` means no verdict (or it was cleared).
-static SABR_ONLY_SESSION_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
-    std::sync::Mutex::new(None);
+/// Identifies one incarnation of the cookie jar. Bumped by
+/// [`forget_sabr_only_session`] whenever cookies are replaced or
+/// removed, so a verdict formed against an older jar can be rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SabrSessionGeneration(u64);
 
-fn sabr_only_session_active() -> bool {
-    let guard = SABR_ONLY_SESSION_UNTIL
+#[derive(Debug, Clone, Copy)]
+struct SabrSessionMemo {
+    /// Generation the current `verdict_until` (if any) was recorded for.
+    generation: u64,
+    /// "The logged-in session is SABR-only until"; `None` = no verdict.
+    verdict_until: Option<std::time::Instant>,
+}
+
+/// Process-wide SABR-only verdict plus the cookie generation it belongs to.
+static SABR_ONLY_SESSION: std::sync::Mutex<SabrSessionMemo> =
+    std::sync::Mutex::new(SabrSessionMemo {
+        generation: 0,
+        verdict_until: None,
+    });
+
+/// Lock the SABR memo, recovering from a poisoned mutex (the state is
+/// two plain values; a panic mid-update can't leave it inconsistent).
+fn lock_sabr_memo() -> std::sync::MutexGuard<'static, SabrSessionMemo> {
+    SABR_ONLY_SESSION
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.is_some_and(|until| std::time::Instant::now() < until)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The cookie generation an extraction starting now would observe.
+pub fn sabr_session_generation() -> SabrSessionGeneration {
+    SabrSessionGeneration(lock_sabr_memo().generation)
+}
+
+/// Whether an unexpired SABR-only verdict is on record.
+fn sabr_only_session_active() -> bool {
+    lock_sabr_memo()
+        .verdict_until
+        .is_some_and(|until| std::time::Instant::now() < until)
 }
 
 /// Record that the logged-in session is SABR-only for
-/// [`SABR_ONLY_SESSION_MEMO_TTL`]. Public so tests can start from an
-/// established verdict; production code only sets it from [`extract`].
+/// [`SABR_ONLY_SESSION_MEMO_TTL`], but only if `generation` is still the
+/// current cookie generation. A verdict from an extraction that started
+/// before a cookie upload says nothing about the new jar and is dropped.
+pub fn remember_sabr_only_session_for(generation: SabrSessionGeneration) {
+    let mut memo = lock_sabr_memo();
+    if memo.generation != generation.0 {
+        debug!(
+            observed = generation.0,
+            current = memo.generation,
+            "ignoring SABR-only verdict from an extraction that predates a cookie change"
+        );
+        return;
+    }
+    memo.verdict_until = Some(std::time::Instant::now() + SABR_ONLY_SESSION_MEMO_TTL);
+}
+
+/// Record a SABR-only verdict against the current cookie generation.
+/// Public so tests can start from an established verdict; production
+/// code goes through [`remember_sabr_only_session_for`] from [`extract`].
 pub fn remember_sabr_only_session() {
-    let mut guard = SABR_ONLY_SESSION_UNTIL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(std::time::Instant::now() + SABR_ONLY_SESSION_MEMO_TTL);
+    let generation = sabr_session_generation();
+    remember_sabr_only_session_for(generation);
 }
 
 /// Clear the SABR-only memo so the next extraction tries cookies again.
 /// Call this whenever the cookie jar is replaced or removed — a fresh
 /// login is exactly the event that could lift the SABR-only verdict.
+///
+/// Also advances the cookie generation, so extractions already in
+/// flight against the previous jar cannot re-record their verdict.
 pub fn forget_sabr_only_session() {
-    let mut guard = SABR_ONLY_SESSION_UNTIL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = None;
+    let mut memo = lock_sabr_memo();
+    memo.generation = memo.generation.wrapping_add(1);
+    memo.verdict_until = None;
 }
 
 /// Single yt-dlp `--dump-json` invocation. See [`extract`] for the

@@ -136,10 +136,12 @@ impl VideoCache {
                 }
 
                 // Miss: shell out to yt-dlp. This is a normal cache fill, not
-                // an upstream-response retry. The configuration may change
-                // while yt-dlp runs (e.g. the cron job updates the binary), so
-                // fingerprint again afterward and store the result under the
-                // configuration that will be observed by the next request.
+                // an upstream-response retry. The result is stored under
+                // `active_config_key` — the configuration yt-dlp actually ran
+                // with. If the configuration changes while yt-dlp runs (cookie
+                // upload, cron updating the binary), a request carrying the
+                // new fingerprint will miss and extract afresh under it, rather
+                // than being served output produced by the old configuration.
                 let result = ytdlp::extract(cfg, video_id).await.map_err(shared_error)?;
                 let now = Utc::now().timestamp();
                 if !media_urls_are_fresh(&result, now) {
@@ -148,11 +150,8 @@ impl VideoCache {
                          {MEDIA_URL_EXPIRY_MARGIN_SECONDS} seconds"
                     )));
                 }
-                let stored_config_key = current_extractor_config_key(pool, cfg)
-                    .await
-                    .map_err(shared_error)?;
                 let ttl = current_ttl(pool).await;
-                let expires_at = store_in_db(pool, video_id, &result, ttl, &stored_config_key)
+                let expires_at = store_in_db(pool, video_id, &result, ttl, &active_config_key)
                     .await
                     .map_err(shared_error)?;
                 self.inner.lock().await.insert(
@@ -161,7 +160,7 @@ impl VideoCache {
                         fetched_at: Instant::now(),
                         expires_at: instant_deadline(expires_at, now),
                         result: result.clone(),
-                        extractor_config_key: stored_config_key,
+                        extractor_config_key: active_config_key,
                     },
                 );
                 Ok(result)

@@ -1169,11 +1169,13 @@ async fn resolve_segment_ranges(
     }
 
     // Step 3: persist freshly-resolved innertube ranges to the DB — in
-    // one transaction, and only when this exact set hasn't already been
-    // written by this process. Both `/stream` and `manifest.mpd` call
-    // this for every playback, and a cookie-less extraction carries
-    // hundreds of ranged formats; per-row autocommits here were holding
-    // SQLite's write lock for tens of seconds while the player waited.
+    // one transaction, and only when this exact set isn't already
+    // persisted (or being persisted) by this process. Both `/stream` and
+    // `manifest.mpd` call this for every playback, and a cookie-less
+    // extraction carries hundreds of ranged formats; per-row autocommits
+    // here were holding SQLite's write lock for tens of seconds while
+    // the player waited. The memo is published only after the commit
+    // succeeds, so a failed write is retried by the next request.
     let mut new_from_innertube: Vec<(String, BoxRanges)> = result
         .format_box_ranges
         .keys()
@@ -1183,66 +1185,35 @@ async fn resolve_segment_ranges(
                 .map(|br| (format_id.clone(), br))
         })
         .collect();
-    if !new_from_innertube.is_empty() && mark_ranges_persisted(video_id, &mut new_from_innertube) {
-        let pool_clone = pool.clone();
-        let video_id_owned = video_id.to_string();
-        tokio::spawn(async move {
-            crate::services::segment_ranges::store_all(
-                &pool_clone,
-                &video_id_owned,
-                &new_from_innertube,
-            )
-            .await;
-        });
+    if !new_from_innertube.is_empty() {
+        let memo = crate::services::segment_ranges::RangePersistMemo::global();
+        if let Some(token) = memo.begin(video_id, &mut new_from_innertube) {
+            let pool_clone = pool.clone();
+            let video_id_owned = video_id.to_string();
+            tokio::spawn(async move {
+                match crate::services::segment_ranges::store_all(
+                    &pool_clone,
+                    &video_id_owned,
+                    &new_from_innertube,
+                )
+                .await
+                {
+                    Ok(()) => memo.commit(&video_id_owned, token),
+                    Err(err) => {
+                        warn!(
+                            %err,
+                            video_id = %video_id_owned,
+                            rows = new_from_innertube.len(),
+                            "persisting format_box_ranges failed; will retry on next request"
+                        );
+                        memo.abort(&video_id_owned, token);
+                    }
+                }
+            });
+        }
     }
 
     out
-}
-
-/// Remember which innertube range set was last persisted per video so
-/// repeated manifest builds for the same extraction don't rewrite it.
-///
-/// Sorts `rows` (so the fingerprint is order-independent) and returns
-/// `true` when the caller should persist. Bounded: the memo is cleared
-/// once it grows past a few thousand videos; the only cost of a miss is
-/// one redundant single-transaction write.
-fn mark_ranges_persisted(
-    video_id: &str,
-    rows: &mut [(String, crate::services::segment_ranges::BoxRanges)],
-) -> bool {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    const MAX_TRACKED_VIDEOS: usize = 4096;
-    static PERSISTED: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
-        std::sync::Mutex::new(None);
-
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut hasher = DefaultHasher::new();
-    for (format_id, ranges) in rows.iter() {
-        format_id.hash(&mut hasher);
-        (
-            ranges.init.start,
-            ranges.init.end,
-            ranges.index.start,
-            ranges.index.end,
-        )
-            .hash(&mut hasher);
-    }
-    let fingerprint = hasher.finish();
-
-    let mut guard = PERSISTED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let memo = guard.get_or_insert_with(std::collections::HashMap::new);
-    if memo.get(video_id) == Some(&fingerprint) {
-        return false;
-    }
-    if memo.len() >= MAX_TRACKED_VIDEOS {
-        memo.clear();
-    }
-    memo.insert(video_id.to_string(), fingerprint);
-    true
 }
 
 /// Pick the best audio-only format for the audio-only playback mode.

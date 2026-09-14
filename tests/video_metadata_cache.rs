@@ -411,8 +411,13 @@ async fn concurrent_different_configurations_use_separate_extraction_flights() {
     );
 }
 
+/// When the configuration changes while an extraction is running, the
+/// in-flight result belongs to the *old* configuration: it must be stored
+/// under the key it was extracted with, and a caller carrying the new
+/// key must get a fresh extraction (serialized after the first by the
+/// per-video coordinator) rather than the old output relabelled.
 #[tokio::test]
-async fn fingerprint_change_during_extraction_does_not_start_a_second_run() {
+async fn fingerprint_change_during_extraction_reextracts_for_the_new_configuration() {
     let _cookie_guard = COOKIE_TEST_LOCK.lock().await;
     let app = boot().await;
     let cookies_path = ytdlp::cookies_file_path();
@@ -422,15 +427,16 @@ async fn fingerprint_change_during_extraction_does_not_start_a_second_run() {
     let counter_path = ytdlp_dir.path().join("invocations");
     let started_path = ytdlp_dir.path().join("started");
     let now = chrono::Utc::now().timestamp();
-    let media_url = format!("https://media.example/rotated?expire={}", now + 7200);
-    let output = metadata("serialized-cookie-rotation", &media_url);
+    // Each run stamps its ordinal into the media URL so the two results
+    // are distinguishable.
+    let url_for_run = |n: u32| format!("https://media.example/run-{n}?expire={}", now + 7200);
+    let output = metadata("serialized-cookie-rotation", &url_for_run(0)).to_string();
     write_script(
         &ytdlp_path,
         &format!(
-            "#!/bin/sh\nprintf 'run\\n' >> '{}'\ntouch '{}'\nsleep 1\nprintf '%s\\n' '{}'\n",
-            counter_path.display(),
-            started_path.display(),
-            output
+            "#!/bin/sh\nprintf 'run\\n' >> '{counter}'\nn=$(wc -l < '{counter}' | tr -d ' ')\ntouch '{started}'\nsleep 1\nprintf '%s\\n' '{output}' | sed \"s/run-0/run-$n/\"\n",
+            counter = counter_path.display(),
+            started = started_path.display(),
         ),
     );
 
@@ -469,14 +475,30 @@ async fn fingerprint_change_during_extraction_does_not_start_a_second_run() {
             .await
     });
     let (first_result, second_result) = tokio::join!(first, second);
-    for result in [first_result.unwrap(), second_result.unwrap()] {
-        assert_eq!(
-            result.unwrap().formats[0].url.as_deref(),
-            Some(media_url.as_str())
-        );
-    }
+    // The old-configuration caller gets the old-configuration output...
+    assert_eq!(
+        first_result.unwrap().unwrap().formats[0].url.as_deref(),
+        Some(url_for_run(1).as_str())
+    );
+    // ...and the new-configuration caller gets a fresh run, not a relabel.
+    assert_eq!(
+        second_result.unwrap().unwrap().formats[0].url.as_deref(),
+        Some(url_for_run(2).as_str())
+    );
     let invocations = std::fs::read_to_string(counter_path).unwrap();
-    assert_eq!(invocations.lines().count(), 1);
+    assert_eq!(invocations.lines().count(), 2);
+
+    // The row now on disk is the one produced under the current key.
+    let (stored_key, stored_json): (String, String) = sqlx::query_as(
+        "SELECT extractor_config_key, metadata_json FROM video_metadata_cache \
+         WHERE video_id = ?",
+    )
+    .bind("serialized-cookie-rotation")
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_key, changed_key);
+    assert!(stored_json.contains("run-2"));
 
     let _ = std::fs::remove_file(cookies_path);
 }

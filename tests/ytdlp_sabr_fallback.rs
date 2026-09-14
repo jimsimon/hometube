@@ -53,13 +53,30 @@ const DIRECT_UNRANGED_JSON: &str = r#"{"id":"vid-1","title":"Unranged","duration
   {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"filesize":200,"url":"https://rr1.googlevideo.com/videoplayback?itag=303"}
 ]}"#;
 
-/// `no_cookies_json = None` makes the logged-out branch exit non-zero
-/// with a bot-wall message on stderr, like yt-dlp does when YouTube
-/// challenges an unauthenticated IP.
+/// How the shim behaves when invoked *without* `--cookies`.
+#[derive(Clone, Copy)]
+struct LoggedOut<'a> {
+    /// JSON to print, or `None` to exit non-zero with a bot-wall message
+    /// on stderr, like yt-dlp does when YouTube challenges an
+    /// unauthenticated IP.
+    json: Option<&'a str>,
+    /// Seconds to sleep before answering, so a test can act mid-run.
+    delay_secs: u32,
+}
+
+impl<'a> LoggedOut<'a> {
+    fn json(json: &'a str) -> Self {
+        Self {
+            json: Some(json),
+            delay_secs: 0,
+        }
+    }
+}
+
 fn write_shim(
     argv_log: &std::path::Path,
     with_cookies_json: &str,
-    no_cookies_json: Option<&str>,
+    logged_out: LoggedOut<'_>,
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -82,7 +99,10 @@ fn write_shim(
         .unwrap();
         writeln!(f, "    printf '%s\\n' '{}' ;;", esc(with_cookies_json)).unwrap();
         writeln!(f, "  *)").unwrap();
-        match no_cookies_json {
+        if logged_out.delay_secs > 0 {
+            writeln!(f, "    sleep {}", logged_out.delay_secs).unwrap();
+        }
+        match logged_out.json {
             Some(json) => writeln!(f, "    printf '%s\\n' '{}' ;;", esc(json)).unwrap(),
             None => writeln!(
                 f,
@@ -125,15 +145,36 @@ struct Fixture {
 
 impl Fixture {
     fn new(with_cookies_json: &str, no_cookies_json: &str) -> Self {
-        Self::build(with_cookies_json, Some(no_cookies_json))
+        Self::build(with_cookies_json, LoggedOut::json(no_cookies_json))
     }
 
     /// Logged-out runs fail (bot wall); cookie runs return `with_cookies_json`.
     fn new_with_failing_logged_out(with_cookies_json: &str) -> Self {
-        Self::build(with_cookies_json, None)
+        Self::build(
+            with_cookies_json,
+            LoggedOut {
+                json: None,
+                delay_secs: 0,
+            },
+        )
     }
 
-    fn build(with_cookies_json: &str, no_cookies_json: Option<&str>) -> Self {
+    /// Logged-out runs answer only after `delay_secs`.
+    fn new_with_slow_logged_out(
+        with_cookies_json: &str,
+        no_cookies_json: &str,
+        delay_secs: u32,
+    ) -> Self {
+        Self::build(
+            with_cookies_json,
+            LoggedOut {
+                json: Some(no_cookies_json),
+                delay_secs,
+            },
+        )
+    }
+
+    fn build(with_cookies_json: &str, logged_out: LoggedOut<'_>) -> Self {
         let env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The SABR-only verdict is process-wide state; start every test
         // from "no verdict" so ordering doesn't matter.
@@ -149,7 +190,7 @@ impl Fixture {
         .unwrap();
         unsafe { std::env::set_var("YTDLP_COOKIES_PATH", cookies.to_str().unwrap()) };
         let argv_log = dir.join("argv.log");
-        let shim = write_shim(&argv_log, with_cookies_json, no_cookies_json);
+        let shim = write_shim(&argv_log, with_cookies_json, logged_out);
         Self {
             _env: env,
             dir,
@@ -452,4 +493,47 @@ async fn memo_skipped_run_unplayable_everywhere_returns_metadata_once() {
     ytdlp::extract(&cfg, "vid-2").await.unwrap();
     let calls = fx.invocations();
     assert!(calls[2].contains("--cookies"), "{calls:?}");
+}
+
+/// A verdict describes the jar the extraction *started* with. If a
+/// parent uploads new cookies while the cookie-less retry is still
+/// running, the old extraction must not record its verdict against the
+/// new jar — otherwise the fresh login would be ignored for an hour.
+#[tokio::test]
+async fn cookie_change_during_extraction_discards_the_stale_verdict() {
+    let fx = Fixture::new_with_slow_logged_out(SABR_ONLY_JSON, DIRECT_JSON, 1);
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    let extraction = {
+        let cfg = cfg.clone();
+        tokio::spawn(async move { ytdlp::extract(&cfg, "vid-1").await })
+    };
+    // Wait until the cookie run is done and the slow cookie-less retry
+    // has started, then "upload new cookies" (what `set_cookies` does).
+    for _ in 0..200 {
+        if fx.invocations().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(fx.invocations().len(), 2, "retry should be in flight");
+    ytdlp::forget_sabr_only_session();
+
+    let result = extraction.await.unwrap().unwrap();
+    assert_eq!(
+        result.usable_format_count(),
+        2,
+        "the old extraction still succeeds"
+    );
+
+    // The next extraction must try the new jar rather than inherit the
+    // stale SABR-only verdict.
+    ytdlp::extract(&cfg, "vid-2").await.unwrap();
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(
+        calls[2].contains("--cookies"),
+        "fresh cookies must be tried after an upload: {}",
+        calls[2]
+    );
 }

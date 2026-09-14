@@ -11,10 +11,13 @@
 //! persistence layer — it never touches the network.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::warn;
+
+use crate::error::AppResult;
 
 /// Inclusive byte range `[start, end]` (matching the HTTP `Range:`
 /// header convention and the DASH `range="A-B"` attribute).
@@ -106,19 +109,20 @@ pub async fn store(pool: &SqlitePool, video_id: &str, format_id: &str, ranges: B
 /// Upserts on the `(video_id, format_id)` key, updating only the range
 /// columns so a `total_bytes` value recorded by the segment store
 /// survives a re-store (unlike `INSERT OR REPLACE`, which drops the row).
-pub async fn store_all(pool: &SqlitePool, video_id: &str, rows: &[(String, BoxRanges)]) {
+///
+/// Returns the database error on failure so the caller can decide
+/// whether to retry; nothing is written unless the whole batch commits.
+pub async fn store_all(
+    pool: &SqlitePool,
+    video_id: &str,
+    rows: &[(String, BoxRanges)],
+) -> AppResult<()> {
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(err) => {
-            warn!(%err, %video_id, "beginning format_box_ranges transaction failed");
-            return;
-        }
-    };
+    let mut tx = pool.begin().await?;
     for (format_id, ranges) in rows {
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO format_box_ranges \
              (video_id, format_id, init_start, init_end, index_start, index_end) \
              VALUES (?, ?, ?, ?, ?, ?) \
@@ -136,15 +140,112 @@ pub async fn store_all(pool: &SqlitePool, video_id: &str, rows: &[(String, BoxRa
         .bind(ranges.index.start as i64)
         .bind(ranges.index.end as i64)
         .execute(&mut *tx)
-        .await;
-        if let Err(err) = result {
-            warn!(%err, %video_id, %format_id, "persisting format_box_ranges failed");
-            return; // dropping `tx` rolls back
+        .await?; // `?` drops `tx`, which rolls back
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Opaque handle for one range set, returned by [`RangePersistMemo::begin`]
+/// and handed back to [`RangePersistMemo::commit`] / [`RangePersistMemo::abort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeSetToken(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistState {
+    /// A write for this fingerprint has been spawned but not yet committed.
+    InFlight(u64),
+    /// This fingerprint is durably in the database.
+    Persisted(u64),
+}
+
+/// Process-wide memo of which innertube range set is (being) persisted
+/// per video, so repeated manifest builds for the same extraction don't
+/// rewrite hundreds of rows on every request.
+///
+/// The memo only ever *suppresses* work it has seen succeed, or that is
+/// currently in flight: a fingerprint is published by [`Self::commit`]
+/// after the transaction commits, and [`Self::abort`] removes an
+/// in-flight entry so the next request retries. Bounded: the memo is
+/// cleared once it grows past a few thousand videos; the only cost of a
+/// miss is one redundant single-transaction write.
+#[derive(Default)]
+pub struct RangePersistMemo {
+    entries: std::sync::Mutex<HashMap<String, PersistState>>,
+}
+
+impl RangePersistMemo {
+    const MAX_TRACKED_VIDEOS: usize = 4096;
+
+    /// The single process-wide memo.
+    pub fn global() -> &'static RangePersistMemo {
+        static GLOBAL: std::sync::OnceLock<RangePersistMemo> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(RangePersistMemo::default)
+    }
+
+    /// Claim `rows` for persistence. Sorts `rows` (so the fingerprint is
+    /// order-independent) and returns a token when the caller should
+    /// write, or `None` when this exact set is already persisted or
+    /// another write for it is in flight.
+    pub fn begin(&self, video_id: &str, rows: &mut [(String, BoxRanges)]) -> Option<RangeSetToken> {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let fingerprint = fingerprint_rows(rows);
+
+        let mut entries = self.lock();
+        match entries.get(video_id) {
+            Some(PersistState::InFlight(fp)) | Some(PersistState::Persisted(fp))
+                if *fp == fingerprint =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        if entries.len() >= Self::MAX_TRACKED_VIDEOS {
+            entries.clear();
+        }
+        entries.insert(video_id.to_string(), PersistState::InFlight(fingerprint));
+        Some(RangeSetToken(fingerprint))
+    }
+
+    /// Publish a committed write. No-op if a newer set superseded it.
+    pub fn commit(&self, video_id: &str, token: RangeSetToken) {
+        let mut entries = self.lock();
+        if entries.get(video_id) == Some(&PersistState::InFlight(token.0)) {
+            entries.insert(video_id.to_string(), PersistState::Persisted(token.0));
         }
     }
-    if let Err(err) = tx.commit().await {
-        warn!(%err, %video_id, rows = rows.len(), "committing format_box_ranges failed");
+
+    /// Forget a failed write so the next request retries it. No-op if a
+    /// newer set superseded it.
+    pub fn abort(&self, video_id: &str, token: RangeSetToken) {
+        let mut entries = self.lock();
+        if entries.get(video_id) == Some(&PersistState::InFlight(token.0)) {
+            entries.remove(video_id);
+        }
     }
+
+    /// Lock the entries map, recovering from a poisoned mutex.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PersistState>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Order-sensitive hash of a (pre-sorted) range set.
+fn fingerprint_rows(rows: &[(String, BoxRanges)]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (format_id, ranges) in rows {
+        format_id.hash(&mut hasher);
+        (
+            ranges.init.start,
+            ranges.init.end,
+            ranges.index.start,
+            ranges.index.end,
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Pure cache lookup for box ranges across a list of formats.

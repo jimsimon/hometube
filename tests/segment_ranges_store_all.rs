@@ -6,7 +6,9 @@
 mod common;
 
 use common::boot;
-use hometube::services::segment_ranges::{lookup_all, store_all, BoxRanges, ByteRange};
+use hometube::services::segment_ranges::{
+    lookup_all, store_all, BoxRanges, ByteRange, RangePersistMemo,
+};
 
 fn sample_ranges() -> BoxRanges {
     BoxRanges {
@@ -39,18 +41,20 @@ async fn store_all_persists_every_row() {
         ("137".to_string(), sample_ranges()),
         ("248".to_string(), sample_ranges()),
     ];
-    store_all(&app.pool, "vid", &rows).await;
+    store_all(&app.pool, "vid", &rows).await.unwrap();
     let map = lookup_all(&app.pool, "vid", &inputs(&["137", "248", "251"])).await;
     assert_eq!(map.get("137"), Some(&sample_ranges()));
     assert_eq!(map.get("248"), Some(&sample_ranges()));
     assert!(!map.contains_key("251"));
 
-    store_all(&app.pool, "vid", &[("137".to_string(), updated)]).await;
+    store_all(&app.pool, "vid", &[("137".to_string(), updated)])
+        .await
+        .unwrap();
     let map = lookup_all(&app.pool, "vid", &inputs(&["137", "248"])).await;
     assert_eq!(map.get("137"), Some(&updated));
     assert_eq!(map.get("248"), Some(&sample_ranges()));
 
-    store_all(&app.pool, "vid", &[]).await; // no-op, must not error
+    store_all(&app.pool, "vid", &[]).await.unwrap(); // no-op
 }
 
 /// Re-storing ranges must not wipe the `total_bytes` the segment store
@@ -58,7 +62,9 @@ async fn store_all_persists_every_row() {
 #[tokio::test]
 async fn store_all_preserves_total_bytes() {
     let app = boot().await;
-    store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())]).await;
+    store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())])
+        .await
+        .unwrap();
     sqlx::query(
         "UPDATE format_box_ranges SET total_bytes = 123456 \
          WHERE video_id = 'vid' AND format_id = '137'",
@@ -67,7 +73,9 @@ async fn store_all_preserves_total_bytes() {
     .await
     .unwrap();
 
-    store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())]).await;
+    store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())])
+        .await
+        .unwrap();
     let total: Option<i64> = sqlx::query_scalar(
         "SELECT total_bytes FROM format_box_ranges \
          WHERE video_id = 'vid' AND format_id = '137'",
@@ -76,4 +84,90 @@ async fn store_all_preserves_total_bytes() {
     .await
     .unwrap();
     assert_eq!(total, Some(123456));
+}
+
+/// A failed batch surfaces as an error (so the caller can retry) and
+/// writes nothing: the transaction rolls back as a unit.
+#[tokio::test]
+async fn store_all_reports_failure_and_writes_nothing() {
+    let app = boot().await;
+    sqlx::query("DROP TABLE format_box_ranges")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let err = store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())])
+        .await
+        .expect_err("missing table must be reported, not swallowed");
+    assert!(
+        err.to_string().contains("format_box_ranges"),
+        "unexpected error: {err}"
+    );
+}
+
+/// The memo hands out a token for a new set, suppresses duplicates while
+/// a write is in flight or after it committed, and releases the set
+/// again when the write is aborted so the next request retries.
+#[test]
+fn persist_memo_retries_after_abort_and_suppresses_after_commit() {
+    let memo = RangePersistMemo::default();
+    let mut rows = vec![
+        ("248".to_string(), sample_ranges()),
+        ("137".to_string(), sample_ranges()),
+    ];
+
+    let token = memo.begin("vid", &mut rows).expect("first claim wins");
+    // Sorted in place so the fingerprint is order-independent.
+    assert_eq!(rows[0].0, "137");
+    // Same set, different input order: in flight, so suppressed.
+    let mut reordered = vec![
+        ("137".to_string(), sample_ranges()),
+        ("248".to_string(), sample_ranges()),
+    ];
+    assert_eq!(memo.begin("vid", &mut reordered), None);
+
+    // The write failed: the next request must be allowed to retry.
+    memo.abort("vid", token);
+    let retry = memo
+        .begin("vid", &mut rows)
+        .expect("abort releases the set");
+    assert_eq!(retry, token, "same set, same fingerprint");
+
+    // Committed: suppressed from now on for this set...
+    memo.commit("vid", retry);
+    assert_eq!(memo.begin("vid", &mut rows), None);
+    // ...and a stale abort for an already-committed token is a no-op.
+    memo.abort("vid", retry);
+    assert_eq!(memo.begin("vid", &mut rows), None);
+
+    // A different set for the same video is new work, and other videos
+    // are independent.
+    let mut changed = vec![("137".to_string(), sample_ranges())];
+    assert!(memo.begin("vid", &mut changed).is_some());
+    assert!(memo.begin("other", &mut rows).is_some());
+}
+
+/// A newer set claimed while an older write is still in flight must not
+/// be clobbered when the older write finally commits or aborts.
+#[test]
+fn persist_memo_ignores_outcomes_of_superseded_writes() {
+    let memo = RangePersistMemo::default();
+    let mut old = vec![("137".to_string(), sample_ranges())];
+    let mut new = vec![
+        ("137".to_string(), sample_ranges()),
+        ("248".to_string(), sample_ranges()),
+    ];
+
+    let old_token = memo.begin("vid", &mut old).unwrap();
+    let new_token = memo
+        .begin("vid", &mut new)
+        .expect("a different set supersedes");
+    assert_ne!(old_token, new_token);
+
+    memo.commit("vid", old_token); // stale: must not mark the new set persisted
+    memo.abort("vid", old_token); // stale: must not release the new set
+    assert_eq!(memo.begin("vid", &mut new), None, "new set still in flight");
+
+    memo.commit("vid", new_token);
+    assert_eq!(memo.begin("vid", &mut new), None);
 }
