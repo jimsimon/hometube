@@ -361,9 +361,12 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 /// result is kept if the retry fails or is no better, so we never lose
 /// metadata we already have.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
-    let cookies_available = cookies_file_path().exists();
-    let first = extract_once(cfg, video_id, cookies_available).await?;
-    if first.usable_format_count() > 0 || !cookies_available {
+    // `cookies_used` reports whether `--cookies` was actually passed,
+    // which can be false even when a jar exists on disk (e.g. the
+    // tempfile copy failed). In that case the first run was already
+    // logged-out and a retry would be identical.
+    let (first, cookies_used) = extract_once(cfg, video_id, true).await?;
+    if first.usable_format_count() > 0 || !cookies_used {
         return Ok(first);
     }
 
@@ -375,7 +378,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
          retrying without cookies"
     );
     match extract_once(cfg, video_id, false).await {
-        Ok(retry) if retry.usable_format_count() > 0 => {
+        Ok((retry, _)) if retry.usable_format_count() > 0 => {
             info!(
                 %video_id,
                 usable_formats = retry.usable_format_count(),
@@ -406,11 +409,14 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 /// `with_cookies` controls whether the on-disk cookies jar (if any) is
 /// passed via `--cookies`. Everything else (PO-token plugin, player
 /// clients, JS runtime) is identical between attempts.
+///
+/// Returns the parsed result and whether `--cookies` was actually
+/// passed to yt-dlp (see [`YoutubeArgsGuard::cookies_used`]).
 async fn extract_once(
     cfg: &Config,
     video_id: &str,
     with_cookies: bool,
-) -> AppResult<ExtractResult> {
+) -> AppResult<(ExtractResult, bool)> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
 
     // yt-dlp's --write-pages dumps all HTTP responses to the working
@@ -546,7 +552,7 @@ async fn extract_once(
     // into the canonical cookie file, but only if every original cookie
     // name still survived yt-dlp's cookiejar rewrite.
     yt_args_guard.persist_cookies_if_safe().await;
-    Ok(result)
+    Ok((result, cookies))
 }
 
 /// One entry from yt-dlp's `--flat-playlist -j` output for a channel
@@ -1185,10 +1191,35 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
             .arg(format!("youtubepot-bgutilhttp:base_url={pot_url}"));
     }
 
-    // Decide up front whether this run is cookie-authenticated; the
-    // player-client list depends on it.
+    // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
+    // doesn't erode the canonical jar. Snapshot the cookie names from
+    // the *tempfile we just wrote* (not the canonical source) so the
+    // survivor-check is consistent with what yt-dlp will actually see,
+    // even if the canonical file is mutated concurrently.
+    //
+    // Staged *before* the player-client list is built: whether this
+    // run is authenticated is defined by whether `--cookies` is
+    // actually passed, not by whether a jar exists on disk. If the
+    // copy fails we run logged-out, and must not request `web_creator`
+    // (LOGIN_REQUIRED without cookies) or report `cookies_used()`.
     let cookies_path = cookies_file_path();
-    let authenticated = with_cookies && cookies_path.exists();
+    let mut cookies_tempfile: Option<std::path::PathBuf> = None;
+    let mut original_cookie_names = std::collections::HashSet::new();
+    if with_cookies && cookies_path.exists() {
+        match copy_cookies_to_tempfile(&cookies_path) {
+            Ok(temp) => {
+                if let Ok(body) = std::fs::read_to_string(&temp) {
+                    original_cookie_names = parse_cookie_names(&body);
+                }
+                cmd.arg("--cookies").arg(&temp);
+                cookies_tempfile = Some(temp);
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to copy cookies to tempfile; running without --cookies");
+            }
+        }
+    }
+    let authenticated = cookies_tempfile.is_some();
 
     // YouTube extractor tuning. We deliberately request multiple player
     // clients so yt-dlp returns the *union* of formats they expose:
@@ -1219,28 +1250,6 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
     cmd.arg("--extractor-args").arg(format!(
         "youtube:player_client={player_clients};formats=duplicate"
     ));
-
-    // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
-    // doesn't erode the canonical jar. Snapshot the cookie names from
-    // the *tempfile we just wrote* (not the canonical source) so the
-    // survivor-check is consistent with what yt-dlp will actually see,
-    // even if the canonical file is mutated concurrently.
-    let mut cookies_tempfile: Option<std::path::PathBuf> = None;
-    let mut original_cookie_names = std::collections::HashSet::new();
-    if authenticated {
-        match copy_cookies_to_tempfile(&cookies_path) {
-            Ok(temp) => {
-                if let Ok(body) = std::fs::read_to_string(&temp) {
-                    original_cookie_names = parse_cookie_names(&body);
-                }
-                cmd.arg("--cookies").arg(&temp);
-                cookies_tempfile = Some(temp);
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to copy cookies to tempfile; running without --cookies");
-            }
-        }
-    }
 
     // JS runtime for YouTube's n-parameter / signature challenge
     // (handled by the `[jsc]` framework in current yt-dlp, separate

@@ -249,6 +249,37 @@ async fn direct_formats_with_cookies_do_not_retry() {
     assert!(calls[0].contains("--cookies"));
 }
 
+/// The jar exists on disk but can't be staged into a tempfile (here:
+/// it's a directory, so `fs::copy` fails). The run is then logged-out
+/// in practice, so it must not request `web_creator`, and `extract`
+/// must not follow up with a second, identical cookie-less attempt.
+#[tokio::test]
+async fn failed_cookie_staging_runs_logged_out_without_retry() {
+    let fx = Fixture::new(SABR_ONLY_JSON, SABR_ONLY_JSON);
+    let cookies = fx.dir.join("cookies.txt");
+    std::fs::remove_file(&cookies).unwrap();
+    std::fs::create_dir(&cookies).unwrap();
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    let result = ytdlp::extract(&cfg, "vid-1")
+        .await
+        .expect("extract succeeds");
+
+    assert_eq!(result.usable_format_count(), 0);
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 1, "no retry expected, got {calls:?}");
+    assert!(
+        !calls[0].contains("--cookies"),
+        "must not pass --cookies when staging failed: {}",
+        calls[0]
+    );
+    assert!(
+        !calls[0].contains("web_creator"),
+        "must not request web_creator without cookies: {}",
+        calls[0]
+    );
+}
+
 #[tokio::test]
 async fn sabr_only_everywhere_keeps_cookie_result() {
     let fx = Fixture::new(SABR_ONLY_JSON, SABR_ONLY_JSON);
