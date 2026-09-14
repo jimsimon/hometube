@@ -94,7 +94,7 @@ async fn cleanup_keeps_directly_allowlisted_video() {
 }
 
 #[tokio::test]
-async fn cleanup_keeps_channel_allowlisted_video() {
+async fn cleanup_keeps_expired_metadata_for_channel_allowlisted_cached_video() {
     let app = boot().await;
 
     // Seed with channel_id = "UCkeep".
@@ -106,7 +106,7 @@ async fn cleanup_keeps_channel_allowlisted_video() {
         "subtitles": {},
         "automatic_captions": {}
     });
-    let expires_at = Utc::now().timestamp() + 3600;
+    let expires_at = Utc::now().timestamp() - 1;
     sqlx::query(
         "INSERT INTO video_metadata_cache (video_id, metadata_json, expires_at) VALUES (?, ?, ?)",
     )
@@ -140,8 +140,26 @@ async fn cleanup_keeps_channel_allowlisted_video() {
     )
     .await;
 
-    let (msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
+    let (msg, output) = cleanup_segment_cache(&app.pool).await.unwrap();
     assert!(msg.contains("0 videos"), "msg was: {msg}");
+    assert!(!output.contains("Pruned 1 expired metadata cache entries."));
+
+    let metadata_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM video_metadata_cache WHERE video_id = 'ch-vid'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(metadata_count, 1);
+
+    // A later cleanup still needs the retained channel_id to keep the segment.
+    let (second_msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
+    assert!(second_msg.contains("0 videos"), "msg was: {second_msg}");
+    let segment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM segment_cache WHERE video_id = 'ch-vid'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(segment_count, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +226,39 @@ async fn cleanup_noop_when_empty() {
     let (msg, _) = cleanup_segment_cache(&app.pool).await.unwrap();
     assert!(msg.contains("0 videos"), "msg was: {msg}");
     assert!(msg.contains("0 segments"), "msg was: {msg}");
+}
+
+#[tokio::test]
+async fn cleanup_prunes_only_expired_metadata_rows() {
+    let app = boot().await;
+    let now = Utc::now().timestamp();
+    for (video_id, expires_at) in [("expired-meta", now - 1), ("fresh-meta", now + 3600)] {
+        let metadata = serde_json::json!({
+            "id": video_id,
+            "formats": [],
+            "thumbnails": []
+        });
+        sqlx::query(
+            "INSERT INTO video_metadata_cache (video_id, metadata_json, expires_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(video_id)
+        .bind(metadata.to_string())
+        .bind(expires_at)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let (_, output) = cleanup_segment_cache(&app.pool).await.unwrap();
+    assert!(output.contains("Pruned 1 expired metadata cache entries."));
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT video_id FROM video_metadata_cache ORDER BY video_id")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec!["fresh-meta"]);
 }
 
 #[tokio::test]
