@@ -208,12 +208,15 @@ fn usable_formats_by_client_counts_only_dash_usable_formats() {
         {"format_id":"137","protocol":"https","acodec":"none","vcodec":"avc1.640028","height":1080,"url":"u"},
         {"format_id":"136","protocol":"https","acodec":"none","vcodec":"avc1.4d401f","height":720,"format_note":"720p, WEB"},
         {"format_id":"18","protocol":"https","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"url":"u","format_note":"360p, MWEB"},
-        {"format_id":"399","protocol":"https","acodec":"none","vcodec":"av01.0.09M.08","height":1080,"url":"u","format_note":"1080p60, WEB-C"}
+        {"format_id":"399","protocol":"https","acodec":"none","vcodec":"av01.0.09M.08","height":1080,"url":"u","format_note":"1080p60, WEB-C"},
+        {"format_id":"248","protocol":"https","acodec":"none","vcodec":"vp9","url":"u","format_note":"1080p, TV-D"}
     ]}"#;
     let result: ExtractResult = serde_json::from_str(json).unwrap();
     let by_client = result.usable_formats_by_client();
     // 251 + 251-dashy; the DRC variant and AV1 are not DASH-usable.
     assert_eq!(by_client.get("WEB-C"), Some(&2));
+    // Video without `height` can't survive the per-height trim.
+    assert_eq!(by_client.get("TV-D"), None);
     assert_eq!(by_client.get("VISI"), Some(&1));
     // Untagged usable format lands in the "?" bucket.
     assert_eq!(by_client.get("?"), Some(&1));

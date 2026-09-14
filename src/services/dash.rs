@@ -235,7 +235,8 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
 ///   read garbage bytes and fail with `WEBM_CUES_ELEMENT_MISSING`
 ///   (webm) or a moof/sidx parse error (mp4). DRC is redundant for
 ///   our use-case anyway (kids watching on tablets/phones);
-/// - is video-only in VP9 or AVC1, or audio-only in opus or mp4a.
+/// - is video-only in VP9 or AVC1 with a known `height`, or audio-only
+///   in opus or mp4a.
 ///   Muxed (audio+video) formats such as YouTube's format 18 are
 ///   rejected: they duplicate content already in the adaptive sets
 ///   and confuse the player — and, notably, they are the *only* thing
@@ -268,7 +269,10 @@ pub fn is_dash_usable(f: &Format) -> bool {
     let is_video_only = vcodec != "none" && acodec == "none";
     let is_audio_only = acodec != "none" && vcodec == "none";
     if is_video_only {
-        is_vp9(vcodec) || is_avc1(vcodec)
+        // `height` is required because the per-height trim in
+        // `synthesize_manifest` keys on it; a video format without
+        // one can never make it into a Representation.
+        f.height.is_some() && (is_vp9(vcodec) || is_avc1(vcodec))
     } else if is_audio_only {
         is_opus(acodec) || is_mp4a(acodec)
     } else {
