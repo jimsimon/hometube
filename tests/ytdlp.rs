@@ -168,6 +168,151 @@ fn subtitle_track_deserializes() {
 }
 
 // ---------------------------------------------------------------------------
+// client attribution (format_note client tags)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn client_tag_from_format_note_parses_ytdlp_short_names() {
+    use hometube::services::ytdlp::client_tag_from_format_note;
+
+    assert_eq!(client_tag_from_format_note("144p, VISI"), Some("VISI"));
+    assert_eq!(
+        client_tag_from_format_note("1080p60, WEB-E, mp4_dash"),
+        Some("WEB-E")
+    );
+    assert_eq!(
+        client_tag_from_format_note("medium, DRC, WEB-C"),
+        Some("WEB-C")
+    );
+    assert_eq!(client_tag_from_format_note("low, TV-D"), Some("TV-D"));
+    assert_eq!(
+        client_tag_from_format_note("English (United States) original (default), medium, ANDR-V"),
+        Some("ANDR-V")
+    );
+    assert_eq!(client_tag_from_format_note("360p, IOS"), Some("IOS"));
+    // No client tag present.
+    assert_eq!(client_tag_from_format_note("720p"), None);
+    assert_eq!(client_tag_from_format_note("low, DRC"), None);
+    assert_eq!(client_tag_from_format_note(""), None);
+}
+
+#[test]
+fn usable_formats_by_client_counts_only_dash_usable_formats() {
+    let json = r#"{"id":"v","formats":[
+        {"format_id":"sb0","protocol":"mhtml","url":"u","format_note":"storyboard, WEB-C"},
+        {"format_id":"233","protocol":"m3u8_native","acodec":"mp4a.40.5","vcodec":"none","url":"u","format_note":"low, WEB-E"},
+        {"format_id":"251","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"251-dashy","protocol":"http_dash_segments","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"251-drc","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, DRC, WEB-C"},
+        {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"url":"u","format_note":"1080p60, VISI"},
+        {"format_id":"137","protocol":"https","acodec":"none","vcodec":"avc1.640028","height":1080,"url":"u"},
+        {"format_id":"136","protocol":"https","acodec":"none","vcodec":"avc1.4d401f","height":720,"format_note":"720p, WEB"},
+        {"format_id":"18","protocol":"https","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"url":"u","format_note":"360p, MWEB"},
+        {"format_id":"399","protocol":"https","acodec":"none","vcodec":"av01.0.09M.08","height":1080,"url":"u","format_note":"1080p60, WEB-C"},
+        {"format_id":"248","protocol":"https","acodec":"none","vcodec":"vp9","url":"u","format_note":"1080p, TV-D"},
+        {"format_id":"250","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"low, IOS"}
+    ],"format_box_ranges":{
+        "251":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "251-dashy":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "251-drc":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "303":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "137":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "18":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "399":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "248":{"init_start":0,"init_end":1,"index_start":2,"index_end":3}
+    }}"#;
+    let result: ExtractResult = serde_json::from_str(json).unwrap();
+    let by_client = result.usable_formats_by_client();
+    // 251 + 251-dashy; the DRC variant and AV1 are not DASH-usable.
+    assert_eq!(by_client.get("WEB-C"), Some(&2));
+    // Video without `height` can't survive the per-height trim.
+    assert_eq!(by_client.get("TV-D"), None);
+    // Otherwise-usable but with no resolved segment ranges: the
+    // synthesizer drops it, so it doesn't count.
+    assert_eq!(by_client.get("IOS"), None);
+    assert_eq!(by_client.get("VISI"), Some(&1));
+    // Untagged usable format lands in the "?" bucket.
+    assert_eq!(by_client.get("?"), Some(&1));
+    // Storyboard, HLS, URL-less and muxed (format 18) are excluded —
+    // format 18 is what a SABR-only session still hands out, and it
+    // must not count as playable or the fallback never fires.
+    assert_eq!(by_client.get("WEB-E"), None);
+    assert_eq!(by_client.get("WEB"), None);
+    assert_eq!(by_client.get("MWEB"), None);
+    assert_eq!(
+        by_client.values().sum::<usize>(),
+        result.usable_format_count()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// player_client_list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn player_client_list_appends_web_creator_only_when_authenticated() {
+    use hometube::services::ytdlp::{player_client_list, DEFAULT_PLAYER_CLIENTS};
+
+    assert_eq!(
+        player_client_list(DEFAULT_PLAYER_CLIENTS, false),
+        DEFAULT_PLAYER_CLIENTS
+    );
+    assert_eq!(
+        player_client_list(DEFAULT_PLAYER_CLIENTS, true),
+        format!("{DEFAULT_PLAYER_CLIENTS},web_creator")
+    );
+    // Operator-pinned lists (e.g. production's `default,web_embedded`)
+    // get the fix too.
+    assert_eq!(
+        player_client_list("default,web_embedded", true),
+        "default,web_embedded,web_creator"
+    );
+}
+
+#[test]
+fn player_client_list_respects_operator_mentions() {
+    use hometube::services::ytdlp::player_client_list;
+
+    // Already present: don't duplicate.
+    assert_eq!(
+        player_client_list("web_creator,default", true),
+        "web_creator,default"
+    );
+    // Explicitly excluded via yt-dlp's `-client` syntax: honour it.
+    assert_eq!(
+        player_client_list("default,-web_creator", true),
+        "default,-web_creator"
+    );
+    // Degenerate inputs.
+    assert_eq!(player_client_list("", true), "web_creator");
+    assert_eq!(
+        player_client_list(" default, ", true),
+        "default,web_creator"
+    );
+}
+
+#[test]
+fn player_client_list_strips_web_creator_when_unauthenticated() {
+    use hometube::services::ytdlp::player_client_list;
+
+    // Operator opted in, but the logged-out retry must not ask for a
+    // client that can only answer LOGIN_REQUIRED without cookies.
+    assert_eq!(player_client_list("default,web_creator", false), "default");
+    assert_eq!(
+        player_client_list("web_creator, default ,web_embedded", false),
+        "default,web_embedded"
+    );
+    // Explicit exclusion is harmless and preserved verbatim.
+    assert_eq!(
+        player_client_list("default,-web_creator", false),
+        "default,-web_creator"
+    );
+    // Stripping everything must still leave yt-dlp a valid list.
+    assert_eq!(player_client_list("web_creator", false), "default");
+    assert_eq!(player_client_list("", false), "default");
+}
+
+// ---------------------------------------------------------------------------
 // sync_cookies_to_disk
 // ---------------------------------------------------------------------------
 

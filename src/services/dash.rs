@@ -216,6 +216,70 @@ pub fn build_format_proxy_url(secret: &[u8], video_id: &str, format_id: &str) ->
     )
 }
 
+/// Can [`synthesize_manifest`] put this format into a `<Representation>`?
+///
+/// This is the single source of truth for "playable through our DASH
+/// pipeline", shared with [`crate::services::ytdlp::ExtractResult`] so
+/// the SABR-only fallback in the extractor makes the same call the
+/// serving path does. A format qualifies when it:
+///
+/// - is not a storyboard sprite sheet (`sb*`);
+/// - has a direct URL over `https` / `http_dash_segments` (SABR-only
+///   formats fail here — yt-dlp emits them without a URL, or drops
+///   them entirely);
+/// - is not a DRC (Dynamic Range Compression) audio variant. DRC
+///   variants share an itag with the standard variant but are
+///   different files with different Cues / sidx byte offsets. The
+///   innertube `/player` API only reports ranges for the non-DRC
+///   version, so applying those ranges to a DRC variant makes shaka
+///   read garbage bytes and fail with `WEBM_CUES_ELEMENT_MISSING`
+///   (webm) or a moof/sidx parse error (mp4). DRC is redundant for
+///   our use-case anyway (kids watching on tablets/phones);
+/// - is video-only in VP9 or AVC1 with a known `height`, or audio-only
+///   in opus or mp4a.
+///   Muxed (audio+video) formats such as YouTube's format 18 are
+///   rejected: they duplicate content already in the adaptive sets
+///   and confuse the player — and, notably, they are the *only* thing
+///   a SABR-only session still hands out with a URL.
+///
+/// All audio languages (including AI dubs and author-uploaded dubs)
+/// pass. YouTube marks both AI and author dubs with `"TV-D"` in
+/// `format_note`, making them indistinguishable; rather than risk
+/// filtering out legitimate author dubs, we include everything and let
+/// the user switch languages via Shaka's language menu.
+pub fn is_dash_usable(f: &Format) -> bool {
+    if f.format_id.starts_with("sb") {
+        return false;
+    }
+    if !matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments")) || f.url.is_none() {
+        return false;
+    }
+    let is_drc = f.format_id.contains("-drc-")
+        || f.format_id.ends_with("-drc")
+        || f.format_note
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase().contains("drc"))
+            .unwrap_or(false);
+    if is_drc {
+        return false;
+    }
+
+    let vcodec = f.vcodec.as_deref().unwrap_or("none");
+    let acodec = f.acodec.as_deref().unwrap_or("none");
+    let is_video_only = vcodec != "none" && acodec == "none";
+    let is_audio_only = acodec != "none" && vcodec == "none";
+    if is_video_only {
+        // `height` is required because the per-height trim in
+        // `synthesize_manifest` keys on it; a video format without
+        // one can never make it into a Representation.
+        f.height.is_some() && (is_vp9(vcodec) || is_avc1(vcodec))
+    } else if is_audio_only {
+        is_opus(acodec) || is_mp4a(acodec)
+    } else {
+        false
+    }
+}
+
 /// Synthesize a minimal DASH MPD from yt-dlp's per-format metadata.
 ///
 /// This is used when yt-dlp doesn't expose an upstream DASH manifest
@@ -278,54 +342,7 @@ pub fn synthesize_manifest<'a>(
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
-    let is_usable = |f: &&Format| -> bool {
-        if f.format_id.starts_with("sb") {
-            return false;
-        }
-        if !matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments")) || f.url.is_none()
-        {
-            return false;
-        }
-        // DRC (Dynamic Range Compression) variants share an itag with
-        // the standard variant but are different files with different
-        // Cues / sidx byte offsets. The innertube `/player` API only
-        // reports ranges for the non-DRC version, so applying those
-        // ranges to a DRC variant makes shaka read garbage bytes and
-        // fail with WEBM_CUES_ELEMENT_MISSING (webm) or a moof/sidx
-        // parse error (mp4). Exclude them entirely — DRC is redundant
-        // for our use-case (kids watching on tablets/phones).
-        let is_drc = f.format_id.contains("-drc-")
-            || f.format_id.ends_with("-drc")
-            || f.format_note
-                .as_deref()
-                .map(|s| s.to_ascii_lowercase().contains("drc"))
-                .unwrap_or(false);
-        if is_drc {
-            return false;
-        }
-
-        let vcodec = f.vcodec.as_deref().unwrap_or("none");
-        let acodec = f.acodec.as_deref().unwrap_or("none");
-        let is_video_only = vcodec != "none" && acodec == "none";
-        let is_audio_only = acodec != "none" && vcodec == "none";
-
-        // All audio languages (including AI dubs and author-uploaded
-        // dubs) are kept in the manifest. YouTube marks both AI and
-        // author dubs with `"TV-D"` in `format_note`, making them
-        // indistinguishable. Rather than risk filtering out legitimate
-        // author dubs, we include everything and let the user switch
-        // languages via Shaka's language menu.
-        if is_video_only {
-            is_vp9(vcodec) || is_avc1(vcodec)
-        } else if is_audio_only {
-            is_opus(acodec) || is_mp4a(acodec)
-        } else {
-            // Drop muxed (both codecs) and storyboard-like garbage.
-            false
-        }
-    };
-
-    let usable: Vec<&Format> = formats.iter().filter(is_usable).collect();
+    let usable: Vec<&Format> = formats.iter().filter(|f| is_dash_usable(f)).collect();
 
     // Deduplicate: yt-dlp's `formats=duplicate` extractor flag returns
     // both `https` (whole-file) and `http_dash_segments` (`*-dashy`)

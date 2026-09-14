@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::timeout;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
@@ -245,15 +245,178 @@ impl<'de> Deserialize<'de> for ExtractResult {
     }
 }
 
+impl ExtractResult {
+    /// Number of formats the DASH synthesizer can actually stream, as
+    /// judged by [`crate::services::dash::is_dash_usable`]: direct-URL
+    /// video-only VP9/AVC1 or audio-only opus/mp4a formats, excluding
+    /// storyboards, DRC variants and muxed streams — and for which
+    /// innertube gave us `<SegmentBase>` byte ranges.
+    ///
+    /// When this is `0` on an otherwise successful extraction, YouTube
+    /// served only SABR (server-side adaptive bitrate) streams to the
+    /// player client(s) yt-dlp used — yt-dlp drops those because they
+    /// have no fetchable URL, leaving just HLS/storyboard entries and,
+    /// on some sessions, the muxed 360p format 18.
+    /// See <https://github.com/yt-dlp/yt-dlp/issues/12482>.
+    pub fn usable_format_count(&self) -> usize {
+        self.usable_formats().count()
+    }
+
+    /// Formats the DASH synthesizer will actually accept. Delegates to
+    /// [`crate::services::dash::is_dash_usable`] so this stays in
+    /// lock-step with the serving path: a SABR-only session still
+    /// returns muxed format 18 with a URL, and counting that as
+    /// "playable" would suppress the fallback while the manifest
+    /// route goes on 404ing.
+    ///
+    /// Additionally requires an entry in [`Self::format_box_ranges`],
+    /// mirroring the synthesizer's `has_ranges` filter: it drops
+    /// unranged Representations, so a URL alone isn't playable. The
+    /// manifest route can also recover ranges from the SQLite cache,
+    /// which we can't see here; the worst case of ignoring that is one
+    /// unnecessary cookie-less yt-dlp run whose result is only adopted
+    /// if it is itself playable.
+    fn usable_formats(&self) -> impl Iterator<Item = &Format> {
+        self.formats.iter().filter(|f| {
+            crate::services::dash::is_dash_usable(f)
+                && self.format_box_ranges.contains_key(&f.format_id)
+        })
+    }
+
+    /// Usable format count per yt-dlp player client, e.g.
+    /// `{"WEB-C": 56, "WEB-E": 2}`. Formats whose `format_note` carries
+    /// no recognisable client tag are counted under `"?"`.
+    ///
+    /// Because we always pass `formats=duplicate`, yt-dlp appends its
+    /// short client name (`WEB`, `WEB-E`, `WEB-C`, `TV-D`, `VISI`,
+    /// `IOS`, …) as the last `, `-separated token of `format_note`.
+    /// This is what tells us *which* client actually produced playable
+    /// formats on a given run — the only way to know whether e.g.
+    /// `web_creator` is doing its job for a cookie session.
+    pub fn usable_formats_by_client(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for f in self.usable_formats() {
+            let client = f
+                .format_note
+                .as_deref()
+                .and_then(client_tag_from_format_note)
+                .unwrap_or("?");
+            *out.entry(client.to_string()).or_insert(0) += 1;
+        }
+        out
+    }
+}
+
+/// Extract yt-dlp's short client name from a `format_note` such as
+/// `"1080p60, WEB-E, mp4_dash"` or `"medium, DRC, WEB-C"`.
+///
+/// yt-dlp builds the tag as `UPPER(first 4 chars of the main client
+/// name)` optionally followed by `-` and one initial per extra word
+/// (`web_embedded` → `WEB-E`, `tv_downgraded` → `TV-D`, `android_vr`
+/// → `ANDR-V`). The `_dash` / `_hls` container suffix, when present,
+/// comes *after* the client tag, so we scan tokens from the end for
+/// the first one matching that shape.
+pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
+    note.rsplit(',').map(str::trim).find(|tok| {
+        let mut parts = tok.splitn(2, '-');
+        let main = parts.next().unwrap_or("");
+        let initials = parts.next();
+        let upper_alnum = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        };
+        (1..=4).contains(&main.len())
+            && upper_alnum(main)
+            && initials.is_none_or(upper_alnum)
+            // Quality tags like `DRC` would otherwise match; yt-dlp
+            // only emits a handful of those and they never appear
+            // *after* the client tag, but be explicit anyway.
+            && !matches!(*tok, "DRC" | "DAMAGED" | "MISSING POT")
+    })
+}
+
 /// Run `yt-dlp --dump-json --no-playlist <video_url>` and parse the
-/// result. Times out after [`DEFAULT_TIMEOUT`].
+/// result. Times out after [`DEFAULT_TIMEOUT`] per attempt.
 ///
 /// Additionally runs with `--write-pages` to capture the raw innertube
 /// `/player` API response, from which we extract `initRange` and
 /// `indexRange` for each adaptive format. These byte ranges let us
 /// emit `<SegmentBase indexRange>` + `<Initialization range>` in the
 /// synthesized DASH manifest without probing the upstream files.
+///
+/// ## SABR-only fallback
+///
+/// YouTube has been rolling out SABR-only streaming to *logged-in*
+/// sessions: every cookie-capable player client (`web`,
+/// `web_embedded`, `mweb`, …) returns adaptive formats with no URL,
+/// yt-dlp skips them, and we're left with nothing the DASH
+/// synthesizer can use — the player then sees a bare 404 for
+/// `manifest.mpd`. See <https://github.com/yt-dlp/yt-dlp/issues/17666>.
+///
+/// When the cookie-authenticated extraction succeeds but yields zero
+/// usable formats, we re-run yt-dlp *without* cookies. Logged-out
+/// sessions get yt-dlp's cookie-less default clients (`visionos`,
+/// `web`, …), which still serve direct `https` formats. The cookie'd
+/// result is kept if the retry fails or is no better, so we never lose
+/// metadata we already have.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
+    // `cookies_used` reports whether `--cookies` was actually passed,
+    // which can be false even when a jar exists on disk (e.g. the
+    // tempfile copy failed). In that case the first run was already
+    // logged-out and a retry would be identical.
+    let (first, cookies_used) = extract_once(cfg, video_id, true).await?;
+    if first.usable_format_count() > 0 || !cookies_used {
+        return Ok(first);
+    }
+
+    warn!(
+        %video_id,
+        total_formats = first.formats.len(),
+        "cookie-authenticated yt-dlp extraction returned no usable formats \
+         (YouTube likely forced SABR-only streaming for the logged-in session); \
+         retrying without cookies"
+    );
+    match extract_once(cfg, video_id, false).await {
+        Ok((retry, _)) if retry.usable_format_count() > 0 => {
+            info!(
+                %video_id,
+                usable_formats = retry.usable_format_count(),
+                serving_clients = ?retry.usable_formats_by_client(),
+                "cookie-less yt-dlp retry recovered usable formats; \
+                 the logged-in session is SABR-only"
+            );
+            Ok(retry)
+        }
+        Ok(_) => {
+            warn!(
+                %video_id,
+                "cookie-less yt-dlp retry also returned no usable formats; \
+                 playback will be unavailable for this video"
+            );
+            Ok(first)
+        }
+        Err(err) => {
+            warn!(%video_id, %err, "cookie-less yt-dlp retry failed; keeping cookie-authenticated result");
+            Ok(first)
+        }
+    }
+}
+
+/// Single yt-dlp `--dump-json` invocation. See [`extract`] for the
+/// retry policy layered on top.
+///
+/// `with_cookies` controls whether the on-disk cookies jar (if any) is
+/// passed via `--cookies`. Everything else (PO-token plugin, player
+/// clients, JS runtime) is identical between attempts.
+///
+/// Returns the parsed result and whether `--cookies` was actually
+/// passed to yt-dlp (see [`YoutubeArgsGuard::cookies_used`]).
+async fn extract_once(
+    cfg: &Config,
+    video_id: &str,
+    with_cookies: bool,
+) -> AppResult<(ExtractResult, bool)> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
 
     // yt-dlp's --write-pages dumps all HTTP responses to the working
@@ -264,16 +427,24 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("creating pages tmp: {e}")))?;
 
+    // Note: warnings are deliberately *not* suppressed here. yt-dlp
+    // reports format-availability problems (SABR-only sessions, PO
+    // token requirements, JS challenge failures) as warnings on
+    // stderr, and those are the only diagnostic we get when the
+    // extraction "succeeds" with nothing playable in it.
     let mut cmd = Command::new(&cfg.ytdlp_path);
     cmd.arg("--dump-json")
         .arg("--no-playlist")
-        .arg("--no-warnings")
         .arg("--skip-download")
         .arg("--write-pages")
         .current_dir(&pages_dir);
-    let yt_args_guard = append_youtube_args(&mut cmd);
+    let yt_args_guard = append_youtube_args_with(&mut cmd, with_cookies);
     cmd.arg(&url);
-    debug!(?cmd, %video_id, "running yt-dlp");
+    // What was *actually* passed, as opposed to what was requested:
+    // `cookies` is false if staging the jar failed.
+    let cookies = yt_args_guard.cookies_used();
+    let requested_clients = yt_args_guard.player_clients();
+    debug!(?cmd, %video_id, cookies, requested_clients, "running yt-dlp");
 
     let output = timeout(DEFAULT_TIMEOUT, output_retrying_etxtbsy(&mut cmd))
         .await
@@ -282,7 +453,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(%video_id, %stderr, "yt-dlp failed");
+        warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp failed");
         let _ = tokio::fs::remove_dir_all(&pages_dir).await;
         return Err(AppError::Other(anyhow::anyhow!(
             "yt-dlp exited with status {}: {}",
@@ -339,6 +510,43 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         debug!(%video_id, "no segment ranges found in player dumps");
     }
 
+    // Surface yt-dlp's warnings. They're WARN-worthy when the run
+    // produced nothing we can stream (that's exactly the SABR / PO
+    // token situation they describe); otherwise DEBUG so a healthy
+    // deployment isn't spammed by e.g. "skipped ios formats" noise.
+    // This must run after range resolution because usability counts
+    // only ranged formats.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if result.usable_format_count() == 0 {
+            warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no usable formats returned)");
+        } else {
+            debug!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings");
+        }
+    }
+
+    // One line per extraction answering the operational questions:
+    // were cookies in play, which clients did we ask for, and which
+    // client(s) actually delivered playable formats. Rendered as e.g.
+    // `serving_clients=WEB-C:56,WEB-E:2` so it greps cleanly.
+    let by_client = result.usable_formats_by_client();
+    let serving_clients = by_client
+        .iter()
+        .map(|(client, n)| format!("{client}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    info!(
+        %video_id,
+        cookies,
+        requested_clients,
+        total_formats = result.formats.len(),
+        ranged_formats = result.format_box_ranges.len(),
+        usable_formats = result.usable_format_count(),
+        serving_clients = %serving_clients,
+        "yt-dlp extraction complete"
+    );
+
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;
 
@@ -346,7 +554,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // into the canonical cookie file, but only if every original cookie
     // name still survived yt-dlp's cookiejar rewrite.
     yt_args_guard.persist_cookies_if_safe().await;
-    Ok(result)
+    Ok((result, cookies))
 }
 
 /// One entry from yt-dlp's `--flat-playlist -j` output for a channel
@@ -774,9 +982,22 @@ pub struct YoutubeArgsGuard {
     original_cookie_names: std::collections::HashSet<String>,
     /// Path of the canonical cookies file (where we'd persist back to).
     canonical_cookies_path: std::path::PathBuf,
+    /// The exact `player_client=` list handed to yt-dlp, for logging.
+    player_clients: String,
 }
 
 impl YoutubeArgsGuard {
+    /// Whether `--cookies` was actually passed on this run (a cookies
+    /// file existed *and* the caller asked for it).
+    pub fn cookies_used(&self) -> bool {
+        self.cookies_tempfile.is_some()
+    }
+
+    /// The `player_client=` list handed to yt-dlp on this run.
+    pub fn player_clients(&self) -> &str {
+        &self.player_clients
+    }
+
     /// Read yt-dlp's rewritten cookies tempfile and, if every cookie
     /// name we started with is still present, write the rewritten
     /// content back to the canonical cookies file. This captures the
@@ -872,6 +1093,67 @@ fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
     names
 }
 
+/// Default `youtube:player_client=` list when `YTDLP_PLAYER_CLIENT` is
+/// unset. See the comment in [`append_youtube_args_with`] for why.
+pub const DEFAULT_PLAYER_CLIENTS: &str = "default,web_embedded";
+
+/// The one cookie-capable client YouTube has not (yet) moved to
+/// SABR-only streaming for logged-in sessions. It only returns formats
+/// when the session is actually logged in (`LOGIN_REQUIRED` otherwise,
+/// which yt-dlp treats as a per-client warning when other clients are
+/// requested), so it's only worth asking for on cookie runs.
+const AUTHED_EXTRA_CLIENT: &str = "web_creator";
+
+/// Build the final `player_client` list for a yt-dlp run.
+///
+/// `configured` is the operator's list (`YTDLP_PLAYER_CLIENT` or
+/// [`DEFAULT_PLAYER_CLIENTS`]). When `authenticated`, `web_creator` is
+/// appended unless the operator already mentioned it — either
+/// positively (`web_creator`) or as an explicit exclusion
+/// (`-web_creator`, yt-dlp's opt-out syntax).
+///
+/// When *not* authenticated, positive `web_creator` entries are
+/// removed instead: without cookies that client only yields
+/// `LOGIN_REQUIRED`, so requesting it on the logged-out SABR fallback
+/// is pure noise. Explicit `-web_creator` exclusions and every other
+/// client are preserved. If stripping leaves nothing, `default` is
+/// used so yt-dlp still gets a valid list.
+///
+/// Rationale: as of September 2026 YouTube serves *SABR-only* streams
+/// (no direct URLs) to logged-in sessions on `web`, `web_embedded`,
+/// `web_safari` and `mweb`, and the `tv*` clients fail signature
+/// solving ("The page needs to be reloaded"). That leaves
+/// `web_creator` + a PO token as the only cookie path that still yields
+/// `https` formats (yt-dlp #17666, #17497, #17644). Appending it here
+/// means existing deployments that pin `YTDLP_PLAYER_CLIENT` pick up
+/// the fix without a config change.
+pub fn player_client_list(configured: &str, authenticated: bool) -> String {
+    let configured = configured.trim().trim_matches(',');
+    if !authenticated {
+        let kept = configured
+            .split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && *c != AUTHED_EXTRA_CLIENT)
+            .collect::<Vec<_>>();
+        return if kept.is_empty() {
+            "default".to_string()
+        } else {
+            kept.join(",")
+        };
+    }
+    let mentioned = configured
+        .split(',')
+        .map(|c| c.trim().trim_start_matches('-'))
+        .any(|c| c == AUTHED_EXTRA_CLIENT);
+    if mentioned {
+        configured.to_string()
+    } else if configured.is_empty() {
+        AUTHED_EXTRA_CLIENT.to_string()
+    } else {
+        format!("{configured},{AUTHED_EXTRA_CLIENT}")
+    }
+}
+
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
@@ -889,6 +1171,14 @@ fn parse_cookie_names(body: &str) -> std::collections::HashSet<String> {
 ///    signature challenges via the bundled `yt-dlp-ejs` component.
 ///    Configurable via `YTDLP_JS_RUNTIME` (defaults to `deno`).
 fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
+    append_youtube_args_with(cmd, true)
+}
+
+/// [`append_youtube_args`] with an explicit switch for the cookies
+/// jar. `with_cookies = false` skips step 3 entirely even when a
+/// cookies file exists on disk — used by [`extract`]'s SABR-only
+/// fallback to get a logged-out session from yt-dlp.
+fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArgsGuard {
     // PO token plugin directory. Must be absolute because the caller
     // may set `.current_dir()` to a temp directory for `--write-pages`.
     let plugin_dir = std::env::var("YTDLP_PLUGIN_DIR")
@@ -919,42 +1209,21 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
             .arg(format!("youtubepot-bgutilhttp:base_url={pot_url}"));
     }
 
-    // YouTube extractor tuning. We deliberately request multiple player
-    // clients so yt-dlp returns the *union* of formats they expose:
-    //
-    // - `default` keeps yt-dlp's built-in client list as a baseline.
-    // - `ios` returns DASH-segmented formats *without* requiring a PO
-    //   token — those URLs are the most reliable path for playback
-    //   because Google's CDN doesn't 403 them the way it 403s
-    //   PoT-pipelined HLS segments.
-    // - `web` is the canonical client; it surfaces DASH manifests when
-    //   it can authenticate via cookies + the bgutil PoT plugin, and
-    //   gives us the richest format pool.
-    //
-    // `formats=duplicate` asks yt-dlp to keep adaptive *and*
-    // progressive variants in the output, even when they overlap. That
-    // gives `synthesize_manifest` more `https`-protocol formats to
-    // pick from when no upstream DASH manifest is available, and lets
-    // the rewriter prefer real DASH when it is.
-    //
-    // Configurable via the `YTDLP_PLAYER_CLIENT` env var so production
-    // deployments can pin to a single client if they discover one
-    // works better for their cookie set / IP geolocation.
-    let player_clients =
-        std::env::var("YTDLP_PLAYER_CLIENT").unwrap_or_else(|_| "default,ios,web".to_string());
-    cmd.arg("--extractor-args").arg(format!(
-        "youtube:player_client={player_clients};formats=duplicate"
-    ));
-
     // Cookies file: copy to a tempfile so yt-dlp's in-place rewrite
     // doesn't erode the canonical jar. Snapshot the cookie names from
     // the *tempfile we just wrote* (not the canonical source) so the
     // survivor-check is consistent with what yt-dlp will actually see,
     // even if the canonical file is mutated concurrently.
+    //
+    // Staged *before* the player-client list is built: whether this
+    // run is authenticated is defined by whether `--cookies` is
+    // actually passed, not by whether a jar exists on disk. If the
+    // copy fails we run logged-out, and must not request `web_creator`
+    // (LOGIN_REQUIRED without cookies) or report `cookies_used()`.
+    let cookies_path = cookies_file_path();
     let mut cookies_tempfile: Option<std::path::PathBuf> = None;
     let mut original_cookie_names = std::collections::HashSet::new();
-    let cookies_path = cookies_file_path();
-    if cookies_path.exists() {
+    if with_cookies && cookies_path.exists() {
         match copy_cookies_to_tempfile(&cookies_path) {
             Ok(temp) => {
                 if let Ok(body) = std::fs::read_to_string(&temp) {
@@ -968,6 +1237,37 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
             }
         }
     }
+    let authenticated = cookies_tempfile.is_some();
+
+    // YouTube extractor tuning. We deliberately request multiple player
+    // clients so yt-dlp returns the *union* of formats they expose:
+    //
+    // - `default` keeps yt-dlp's built-in client list as a baseline.
+    //   yt-dlp picks a different set depending on whether cookies are
+    //   present (logged-in: `web_embedded,tv_downgraded,web`;
+    //   logged-out: `visionos,web`) and silently drops clients that
+    //   can't carry cookies when they are.
+    // - `web_embedded` is the maintainers' recommended workaround for
+    //   the TVHTML5 (`tv*`) signature breakage that hits logged-in
+    //   sessions (yt-dlp #17389).
+    // - `web_creator` is appended automatically for cookie runs — see
+    //   [`player_client_list`].
+    //
+    // `formats=duplicate` asks yt-dlp to keep adaptive *and*
+    // progressive variants in the output, even when they overlap. That
+    // gives `synthesize_manifest` more `https`-protocol formats to
+    // pick from when no upstream DASH manifest is available, and lets
+    // the rewriter prefer real DASH when it is.
+    //
+    // Configurable via the `YTDLP_PLAYER_CLIENT` env var so production
+    // deployments can pin to a single client if they discover one
+    // works better for their cookie set / IP geolocation.
+    let configured =
+        std::env::var("YTDLP_PLAYER_CLIENT").unwrap_or_else(|_| DEFAULT_PLAYER_CLIENTS.to_string());
+    let player_clients = player_client_list(&configured, authenticated);
+    cmd.arg("--extractor-args").arg(format!(
+        "youtube:player_client={player_clients};formats=duplicate"
+    ));
 
     // JS runtime for YouTube's n-parameter / signature challenge
     // (handled by the `[jsc]` framework in current yt-dlp, separate
@@ -994,6 +1294,7 @@ fn append_youtube_args(cmd: &mut Command) -> YoutubeArgsGuard {
         cookies_tempfile,
         original_cookie_names,
         canonical_cookies_path: cookies_path,
+        player_clients,
     }
 }
 
