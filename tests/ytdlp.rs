@@ -168,6 +168,107 @@ fn subtitle_track_deserializes() {
 }
 
 // ---------------------------------------------------------------------------
+// client attribution (format_note client tags)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn client_tag_from_format_note_parses_ytdlp_short_names() {
+    use hometube::services::ytdlp::client_tag_from_format_note;
+
+    assert_eq!(client_tag_from_format_note("144p, VISI"), Some("VISI"));
+    assert_eq!(
+        client_tag_from_format_note("1080p60, WEB-E, mp4_dash"),
+        Some("WEB-E")
+    );
+    assert_eq!(
+        client_tag_from_format_note("medium, DRC, WEB-C"),
+        Some("WEB-C")
+    );
+    assert_eq!(client_tag_from_format_note("low, TV-D"), Some("TV-D"));
+    assert_eq!(
+        client_tag_from_format_note("English (United States) original (default), medium, ANDR-V"),
+        Some("ANDR-V")
+    );
+    assert_eq!(client_tag_from_format_note("360p, IOS"), Some("IOS"));
+    // No client tag present.
+    assert_eq!(client_tag_from_format_note("720p"), None);
+    assert_eq!(client_tag_from_format_note("low, DRC"), None);
+    assert_eq!(client_tag_from_format_note(""), None);
+}
+
+#[test]
+fn direct_formats_by_client_counts_only_direct_formats() {
+    let json = r#"{"id":"v","formats":[
+        {"format_id":"sb0","protocol":"mhtml","url":"u","format_note":"storyboard, WEB-C"},
+        {"format_id":"233","protocol":"m3u8_native","url":"u","format_note":"low, WEB-E"},
+        {"format_id":"251","protocol":"https","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"251-dashy","protocol":"http_dash_segments","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"303","protocol":"https","url":"u","format_note":"1080p60, VISI"},
+        {"format_id":"137","protocol":"https","url":"u"},
+        {"format_id":"136","protocol":"https","format_note":"720p, WEB"}
+    ]}"#;
+    let result: ExtractResult = serde_json::from_str(json).unwrap();
+    let by_client = result.direct_formats_by_client();
+    assert_eq!(by_client.get("WEB-C"), Some(&2));
+    assert_eq!(by_client.get("VISI"), Some(&1));
+    // Untagged direct format lands in the "?" bucket.
+    assert_eq!(by_client.get("?"), Some(&1));
+    // Storyboard, HLS, and URL-less formats are excluded.
+    assert_eq!(by_client.get("WEB-E"), None);
+    assert_eq!(by_client.get("WEB"), None);
+    assert_eq!(
+        by_client.values().sum::<usize>(),
+        result.direct_format_count()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// player_client_list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn player_client_list_appends_web_creator_only_when_authenticated() {
+    use hometube::services::ytdlp::{player_client_list, DEFAULT_PLAYER_CLIENTS};
+
+    assert_eq!(
+        player_client_list(DEFAULT_PLAYER_CLIENTS, false),
+        DEFAULT_PLAYER_CLIENTS
+    );
+    assert_eq!(
+        player_client_list(DEFAULT_PLAYER_CLIENTS, true),
+        format!("{DEFAULT_PLAYER_CLIENTS},web_creator")
+    );
+    // Operator-pinned lists (e.g. production's `default,web_embedded`)
+    // get the fix too.
+    assert_eq!(
+        player_client_list("default,web_embedded", true),
+        "default,web_embedded,web_creator"
+    );
+}
+
+#[test]
+fn player_client_list_respects_operator_mentions() {
+    use hometube::services::ytdlp::player_client_list;
+
+    // Already present: don't duplicate.
+    assert_eq!(
+        player_client_list("web_creator,default", true),
+        "web_creator,default"
+    );
+    // Explicitly excluded via yt-dlp's `-client` syntax: honour it.
+    assert_eq!(
+        player_client_list("default,-web_creator", true),
+        "default,-web_creator"
+    );
+    // Degenerate inputs.
+    assert_eq!(player_client_list("", true), "web_creator");
+    assert_eq!(
+        player_client_list(" default, ", true),
+        "default,web_creator"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // sync_cookies_to_disk
 // ---------------------------------------------------------------------------
 
