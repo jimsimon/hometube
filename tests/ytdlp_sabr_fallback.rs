@@ -53,10 +53,13 @@ const DIRECT_UNRANGED_JSON: &str = r#"{"id":"vid-1","title":"Unranged","duration
   {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"filesize":200,"url":"https://rr1.googlevideo.com/videoplayback?itag=303"}
 ]}"#;
 
+/// `no_cookies_json = None` makes the logged-out branch exit non-zero
+/// with a bot-wall message on stderr, like yt-dlp does when YouTube
+/// challenges an unauthenticated IP.
 fn write_shim(
     argv_log: &std::path::Path,
     with_cookies_json: &str,
-    no_cookies_json: &str,
+    no_cookies_json: Option<&str>,
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -79,7 +82,14 @@ fn write_shim(
         .unwrap();
         writeln!(f, "    printf '%s\\n' '{}' ;;", esc(with_cookies_json)).unwrap();
         writeln!(f, "  *)").unwrap();
-        writeln!(f, "    printf '%s\\n' '{}' ;;", esc(no_cookies_json)).unwrap();
+        match no_cookies_json {
+            Some(json) => writeln!(f, "    printf '%s\\n' '{}' ;;", esc(json)).unwrap(),
+            None => writeln!(
+                f,
+                "    printf '%s\\n' 'ERROR: [youtube] vid-1: Sign in to confirm you'\\''re not a bot.' >&2; exit 1 ;;"
+            )
+            .unwrap(),
+        }
         writeln!(f, "esac").unwrap();
         writeln!(f, "exit 0").unwrap();
         f.flush().unwrap();
@@ -115,6 +125,15 @@ struct Fixture {
 
 impl Fixture {
     fn new(with_cookies_json: &str, no_cookies_json: &str) -> Self {
+        Self::build(with_cookies_json, Some(no_cookies_json))
+    }
+
+    /// Logged-out runs fail (bot wall); cookie runs return `with_cookies_json`.
+    fn new_with_failing_logged_out(with_cookies_json: &str) -> Self {
+        Self::build(with_cookies_json, None)
+    }
+
+    fn build(with_cookies_json: &str, no_cookies_json: Option<&str>) -> Self {
         let env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The SABR-only verdict is process-wide state; start every test
         // from "no verdict" so ordering doesn't matter.
@@ -362,4 +381,75 @@ async fn unplayable_everywhere_does_not_record_a_verdict() {
         "both extractions probe with cookies: {calls:?}"
     );
     assert!(calls[2].contains("--cookies"));
+}
+
+/// With a verdict in place, a cookie-less run that comes back unplayable
+/// must not be the end of it: the verdict is dropped and the cookie run
+/// is tried once, and its result wins when it is playable.
+#[tokio::test]
+async fn memo_skipped_run_falls_back_to_cookies_when_unplayable() {
+    // Cookies now serve formats again (SABR experiment lifted), while
+    // the logged-out session does not.
+    let fx = Fixture::new(DIRECT_JSON, SABR_ONLY_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+    ytdlp::remember_sabr_only_session();
+
+    let result = ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    assert_eq!(result.title.as_deref(), Some("Direct"));
+    assert_eq!(result.usable_format_count(), 2);
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 2, "logged-out first, then cookies: {calls:?}");
+    assert!(!calls[0].contains("--cookies"));
+    assert!(calls[1].contains("--cookies"));
+
+    // The verdict was dropped, so the next extraction probes with
+    // cookies first again (and needs no retry: cookies are playable).
+    ytdlp::extract(&cfg, "vid-2").await.unwrap();
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(calls[2].contains("--cookies"));
+}
+
+/// A bot-walled logged-out run (non-zero exit) is an error, not an
+/// empty result; it must still trigger the cookie fallback rather than
+/// surfacing the error for the rest of the memo window.
+#[tokio::test]
+async fn memo_skipped_run_falls_back_to_cookies_on_error() {
+    let fx = Fixture::new_with_failing_logged_out(DIRECT_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+    ytdlp::remember_sabr_only_session();
+
+    let result = ytdlp::extract(&cfg, "vid-1")
+        .await
+        .expect("cookie fallback recovers from a bot-walled logged-out run");
+    assert_eq!(result.title.as_deref(), Some("Direct"));
+    assert_eq!(result.usable_format_count(), 2);
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(!calls[0].contains("--cookies"));
+    assert!(calls[1].contains("--cookies"));
+}
+
+/// Both attempts unplayable: still a successful extraction (metadata
+/// for the unavailable page), the logged-out run is not repeated, and
+/// the verdict stays cleared.
+#[tokio::test]
+async fn memo_skipped_run_unplayable_everywhere_returns_metadata_once() {
+    let fx = Fixture::new(SABR_WITH_FORMAT_18_JSON, SABR_ONLY_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+    ytdlp::remember_sabr_only_session();
+
+    let result = ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    assert_eq!(result.usable_format_count(), 0);
+    // The logged-out result is kept when neither attempt is playable.
+    assert_eq!(result.title.as_deref(), Some("SABR"));
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 2, "exactly one attempt each: {calls:?}");
+    assert!(!calls[0].contains("--cookies"));
+    assert!(calls[1].contains("--cookies"));
+
+    // Verdict cleared: the next extraction is back on the normal path.
+    ytdlp::extract(&cfg, "vid-2").await.unwrap();
+    let calls = fx.invocations();
+    assert!(calls[2].contains("--cookies"), "{calls:?}");
 }

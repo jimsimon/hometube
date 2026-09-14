@@ -369,22 +369,20 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 /// yields anything; paying it once an hour is enough to notice when
 /// the experiment is lifted. Uploading or deleting cookies clears the
 /// memo via [`forget_sabr_only_session`].
+///
+/// The memo is self-healing: if the cookie-less run it selected fails
+/// or comes back with nothing playable (e.g. YouTube starts bot-walling
+/// the IP for logged-out sessions), the verdict is dropped and the
+/// cookie-authenticated run is tried once before giving up, so a
+/// bot-wall degrades to one slower extraction rather than an hour of
+/// failures.
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     if sabr_only_session_active() {
         debug!(
             %video_id,
             "skipping cookie-authenticated yt-dlp run: session was SABR-only recently"
         );
-        let (result, _) = extract_once(cfg, video_id, false).await?;
-        if result.usable_format_count() == 0 {
-            warn!(
-                %video_id,
-                total_formats = result.formats.len(),
-                "cookie-less yt-dlp extraction returned no usable formats; \
-                 playback will be unavailable for this video"
-            );
-        }
-        return Ok(result);
+        return extract_logged_out_then_cookies(cfg, video_id).await;
     }
 
     // `cookies_used` reports whether `--cookies` was actually passed,
@@ -430,6 +428,65 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     }
 }
 
+/// The SABR-only fast path: cookie-less first, and only if that yields
+/// nothing playable, forget the verdict and try cookies once.
+async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
+    let logged_out = match extract_once(cfg, video_id, false).await {
+        Ok((result, _)) if result.usable_format_count() > 0 => return Ok(result),
+        Ok((result, _)) => {
+            warn!(
+                %video_id,
+                total_formats = result.formats.len(),
+                "cookie-less yt-dlp extraction returned no usable formats; \
+                 forgetting SABR-only verdict and trying cookies"
+            );
+            Ok(result)
+        }
+        Err(err) => {
+            warn!(
+                %video_id,
+                %err,
+                "cookie-less yt-dlp extraction failed; \
+                 forgetting SABR-only verdict and trying cookies"
+            );
+            Err(err)
+        }
+    };
+    forget_sabr_only_session();
+
+    // The cookie-less attempt is exactly the retry the normal path would
+    // end with, so don't repeat it: try cookies once and settle.
+    match extract_once(cfg, video_id, true).await {
+        Ok((with_cookies, _)) if with_cookies.usable_format_count() > 0 => {
+            info!(
+                %video_id,
+                usable_formats = with_cookies.usable_format_count(),
+                serving_clients = ?with_cookies.usable_formats_by_client(),
+                "cookie-authenticated yt-dlp run recovered usable formats \
+                 after the cookie-less run came up empty"
+            );
+            Ok(with_cookies)
+        }
+        Ok((with_cookies, _)) => {
+            warn!(
+                %video_id,
+                "cookie-authenticated yt-dlp run also returned no usable formats; \
+                 playback will be unavailable for this video"
+            );
+            // Prefer whichever attempt produced metadata at all.
+            Ok(logged_out.unwrap_or(with_cookies))
+        }
+        Err(cookie_err) => {
+            warn!(
+                %video_id,
+                %cookie_err,
+                "cookie-authenticated yt-dlp run failed after the cookie-less run came up empty"
+            );
+            logged_out.map_err(|_| cookie_err)
+        }
+    }
+}
+
 /// How long a SABR-only verdict suppresses the cookie-authenticated
 /// extraction attempt.
 pub const SABR_ONLY_SESSION_MEMO_TTL: Duration = Duration::from_secs(60 * 60);
@@ -446,7 +503,10 @@ fn sabr_only_session_active() -> bool {
     guard.is_some_and(|until| std::time::Instant::now() < until)
 }
 
-fn remember_sabr_only_session() {
+/// Record that the logged-in session is SABR-only for
+/// [`SABR_ONLY_SESSION_MEMO_TTL`]. Public so tests can start from an
+/// established verdict; production code only sets it from [`extract`].
+pub fn remember_sabr_only_session() {
     let mut guard = SABR_ONLY_SESSION_UNTIL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
