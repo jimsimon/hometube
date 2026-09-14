@@ -24,6 +24,12 @@ async fn seed_old(pool: &sqlx::SqlitePool) {
     ytdlp::sync_cookies_to_disk(Some(OLD)).unwrap();
 }
 
+/// Permission bits of `path`.
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 /// Happy path: both sides move to the new jar and the generation advances.
 #[tokio::test]
 async fn replace_updates_file_and_row_together() {
@@ -44,6 +50,7 @@ async fn replace_updates_file_and_row_together() {
         std::fs::read_to_string(ytdlp::cookies_file_path()).unwrap(),
         NEW
     );
+    assert_eq!(mode_of(&ytdlp::cookies_file_path()), 0o600);
     assert_ne!(ytdlp::cookie_generation(), before);
 
     ytdlp::replace_cookies(&app.pool, None).await.unwrap();
@@ -155,6 +162,35 @@ async fn unchanged_upload_does_not_advance_the_generation() {
     let after_delete = ytdlp::cookie_generation();
     ytdlp::replace_cookies(&app.pool, None).await.unwrap();
     assert_eq!(ytdlp::cookie_generation(), after_delete);
+}
+
+/// The row is the source of truth; if `cookies.txt` has gone missing, a
+/// same-content upload re-derives it (owner-only) without advancing the
+/// generation. A file that is present is left alone, since it may hold
+/// yt-dlp's rotated session cookies.
+#[tokio::test]
+async fn unchanged_upload_restores_a_missing_file_but_keeps_a_present_one() {
+    let _serial = SERIAL.lock().await;
+    let app = boot().await;
+    seed_old(&app.pool).await;
+    let path = ytdlp::cookies_file_path();
+    std::fs::remove_file(&path).unwrap();
+    let before = ytdlp::cookie_generation();
+
+    ytdlp::replace_cookies(&app.pool, Some(OLD)).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), OLD);
+    assert_eq!(mode_of(&path), 0o600);
+    assert_eq!(ytdlp::cookie_generation(), before);
+
+    let rotated = format!("{OLD}.youtube.com\tTRUE\t/\tFALSE\t0\tROTATED\t9\n");
+    std::fs::write(&path, &rotated).unwrap();
+    ytdlp::replace_cookies(&app.pool, Some(OLD)).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        rotated,
+        "a present file must not be clobbered by a same-content upload"
+    );
+    assert_eq!(ytdlp::cookie_generation(), before);
 }
 
 /// If the file can't be written, the transition stops before the row

@@ -1217,13 +1217,7 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
             let nonce: u64 = rand::random();
             let staging = path.with_extension(format!("txt.new.{nonce:x}"));
             let staged = (|| {
-                std::fs::write(&staging, c)?;
-                // Restrict permissions to owner-only on Unix.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
-                }
+                write_private_file(&staging, c.as_bytes())?;
                 std::fs::rename(&staging, &path)
             })();
             if staged.is_err() {
@@ -1264,6 +1258,18 @@ pub async fn replace_cookies(pool: &sqlx::SqlitePool, content: Option<&str>) -> 
     let content = content.filter(|c| !c.trim().is_empty());
     if previous.as_deref() == content {
         debug!("cookie jar unchanged; skipping rewrite");
+        // The row already matches, but the file may have gone missing
+        // (operator cleanup, volume restore). Re-derive it without
+        // advancing the generation: the jar is the same one every
+        // fingerprint already describes. A file that *is* present is
+        // left alone — it may hold yt-dlp's rotated session cookies.
+        if content.is_some() && !cookies_file_path().exists() {
+            sync_cookies_to_disk_blocking(content.map(str::to_owned))
+                .await
+                .map_err(|e| {
+                    AppError::Other(anyhow::anyhow!("failed to restore cookies file: {e}"))
+                })?;
+        }
         clear_sabr_only_verdict();
         return Ok(());
     }
@@ -1411,15 +1417,18 @@ impl YoutubeArgsGuard {
         let dest = &self.canonical_cookies_path;
         let nonce: u64 = rand::random();
         let staging = dest.with_extension(format!("txt.new.{nonce:x}"));
-        if let Err(e) = tokio::fs::write(&staging, &new_content).await {
+        let staged = {
+            let staging = staging.clone();
+            tokio::task::spawn_blocking(move || {
+                write_private_file(&staging, new_content.as_bytes())
+            })
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(format!("write task panicked: {e}"))))
+        };
+        if let Err(e) = staged {
             warn!(error = %e, "failed to write staged cookies file");
+            let _ = tokio::fs::remove_file(&staging).await;
             return;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                tokio::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)).await;
         }
         if let Err(e) = tokio::fs::rename(&staging, dest).await {
             warn!(error = %e, "failed to atomically replace canonical cookies file");
@@ -1674,13 +1683,30 @@ fn copy_cookies_to_tempfile(src: &std::path::Path) -> std::io::Result<std::path:
     let nonce: u64 = rand::random();
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("hometube-ytdlp-cookies-{nonce:x}.txt"));
-    std::fs::copy(src, &tmp)?;
+    let body = std::fs::read(src)?;
+    write_private_file(&tmp, &body)?;
+    Ok(tmp)
+}
+
+/// Create `path` (which must not exist) with owner-only permissions and
+/// write `bytes` to it. The mode is set at creation, not afterwards, so
+/// the cookie bytes are never readable through a umask-derived mode
+/// even momentarily. Every file that holds a cookie jar — staging files
+/// for the canonical jar and the per-run tempfile copy — goes through
+/// here.
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(tmp)
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 fn tempdir_for_video(video_id: &str) -> std::path::PathBuf {
