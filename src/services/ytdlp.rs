@@ -1112,6 +1112,13 @@ const AUTHED_EXTRA_CLIENT: &str = "web_creator";
 /// positively (`web_creator`) or as an explicit exclusion
 /// (`-web_creator`, yt-dlp's opt-out syntax).
 ///
+/// When *not* authenticated, positive `web_creator` entries are
+/// removed instead: without cookies that client only yields
+/// `LOGIN_REQUIRED`, so requesting it on the logged-out SABR fallback
+/// is pure noise. Explicit `-web_creator` exclusions and every other
+/// client are preserved. If stripping leaves nothing, `default` is
+/// used so yt-dlp still gets a valid list.
+///
 /// Rationale: as of September 2026 YouTube serves *SABR-only* streams
 /// (no direct URLs) to logged-in sessions on `web`, `web_embedded`,
 /// `web_safari` and `mweb`, and the `tv*` clients fail signature
@@ -1123,7 +1130,16 @@ const AUTHED_EXTRA_CLIENT: &str = "web_creator";
 pub fn player_client_list(configured: &str, authenticated: bool) -> String {
     let configured = configured.trim().trim_matches(',');
     if !authenticated {
-        return configured.to_string();
+        let kept = configured
+            .split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && *c != AUTHED_EXTRA_CLIENT)
+            .collect::<Vec<_>>();
+        return if kept.is_empty() {
+            "default".to_string()
+        } else {
+            kept.join(",")
+        };
     }
     let mentioned = configured
         .split(',')

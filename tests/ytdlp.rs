@@ -291,6 +291,27 @@ fn player_client_list_respects_operator_mentions() {
     );
 }
 
+#[test]
+fn player_client_list_strips_web_creator_when_unauthenticated() {
+    use hometube::services::ytdlp::player_client_list;
+
+    // Operator opted in, but the logged-out retry must not ask for a
+    // client that can only answer LOGIN_REQUIRED without cookies.
+    assert_eq!(player_client_list("default,web_creator", false), "default");
+    assert_eq!(
+        player_client_list("web_creator, default ,web_embedded", false),
+        "default,web_embedded"
+    );
+    // Explicit exclusion is harmless and preserved verbatim.
+    assert_eq!(
+        player_client_list("default,-web_creator", false),
+        "default,-web_creator"
+    );
+    // Stripping everything must still leave yt-dlp a valid list.
+    assert_eq!(player_client_list("web_creator", false), "default");
+    assert_eq!(player_client_list("", false), "default");
+}
+
 // ---------------------------------------------------------------------------
 // sync_cookies_to_disk
 // ---------------------------------------------------------------------------
