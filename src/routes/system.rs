@@ -204,13 +204,10 @@ pub async fn set_cookies(
         ));
     }
 
-    setup::set_config_value(&state.db, setup::KEY_YTDLP_COOKIES, &content).await?;
-
-    let to_write = content.clone();
-    tokio::task::spawn_blocking(move || ytdlp::sync_cookies_to_disk(Some(&to_write)))
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to write cookies file: {e}")))?;
+    // Updates `app_config` and `cookies.txt` together (with rollback and
+    // the cookie-generation bracket) so the cache fingerprint and what
+    // yt-dlp reads can't disagree.
+    ytdlp::replace_cookies(&state.db, Some(&content)).await?;
 
     let line_count = content.lines().count();
     Ok(Json(CookiesStatus {
@@ -221,15 +218,7 @@ pub async fn set_cookies(
 
 /// `DELETE /api/system/ytdlp/cookies` — remove stored cookies from DB and disk.
 pub async fn delete_cookies(State(state): State<AppState>) -> AppResult<Json<CookiesStatus>> {
-    sqlx::query("DELETE FROM app_config WHERE key = ?")
-        .bind(setup::KEY_YTDLP_COOKIES)
-        .execute(&state.db)
-        .await?;
-
-    tokio::task::spawn_blocking(|| ytdlp::sync_cookies_to_disk(None))
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to remove cookies file: {e}")))?;
+    ytdlp::replace_cookies(&state.db, None).await?;
 
     Ok(Json(CookiesStatus {
         configured: false,

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use common::boot;
 use hometube::config::Config;
+use hometube::services::setup::{set_config_value, KEY_YTDLP_COOKIES};
 use hometube::services::video_cache::{current_extractor_config_key, VideoCache};
 use hometube::services::ytdlp;
 
@@ -171,7 +172,7 @@ async fn newly_extracted_urls_inside_the_expiry_margin_are_rejected() {
 }
 
 #[tokio::test]
-async fn extractor_config_key_tracks_binary_path_and_cookie_contents() {
+async fn extractor_config_key_tracks_binary_path_and_uploaded_cookies() {
     let _cookie_guard = COOKIE_TEST_LOCK.lock().await;
     let app = boot().await;
     let cookies_path = ytdlp::cookies_file_path();
@@ -185,11 +186,27 @@ async fn extractor_config_key_tracks_binary_path_and_cookie_contents() {
     let changed_binary = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     assert_ne!(first, changed_binary);
 
+    // A new jar uploaded through the parent UI changes the fingerprint.
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "cookie-upload-one")
+        .await
+        .unwrap();
+    let first_upload = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
+    assert_ne!(changed_binary, first_upload);
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "cookie-upload-two")
+        .await
+        .unwrap();
+    let second_upload = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
+    assert_ne!(first_upload, second_upload);
+
+    // yt-dlp rewriting the on-disk jar (rotated session cookies) must
+    // NOT change the fingerprint — otherwise every yt-dlp run for any
+    // video would flush the metadata cache for every other video.
     std::fs::write(&cookies_path, "cookie-version-one").unwrap();
     let first_cookie = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     std::fs::write(&cookies_path, "cookie-version-two").unwrap();
     let second_cookie = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
-    assert_ne!(first_cookie, second_cookie);
+    assert_eq!(second_upload, first_cookie);
+    assert_eq!(first_cookie, second_cookie);
 
     let _ = std::fs::remove_file(cookies_path);
 }
@@ -394,27 +411,32 @@ async fn concurrent_different_configurations_use_separate_extraction_flights() {
     );
 }
 
+/// When the configuration changes while an extraction is running, the
+/// in-flight result belongs to the *old* configuration: it must be stored
+/// under the key it was extracted with, and a caller carrying the new
+/// key must get a fresh extraction (serialized after the first by the
+/// per-video coordinator) rather than the old output relabelled.
 #[tokio::test]
-async fn cookie_fingerprint_change_during_extraction_does_not_start_a_second_run() {
+async fn fingerprint_change_during_extraction_reextracts_for_the_new_configuration() {
     let _cookie_guard = COOKIE_TEST_LOCK.lock().await;
     let app = boot().await;
     let cookies_path = ytdlp::cookies_file_path();
-    std::fs::write(&cookies_path, "cookie-version-one").unwrap();
+    let _ = std::fs::remove_file(&cookies_path);
     let ytdlp_dir = tempfile::tempdir().unwrap();
     let ytdlp_path = ytdlp_dir.path().join("yt-dlp");
     let counter_path = ytdlp_dir.path().join("invocations");
-    let fingerprint_changed_path = ytdlp_dir.path().join("fingerprint-changed");
+    let started_path = ytdlp_dir.path().join("started");
     let now = chrono::Utc::now().timestamp();
-    let media_url = format!("https://media.example/rotated?expire={}", now + 7200);
-    let output = metadata("serialized-cookie-rotation", &media_url);
+    // Each run stamps its ordinal into the media URL so the two results
+    // are distinguishable.
+    let url_for_run = |n: u32| format!("https://media.example/run-{n}?expire={}", now + 7200);
+    let output = metadata("serialized-cookie-rotation", &url_for_run(0)).to_string();
     write_script(
         &ytdlp_path,
         &format!(
-            "#!/bin/sh\nprintf 'run\\n' >> '{}'\nprintf 'cookie-version-two' > '{}'\ntouch '{}'\nsleep 1\nprintf '%s\\n' '{}'\n",
-            counter_path.display(),
-            cookies_path.display(),
-            fingerprint_changed_path.display(),
-            output
+            "#!/bin/sh\nprintf 'run\\n' >> '{counter}'\nn=$(wc -l < '{counter}' | tr -d ' ')\ntouch '{started}'\nsleep 1\nprintf '%s\\n' '{output}' | sed \"s/run-0/run-$n/\"\n",
+            counter = counter_path.display(),
+            started = started_path.display(),
         ),
     );
 
@@ -432,12 +454,16 @@ async fn cookie_fingerprint_change_during_extraction_does_not_start_a_second_run
     });
 
     for _ in 0..100 {
-        if fingerprint_changed_path.exists() {
+        if started_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(fingerprint_changed_path.exists());
+    assert!(started_path.exists());
+    // A parent uploads a new cookie jar while the first flight is running.
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "uploaded-mid-flight")
+        .await
+        .unwrap();
     let changed_key = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     assert_ne!(first_key, changed_key);
 
@@ -449,14 +475,30 @@ async fn cookie_fingerprint_change_during_extraction_does_not_start_a_second_run
             .await
     });
     let (first_result, second_result) = tokio::join!(first, second);
-    for result in [first_result.unwrap(), second_result.unwrap()] {
-        assert_eq!(
-            result.unwrap().formats[0].url.as_deref(),
-            Some(media_url.as_str())
-        );
-    }
+    // The old-configuration caller gets the old-configuration output...
+    assert_eq!(
+        first_result.unwrap().unwrap().formats[0].url.as_deref(),
+        Some(url_for_run(1).as_str())
+    );
+    // ...and the new-configuration caller gets a fresh run, not a relabel.
+    assert_eq!(
+        second_result.unwrap().unwrap().formats[0].url.as_deref(),
+        Some(url_for_run(2).as_str())
+    );
     let invocations = std::fs::read_to_string(counter_path).unwrap();
-    assert_eq!(invocations.lines().count(), 1);
+    assert_eq!(invocations.lines().count(), 2);
+
+    // The row now on disk is the one produced under the current key.
+    let (stored_key, stored_json): (String, String) = sqlx::query_as(
+        "SELECT extractor_config_key, metadata_json FROM video_metadata_cache \
+         WHERE video_id = ?",
+    )
+    .bind("serialized-cookie-rotation")
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_key, changed_key);
+    assert!(stored_json.contains("run-2"));
 
     let _ = std::fs::remove_file(cookies_path);
 }

@@ -45,6 +45,10 @@
 # Env vars:
 #   HOMETUBE_REGISTRY  — registry/namespace prefix (default ghcr.io/jimsimon)
 #   HOMETUBE_VERSION   — image tag for hometube + discovery (default latest)
+#   HOMETUBE_POT_VERSION — bgutil pot-server tag (default 2.0.0). Must
+#                        share a major version with the plugin baked
+#                        into the app image (docker/Dockerfile
+#                        BGUTIL_VERSION), or PO tokens are disabled.
 #   HOMETUBE_PORT      — host port to expose the web UI on (default 30000)
 #   HOMETUBE_DATABASE  — host path for the SQLite database (REQUIRED)
 #   HOMETUBE_TOOLS     — host path for yt-dlp + cookies (REQUIRED)
@@ -100,12 +104,19 @@ services:
       retries: 3
       start_period: 5s
 
-  # PO (Proof-of-Origin) token server. Upstream image — tracks `:latest`
-  # by convention with the rest of this stack. Pin to a specific tag
-  # from https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
-  # if you want deliberate upgrades instead of recreate-time drift.
+  # PO (Proof-of-Origin) token server. Pinned to the same release as the
+  # plugin inside the app image: the plugin refuses to talk to a server
+  # with a different major version, and a `:latest` tag here drifts
+  # from the plugin whenever the app image is rebuilt without this
+  # container being recreated. Tags:
+  # https://hub.docker.com/r/brainicism/bgutil-ytdlp-pot-provider/tags
+  #
+  # 2.x binds to localhost when run natively, but the Docker image
+  # still listens on all interfaces inside the container, so `app`
+  # reaches it at pot-server:4416 over the compose network. The port
+  # is deliberately not published to the host.
   pot-server:
-    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    image: brainicism/bgutil-ytdlp-pot-provider:${HOMETUBE_POT_VERSION:-2.0.0}
     # Run tini as PID 1 so Node receives SIGTERM cleanly on stop/restart;
     # without it the container ignores SIGTERM and the daemon falls back
     # to a ~10s SIGKILL on every shutdown.

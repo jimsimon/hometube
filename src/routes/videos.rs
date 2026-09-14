@@ -1062,12 +1062,8 @@ pub async fn get_thumbnail(
 // ---------------------------------------------------------------------------
 
 fn video_cache(state: &AppState) -> VideoCache {
-    // Each call returns a fresh handle but the underlying Arc is shared
-    // through the AppState's `video_cache` field once Phase 5 is fully
-    // wired. For now we use a process-wide static via OnceCell.
-    static CACHE: std::sync::OnceLock<VideoCache> = std::sync::OnceLock::new();
     let _ = state;
-    CACHE.get_or_init(VideoCache::new).clone()
+    VideoCache::shared()
 }
 
 async fn enforce_access(
@@ -1172,8 +1168,15 @@ async fn resolve_segment_ranges(
         out.extend(cached);
     }
 
-    // Step 3: persist freshly-resolved innertube ranges to the DB.
-    let new_from_innertube: Vec<(String, BoxRanges)> = result
+    // Step 3: persist freshly-resolved innertube ranges to the DB — in
+    // one transaction, and only when this exact set isn't already
+    // persisted (or being persisted) by this process. Both `/stream` and
+    // `manifest.mpd` call this for every playback, and a cookie-less
+    // extraction carries hundreds of ranged formats; per-row autocommits
+    // here were holding SQLite's write lock for tens of seconds while
+    // the player waited. The memo is published only after the commit
+    // succeeds, so a failed write is retried by the next request.
+    let mut new_from_innertube: Vec<(String, BoxRanges)> = result
         .format_box_ranges
         .keys()
         .filter_map(|format_id| {
@@ -1183,19 +1186,31 @@ async fn resolve_segment_ranges(
         })
         .collect();
     if !new_from_innertube.is_empty() {
-        let pool_clone = pool.clone();
-        let video_id_owned = video_id.to_string();
-        tokio::spawn(async move {
-            for (format_id, ranges) in new_from_innertube {
-                crate::services::segment_ranges::store(
+        let memo = crate::services::segment_ranges::RangePersistMemo::global();
+        if let Some(token) = memo.begin(video_id, &mut new_from_innertube) {
+            let pool_clone = pool.clone();
+            let video_id_owned = video_id.to_string();
+            tokio::spawn(async move {
+                match crate::services::segment_ranges::store_all(
                     &pool_clone,
                     &video_id_owned,
-                    &format_id,
-                    ranges,
+                    &new_from_innertube,
                 )
-                .await;
-            }
-        });
+                .await
+                {
+                    Ok(()) => memo.commit(&video_id_owned, token),
+                    Err(err) => {
+                        warn!(
+                            %err,
+                            video_id = %video_id_owned,
+                            rows = new_from_innertube.len(),
+                            "persisting format_box_ranges failed; will retry on next request"
+                        );
+                        memo.abort(&video_id_owned, token);
+                    }
+                }
+            });
+        }
     }
 
     out
