@@ -440,7 +440,11 @@ async fn extract_once(
         .current_dir(&pages_dir);
     let yt_args_guard = append_youtube_args_with(&mut cmd, with_cookies);
     cmd.arg(&url);
-    debug!(?cmd, %video_id, with_cookies, "running yt-dlp");
+    // What was *actually* passed, as opposed to what was requested:
+    // `cookies` is false if staging the jar failed.
+    let cookies = yt_args_guard.cookies_used();
+    let requested_clients = yt_args_guard.player_clients();
+    debug!(?cmd, %video_id, cookies, requested_clients, "running yt-dlp");
 
     let output = timeout(DEFAULT_TIMEOUT, output_retrying_etxtbsy(&mut cmd))
         .await
@@ -449,7 +453,7 @@ async fn extract_once(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(%video_id, with_cookies, %stderr, "yt-dlp failed");
+        warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp failed");
         let _ = tokio::fs::remove_dir_all(&pages_dir).await;
         return Err(AppError::Other(anyhow::anyhow!(
             "yt-dlp exited with status {}: {}",
@@ -514,8 +518,6 @@ async fn extract_once(
     // only ranged formats.
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
-    let cookies = yt_args_guard.cookies_used();
-    let requested_clients = yt_args_guard.player_clients();
     if !stderr.is_empty() {
         if result.usable_format_count() == 0 {
             warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no usable formats returned)");
