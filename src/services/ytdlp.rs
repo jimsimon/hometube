@@ -246,28 +246,34 @@ impl<'de> Deserialize<'de> for ExtractResult {
 }
 
 impl ExtractResult {
-    /// Number of formats the DASH synthesizer can actually stream:
-    /// direct-URL (`https` / `http_dash_segments`) media formats,
-    /// excluding storyboard sprites.
+    /// Number of formats the DASH synthesizer can actually stream, as
+    /// judged by [`crate::services::dash::is_dash_usable`]: direct-URL
+    /// video-only VP9/AVC1 or audio-only opus/mp4a formats, excluding
+    /// storyboards, DRC variants and muxed streams.
     ///
     /// When this is `0` on an otherwise successful extraction, YouTube
     /// served only SABR (server-side adaptive bitrate) streams to the
     /// player client(s) yt-dlp used — yt-dlp drops those because they
-    /// have no fetchable URL, leaving just HLS/storyboard entries.
+    /// have no fetchable URL, leaving just HLS/storyboard entries and,
+    /// on some sessions, the muxed 360p format 18.
     /// See <https://github.com/yt-dlp/yt-dlp/issues/12482>.
-    pub fn direct_format_count(&self) -> usize {
-        self.direct_formats().count()
+    pub fn usable_format_count(&self) -> usize {
+        self.usable_formats().count()
     }
 
-    fn direct_formats(&self) -> impl Iterator<Item = &Format> {
-        self.formats.iter().filter(|f| {
-            !f.format_id.starts_with("sb")
-                && f.url.is_some()
-                && matches!(f.protocol.as_deref(), Some("https" | "http_dash_segments"))
-        })
+    /// Formats the DASH synthesizer will actually accept. Delegates to
+    /// [`crate::services::dash::is_dash_usable`] so this stays in
+    /// lock-step with the serving path: a SABR-only session still
+    /// returns muxed format 18 with a URL, and counting that as
+    /// "playable" would suppress the fallback while the manifest
+    /// route goes on 404ing.
+    fn usable_formats(&self) -> impl Iterator<Item = &Format> {
+        self.formats
+            .iter()
+            .filter(|f| crate::services::dash::is_dash_usable(f))
     }
 
-    /// Direct-URL format count per yt-dlp player client, e.g.
+    /// Usable format count per yt-dlp player client, e.g.
     /// `{"WEB-C": 56, "WEB-E": 2}`. Formats whose `format_note` carries
     /// no recognisable client tag are counted under `"?"`.
     ///
@@ -277,9 +283,9 @@ impl ExtractResult {
     /// This is what tells us *which* client actually produced playable
     /// formats on a given run — the only way to know whether e.g.
     /// `web_creator` is doing its job for a cookie session.
-    pub fn direct_formats_by_client(&self) -> std::collections::BTreeMap<String, usize> {
+    pub fn usable_formats_by_client(&self) -> std::collections::BTreeMap<String, usize> {
         let mut out = std::collections::BTreeMap::new();
-        for f in self.direct_formats() {
+        for f in self.usable_formats() {
             let client = f
                 .format_note
                 .as_deref()
@@ -339,7 +345,7 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 /// `manifest.mpd`. See <https://github.com/yt-dlp/yt-dlp/issues/17666>.
 ///
 /// When the cookie-authenticated extraction succeeds but yields zero
-/// direct-URL formats, we re-run yt-dlp *without* cookies. Logged-out
+/// usable formats, we re-run yt-dlp *without* cookies. Logged-out
 /// sessions get yt-dlp's cookie-less default clients (`visionos`,
 /// `web`, …), which still serve direct `https` formats. The cookie'd
 /// result is kept if the retry fails or is no better, so we never lose
@@ -347,24 +353,24 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     let cookies_available = cookies_file_path().exists();
     let first = extract_once(cfg, video_id, cookies_available).await?;
-    if first.direct_format_count() > 0 || !cookies_available {
+    if first.usable_format_count() > 0 || !cookies_available {
         return Ok(first);
     }
 
     warn!(
         %video_id,
         total_formats = first.formats.len(),
-        "cookie-authenticated yt-dlp extraction returned no direct-URL formats \
+        "cookie-authenticated yt-dlp extraction returned no usable formats \
          (YouTube likely forced SABR-only streaming for the logged-in session); \
          retrying without cookies"
     );
     match extract_once(cfg, video_id, false).await {
-        Ok(retry) if retry.direct_format_count() > 0 => {
+        Ok(retry) if retry.usable_format_count() > 0 => {
             info!(
                 %video_id,
-                direct_formats = retry.direct_format_count(),
-                serving_clients = ?retry.direct_formats_by_client(),
-                "cookie-less yt-dlp retry recovered direct-URL formats; \
+                usable_formats = retry.usable_format_count(),
+                serving_clients = ?retry.usable_formats_by_client(),
+                "cookie-less yt-dlp retry recovered usable formats; \
                  the logged-in session is SABR-only"
             );
             Ok(retry)
@@ -372,7 +378,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
         Ok(_) => {
             warn!(
                 %video_id,
-                "cookie-less yt-dlp retry also returned no direct-URL formats; \
+                "cookie-less yt-dlp retry also returned no usable formats; \
                  playback will be unavailable for this video"
             );
             Ok(first)
@@ -450,8 +456,8 @@ async fn extract_once(
     let cookies = yt_args_guard.cookies_used();
     let requested_clients = yt_args_guard.player_clients();
     if !stderr.is_empty() {
-        if result.direct_format_count() == 0 {
-            warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no direct-URL formats returned)");
+        if result.usable_format_count() == 0 {
+            warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no usable formats returned)");
         } else {
             debug!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings");
         }
@@ -461,7 +467,7 @@ async fn extract_once(
     // were cookies in play, which clients did we ask for, and which
     // client(s) actually delivered playable formats. Rendered as e.g.
     // `serving_clients=WEB-C:56,WEB-E:2` so it greps cleanly.
-    let by_client = result.direct_formats_by_client();
+    let by_client = result.usable_formats_by_client();
     let serving_clients = by_client
         .iter()
         .map(|(client, n)| format!("{client}:{n}"))
@@ -472,7 +478,7 @@ async fn extract_once(
         cookies,
         requested_clients,
         total_formats = result.formats.len(),
-        direct_formats = result.direct_format_count(),
+        usable_formats = result.usable_format_count(),
         serving_clients = %serving_clients,
         "yt-dlp extraction complete"
     );

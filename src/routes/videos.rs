@@ -421,14 +421,14 @@ async fn fetch_and_rewrite_manifest(
     }
 
     // Nothing playable. The two usual causes are (a) YouTube served
-    // only SABR streams so yt-dlp had no direct-URL formats to give
+    // only SABR streams so yt-dlp had no usable formats to give
     // us (see `ytdlp::extract`), or (b) we have direct formats but no
     // SegmentBase ranges for any of them. Log which so the resulting
     // 404 isn't a dead end for whoever reads the logs next.
     warn!(
         %video_id,
         total_formats = result.formats.len(),
-        direct_formats = result.direct_format_count(),
+        usable_formats = result.usable_format_count(),
         ranged_formats = box_ranges.len(),
         "cannot synthesize DASH manifest: no usable formats with segment ranges"
     );

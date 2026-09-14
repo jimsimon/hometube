@@ -21,6 +21,16 @@ const SABR_ONLY_JSON: &str = r#"{"id":"vid-1","title":"SABR","duration":10.0,"fo
   {"format_id":"270","protocol":"m3u8_native","acodec":"none","vcodec":"avc1.640028","height":1080,"url":"https://manifest.googlevideo.com/hls/270.m3u8"}
 ]}"#;
 
+/// What a SABR-only *logged-in* session actually returns per yt-dlp
+/// #17666: everything adaptive is gone, but the muxed 360p format 18
+/// still comes back with a direct URL. The DASH synthesizer rejects
+/// muxed formats, so this must still count as "nothing playable".
+const SABR_WITH_FORMAT_18_JSON: &str = r#"{"id":"vid-1","title":"SABR+18","duration":10.0,"formats":[
+  {"format_id":"sb0","protocol":"mhtml","url":"https://i.ytimg.com/sb/x"},
+  {"format_id":"18","protocol":"https","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"filesize":1000,"url":"https://rr1.googlevideo.com/videoplayback?itag=18","format_note":"360p, MWEB"},
+  {"format_id":"233","protocol":"m3u8_native","acodec":"mp4a.40.5","vcodec":"none","url":"https://manifest.googlevideo.com/hls/233.m3u8"}
+]}"#;
+
 const DIRECT_JSON: &str = r#"{"id":"vid-1","title":"Direct","duration":10.0,"formats":[
   {"format_id":"sb0","protocol":"mhtml","url":"https://i.ytimg.com/sb/x"},
   {"format_id":"251","protocol":"https","acodec":"opus","vcodec":"none","filesize":100,"url":"https://rr1.googlevideo.com/videoplayback?itag=251"},
@@ -137,7 +147,7 @@ async fn sabr_only_with_cookies_retries_without_cookies() {
 
     // The cookie-less retry's output won.
     assert_eq!(result.title.as_deref(), Some("Direct"));
-    assert_eq!(result.direct_format_count(), 2);
+    assert_eq!(result.usable_format_count(), 2);
 
     let calls = fx.invocations();
     assert_eq!(calls.len(), 2, "expected exactly one retry, got {calls:?}");
@@ -170,6 +180,25 @@ async fn sabr_only_with_cookies_retries_without_cookies() {
 }
 
 #[tokio::test]
+async fn muxed_only_cookie_result_still_retries_without_cookies() {
+    let fx = Fixture::new(SABR_WITH_FORMAT_18_JSON, DIRECT_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    let result = ytdlp::extract(&cfg, "vid-1")
+        .await
+        .expect("extract succeeds");
+
+    // Format 18 has a URL but is muxed, so it must not be mistaken for
+    // a playable result: the retry fires and its output wins.
+    assert_eq!(result.title.as_deref(), Some("Direct"));
+    assert_eq!(result.usable_format_count(), 2);
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 2, "expected a retry, got {calls:?}");
+    assert!(calls[0].contains("--cookies"));
+    assert!(!calls[1].contains("--cookies"));
+}
+
+#[tokio::test]
 async fn direct_formats_with_cookies_do_not_retry() {
     let fx = Fixture::new(DIRECT_JSON, SABR_ONLY_JSON);
     let cfg = config_with_ytdlp(&fx.shim);
@@ -179,7 +208,7 @@ async fn direct_formats_with_cookies_do_not_retry() {
         .expect("extract succeeds");
 
     assert_eq!(result.title.as_deref(), Some("Direct"));
-    assert_eq!(result.direct_format_count(), 2);
+    assert_eq!(result.usable_format_count(), 2);
     let calls = fx.invocations();
     assert_eq!(calls.len(), 1, "no retry expected, got {calls:?}");
     assert!(calls[0].contains("--cookies"));
@@ -197,6 +226,6 @@ async fn sabr_only_everywhere_keeps_cookie_result() {
     // Still a successful extraction (metadata is useful for the
     // unavailable page), just nothing playable.
     assert_eq!(result.title.as_deref(), Some("SABR"));
-    assert_eq!(result.direct_format_count(), 0);
+    assert_eq!(result.usable_format_count(), 0);
     assert_eq!(fx.invocations().len(), 2);
 }

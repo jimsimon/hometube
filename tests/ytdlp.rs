@@ -197,28 +197,35 @@ fn client_tag_from_format_note_parses_ytdlp_short_names() {
 }
 
 #[test]
-fn direct_formats_by_client_counts_only_direct_formats() {
+fn usable_formats_by_client_counts_only_dash_usable_formats() {
     let json = r#"{"id":"v","formats":[
         {"format_id":"sb0","protocol":"mhtml","url":"u","format_note":"storyboard, WEB-C"},
-        {"format_id":"233","protocol":"m3u8_native","url":"u","format_note":"low, WEB-E"},
-        {"format_id":"251","protocol":"https","url":"u","format_note":"medium, WEB-C"},
-        {"format_id":"251-dashy","protocol":"http_dash_segments","url":"u","format_note":"medium, WEB-C"},
-        {"format_id":"303","protocol":"https","url":"u","format_note":"1080p60, VISI"},
-        {"format_id":"137","protocol":"https","url":"u"},
-        {"format_id":"136","protocol":"https","format_note":"720p, WEB"}
+        {"format_id":"233","protocol":"m3u8_native","acodec":"mp4a.40.5","vcodec":"none","url":"u","format_note":"low, WEB-E"},
+        {"format_id":"251","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"251-dashy","protocol":"http_dash_segments","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, WEB-C"},
+        {"format_id":"251-drc","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"medium, DRC, WEB-C"},
+        {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"url":"u","format_note":"1080p60, VISI"},
+        {"format_id":"137","protocol":"https","acodec":"none","vcodec":"avc1.640028","height":1080,"url":"u"},
+        {"format_id":"136","protocol":"https","acodec":"none","vcodec":"avc1.4d401f","height":720,"format_note":"720p, WEB"},
+        {"format_id":"18","protocol":"https","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"url":"u","format_note":"360p, MWEB"},
+        {"format_id":"399","protocol":"https","acodec":"none","vcodec":"av01.0.09M.08","height":1080,"url":"u","format_note":"1080p60, WEB-C"}
     ]}"#;
     let result: ExtractResult = serde_json::from_str(json).unwrap();
-    let by_client = result.direct_formats_by_client();
+    let by_client = result.usable_formats_by_client();
+    // 251 + 251-dashy; the DRC variant and AV1 are not DASH-usable.
     assert_eq!(by_client.get("WEB-C"), Some(&2));
     assert_eq!(by_client.get("VISI"), Some(&1));
-    // Untagged direct format lands in the "?" bucket.
+    // Untagged usable format lands in the "?" bucket.
     assert_eq!(by_client.get("?"), Some(&1));
-    // Storyboard, HLS, and URL-less formats are excluded.
+    // Storyboard, HLS, URL-less and muxed (format 18) are excluded —
+    // format 18 is what a SABR-only session still hands out, and it
+    // must not count as playable or the fallback never fires.
     assert_eq!(by_client.get("WEB-E"), None);
     assert_eq!(by_client.get("WEB"), None);
+    assert_eq!(by_client.get("MWEB"), None);
     assert_eq!(
         by_client.values().sum::<usize>(),
-        result.direct_format_count()
+        result.usable_format_count()
     );
 }
 
