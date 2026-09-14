@@ -828,7 +828,10 @@ pub async fn child_video(
         return Ok(Redirect::to("/parent/home").into_response());
     }
 
-    let cache = VideoCache::new();
+    // Share the process-wide cache so the extraction this page triggers
+    // is already in memory when the player's `/stream`, manifest and
+    // segment requests arrive a moment later.
+    let cache = VideoCache::shared();
     let (extract, downloads_enabled) = tokio::join!(
         cache.get_or_extract(&state.db, &state.config, &video_id),
         fetch_downloads_enabled(&state.db, c.id),

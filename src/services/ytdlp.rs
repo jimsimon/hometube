@@ -360,7 +360,33 @@ pub fn client_tag_from_format_note(note: &str) -> Option<&str> {
 /// `web`, …), which still serve direct `https` formats. The cookie'd
 /// result is kept if the retry fails or is no better, so we never lose
 /// metadata we already have.
+///
+/// Once the cookie-less retry has recovered playable formats, the
+/// session is remembered as SABR-only for [`SABR_ONLY_SESSION_MEMO_TTL`]
+/// and subsequent extractions skip straight to the cookie-less run.
+/// The cookie-authenticated attempt costs 7–9 s of wall clock on every
+/// cache miss and, while YouTube keeps the account on SABR, never
+/// yields anything; paying it once an hour is enough to notice when
+/// the experiment is lifted. Uploading or deleting cookies clears the
+/// memo via [`forget_sabr_only_session`].
 pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
+    if sabr_only_session_active() {
+        debug!(
+            %video_id,
+            "skipping cookie-authenticated yt-dlp run: session was SABR-only recently"
+        );
+        let (result, _) = extract_once(cfg, video_id, false).await?;
+        if result.usable_format_count() == 0 {
+            warn!(
+                %video_id,
+                total_formats = result.formats.len(),
+                "cookie-less yt-dlp extraction returned no usable formats; \
+                 playback will be unavailable for this video"
+            );
+        }
+        return Ok(result);
+    }
+
     // `cookies_used` reports whether `--cookies` was actually passed,
     // which can be false even when a jar exists on disk (e.g. the
     // tempfile copy failed). In that case the first run was already
@@ -384,8 +410,9 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
                 usable_formats = retry.usable_format_count(),
                 serving_clients = ?retry.usable_formats_by_client(),
                 "cookie-less yt-dlp retry recovered usable formats; \
-                 the logged-in session is SABR-only"
+                 the logged-in session is SABR-only; skipping cookie runs for a while"
             );
+            remember_sabr_only_session();
             Ok(retry)
         }
         Ok(_) => {
@@ -401,6 +428,39 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
             Ok(first)
         }
     }
+}
+
+/// How long a SABR-only verdict suppresses the cookie-authenticated
+/// extraction attempt.
+pub const SABR_ONLY_SESSION_MEMO_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Process-wide "the logged-in session is SABR-only until" marker.
+/// `None` means no verdict (or it was cleared).
+static SABR_ONLY_SESSION_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+fn sabr_only_session_active() -> bool {
+    let guard = SABR_ONLY_SESSION_UNTIL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.is_some_and(|until| std::time::Instant::now() < until)
+}
+
+fn remember_sabr_only_session() {
+    let mut guard = SABR_ONLY_SESSION_UNTIL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(std::time::Instant::now() + SABR_ONLY_SESSION_MEMO_TTL);
+}
+
+/// Clear the SABR-only memo so the next extraction tries cookies again.
+/// Call this whenever the cookie jar is replaced or removed — a fresh
+/// login is exactly the event that could lift the SABR-only verdict.
+pub fn forget_sabr_only_session() {
+    let mut guard = SABR_ONLY_SESSION_UNTIL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
 }
 
 /// Single yt-dlp `--dump-json` invocation. See [`extract`] for the

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use common::boot;
 use hometube::config::Config;
+use hometube::services::setup::{set_config_value, KEY_YTDLP_COOKIES};
 use hometube::services::video_cache::{current_extractor_config_key, VideoCache};
 use hometube::services::ytdlp;
 
@@ -171,7 +172,7 @@ async fn newly_extracted_urls_inside_the_expiry_margin_are_rejected() {
 }
 
 #[tokio::test]
-async fn extractor_config_key_tracks_binary_path_and_cookie_contents() {
+async fn extractor_config_key_tracks_binary_path_and_uploaded_cookies() {
     let _cookie_guard = COOKIE_TEST_LOCK.lock().await;
     let app = boot().await;
     let cookies_path = ytdlp::cookies_file_path();
@@ -185,11 +186,27 @@ async fn extractor_config_key_tracks_binary_path_and_cookie_contents() {
     let changed_binary = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     assert_ne!(first, changed_binary);
 
+    // A new jar uploaded through the parent UI changes the fingerprint.
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "cookie-upload-one")
+        .await
+        .unwrap();
+    let first_upload = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
+    assert_ne!(changed_binary, first_upload);
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "cookie-upload-two")
+        .await
+        .unwrap();
+    let second_upload = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
+    assert_ne!(first_upload, second_upload);
+
+    // yt-dlp rewriting the on-disk jar (rotated session cookies) must
+    // NOT change the fingerprint — otherwise every yt-dlp run for any
+    // video would flush the metadata cache for every other video.
     std::fs::write(&cookies_path, "cookie-version-one").unwrap();
     let first_cookie = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     std::fs::write(&cookies_path, "cookie-version-two").unwrap();
     let second_cookie = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
-    assert_ne!(first_cookie, second_cookie);
+    assert_eq!(second_upload, first_cookie);
+    assert_eq!(first_cookie, second_cookie);
 
     let _ = std::fs::remove_file(cookies_path);
 }
@@ -395,25 +412,24 @@ async fn concurrent_different_configurations_use_separate_extraction_flights() {
 }
 
 #[tokio::test]
-async fn cookie_fingerprint_change_during_extraction_does_not_start_a_second_run() {
+async fn fingerprint_change_during_extraction_does_not_start_a_second_run() {
     let _cookie_guard = COOKIE_TEST_LOCK.lock().await;
     let app = boot().await;
     let cookies_path = ytdlp::cookies_file_path();
-    std::fs::write(&cookies_path, "cookie-version-one").unwrap();
+    let _ = std::fs::remove_file(&cookies_path);
     let ytdlp_dir = tempfile::tempdir().unwrap();
     let ytdlp_path = ytdlp_dir.path().join("yt-dlp");
     let counter_path = ytdlp_dir.path().join("invocations");
-    let fingerprint_changed_path = ytdlp_dir.path().join("fingerprint-changed");
+    let started_path = ytdlp_dir.path().join("started");
     let now = chrono::Utc::now().timestamp();
     let media_url = format!("https://media.example/rotated?expire={}", now + 7200);
     let output = metadata("serialized-cookie-rotation", &media_url);
     write_script(
         &ytdlp_path,
         &format!(
-            "#!/bin/sh\nprintf 'run\\n' >> '{}'\nprintf 'cookie-version-two' > '{}'\ntouch '{}'\nsleep 1\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf 'run\\n' >> '{}'\ntouch '{}'\nsleep 1\nprintf '%s\\n' '{}'\n",
             counter_path.display(),
-            cookies_path.display(),
-            fingerprint_changed_path.display(),
+            started_path.display(),
             output
         ),
     );
@@ -432,12 +448,16 @@ async fn cookie_fingerprint_change_during_extraction_does_not_start_a_second_run
     });
 
     for _ in 0..100 {
-        if fingerprint_changed_path.exists() {
+        if started_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(fingerprint_changed_path.exists());
+    assert!(started_path.exists());
+    // A parent uploads a new cookie jar while the first flight is running.
+    set_config_value(&app.pool, KEY_YTDLP_COOKIES, "uploaded-mid-flight")
+        .await
+        .unwrap();
     let changed_key = current_extractor_config_key(&app.pool, &cfg).await.unwrap();
     assert_ne!(first_key, changed_key);
 

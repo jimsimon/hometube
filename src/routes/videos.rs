@@ -1062,12 +1062,8 @@ pub async fn get_thumbnail(
 // ---------------------------------------------------------------------------
 
 fn video_cache(state: &AppState) -> VideoCache {
-    // Each call returns a fresh handle but the underlying Arc is shared
-    // through the AppState's `video_cache` field once Phase 5 is fully
-    // wired. For now we use a process-wide static via OnceCell.
-    static CACHE: std::sync::OnceLock<VideoCache> = std::sync::OnceLock::new();
     let _ = state;
-    CACHE.get_or_init(VideoCache::new).clone()
+    VideoCache::shared()
 }
 
 async fn enforce_access(
@@ -1172,8 +1168,13 @@ async fn resolve_segment_ranges(
         out.extend(cached);
     }
 
-    // Step 3: persist freshly-resolved innertube ranges to the DB.
-    let new_from_innertube: Vec<(String, BoxRanges)> = result
+    // Step 3: persist freshly-resolved innertube ranges to the DB — in
+    // one transaction, and only when this exact set hasn't already been
+    // written by this process. Both `/stream` and `manifest.mpd` call
+    // this for every playback, and a cookie-less extraction carries
+    // hundreds of ranged formats; per-row autocommits here were holding
+    // SQLite's write lock for tens of seconds while the player waited.
+    let mut new_from_innertube: Vec<(String, BoxRanges)> = result
         .format_box_ranges
         .keys()
         .filter_map(|format_id| {
@@ -1182,23 +1183,66 @@ async fn resolve_segment_ranges(
                 .map(|br| (format_id.clone(), br))
         })
         .collect();
-    if !new_from_innertube.is_empty() {
+    if !new_from_innertube.is_empty() && mark_ranges_persisted(video_id, &mut new_from_innertube) {
         let pool_clone = pool.clone();
         let video_id_owned = video_id.to_string();
         tokio::spawn(async move {
-            for (format_id, ranges) in new_from_innertube {
-                crate::services::segment_ranges::store(
-                    &pool_clone,
-                    &video_id_owned,
-                    &format_id,
-                    ranges,
-                )
-                .await;
-            }
+            crate::services::segment_ranges::store_all(
+                &pool_clone,
+                &video_id_owned,
+                &new_from_innertube,
+            )
+            .await;
         });
     }
 
     out
+}
+
+/// Remember which innertube range set was last persisted per video so
+/// repeated manifest builds for the same extraction don't rewrite it.
+///
+/// Sorts `rows` (so the fingerprint is order-independent) and returns
+/// `true` when the caller should persist. Bounded: the memo is cleared
+/// once it grows past a few thousand videos; the only cost of a miss is
+/// one redundant single-transaction write.
+fn mark_ranges_persisted(
+    video_id: &str,
+    rows: &mut [(String, crate::services::segment_ranges::BoxRanges)],
+) -> bool {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    const MAX_TRACKED_VIDEOS: usize = 4096;
+    static PERSISTED: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+        std::sync::Mutex::new(None);
+
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = DefaultHasher::new();
+    for (format_id, ranges) in rows.iter() {
+        format_id.hash(&mut hasher);
+        (
+            ranges.init.start,
+            ranges.init.end,
+            ranges.index.start,
+            ranges.index.end,
+        )
+            .hash(&mut hasher);
+    }
+    let fingerprint = hasher.finish();
+
+    let mut guard = PERSISTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let memo = guard.get_or_insert_with(std::collections::HashMap::new);
+    if memo.get(video_id) == Some(&fingerprint) {
+        return false;
+    }
+    if memo.len() >= MAX_TRACKED_VIDEOS {
+        memo.clear();
+    }
+    memo.insert(video_id.to_string(), fingerprint);
+    true
 }
 
 /// Pick the best audio-only format for the audio-only playback mode.

@@ -28,7 +28,7 @@ pub async fn preview_video(
     State(state): State<AppState>,
     Path(video_id): Path<String>,
 ) -> AppResult<Json<VideoMetadata>> {
-    let cache = VideoCache::new();
+    let cache = VideoCache::shared();
     let result = cache
         .get_or_extract(&state.db, &state.config, &video_id)
         .await?;

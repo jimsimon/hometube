@@ -63,9 +63,8 @@ pub struct DownloadRow {
 }
 
 fn video_cache(state: &AppState) -> VideoCache {
-    static CACHE: std::sync::OnceLock<VideoCache> = std::sync::OnceLock::new();
     let _ = state;
-    CACHE.get_or_init(VideoCache::new).clone()
+    VideoCache::shared()
 }
 
 async fn ensure_downloads_enabled(state: &AppState, current: &CurrentAccount) -> AppResult<()> {

@@ -110,14 +110,20 @@ RUN mkdir -p /usr/local/lib/hometube \
 # automatically fetches Proof-of-Origin tokens from the pot-server
 # sidecar container to bypass YouTube's bot detection.
 #
+# The plugin refuses to work when its major version differs from the
+# pot-server's ("Plugin and HTTP server major versions are mismatched"),
+# so the version is pinned here and in docker-compose.yml
+# (`HOMETUBE_POT_VERSION`) rather than resolved to `latest` at build
+# time, where the two would drift apart between image rebuilds and
+# container recreates. Bump both together.
+#
 # yt-dlp's plugin loader scans `<plugin-dir>/<package>/yt_dlp_plugins/`
 # — without the package-wrapper subdirectory the loader silently
 # ignores the plugin. The release zip lays out the inner tree (`yt_dlp_plugins/`)
 # so we extract it under a `bgutil/` wrapper.
-RUN PLUGIN_VERSION=$(curl -fsSL "https://api.github.com/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/latest" \
-        | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/') \
-    && curl -fsSL \
-        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${PLUGIN_VERSION}/bgutil-ytdlp-pot-provider.zip" \
+ARG BGUTIL_VERSION=2.0.0
+RUN curl -fsSL \
+        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${BGUTIL_VERSION}/bgutil-ytdlp-pot-provider.zip" \
         -o /tmp/pot-plugin.zip \
     && mkdir -p /usr/local/share/yt-dlp-plugins/bgutil \
     && unzip -o /tmp/pot-plugin.zip -d /usr/local/share/yt-dlp-plugins/bgutil/ \

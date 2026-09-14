@@ -51,7 +51,12 @@ type ExtractionFlights = HashMap<ExtractionFlightKey, Weak<ExtractionFlight>>;
 type ExtractionCoordinator = Mutex<()>;
 type ExtractionCoordinators = HashMap<String, Weak<ExtractionCoordinator>>;
 
-/// Process-wide cache handle. Cheap to clone (`Arc<Mutex<...>>`).
+/// Cache handle. Cheap to clone (`Arc<Mutex<...>>`).
+///
+/// Production code should use [`VideoCache::shared`] so every route
+/// (page render, `/stream`, manifest, segment proxy, downloads, preview)
+/// warms the same in-memory layer; [`VideoCache::new`] yields an
+/// isolated instance and is intended for tests.
 #[derive(Clone, Default)]
 pub struct VideoCache {
     inner: Arc<Mutex<HashMap<String, CachedMetadata>>>,
@@ -59,14 +64,21 @@ pub struct VideoCache {
     /// including failures, until every caller waiting on that flight returns.
     /// Weak values avoid retaining one cell for every video forever.
     extraction_flights: Arc<Mutex<ExtractionFlights>>,
-    /// Per-video coordinators serialize extraction even when yt-dlp rotates
-    /// cookies and changes the extractor fingerprint during an active flight.
+    /// Per-video coordinators serialize extraction even when the extractor
+    /// fingerprint changes during an active flight (cookie upload, yt-dlp
+    /// self-update).
     extraction_coordinators: Arc<Mutex<ExtractionCoordinators>>,
 }
 
 impl VideoCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The single process-wide cache instance.
+    pub fn shared() -> Self {
+        static SHARED: std::sync::OnceLock<VideoCache> = std::sync::OnceLock::new();
+        SHARED.get_or_init(VideoCache::new).clone()
     }
 
     /// Look up `video_id` in memory → DB → yt-dlp. Stores the result in
@@ -89,7 +101,8 @@ impl VideoCache {
         // A synthesized manifest can trigger several format requests at once.
         // Same-configuration callers share success or failure through this
         // cell. A separate per-video coordinator below serializes flights with
-        // different fingerprints, which matters when yt-dlp rotates cookies.
+        // different fingerprints, which matters when the configuration
+        // changes (cookie upload, yt-dlp self-update) mid-flight.
         let flight_key = (video_id.to_string(), extractor_config_key.clone());
         let extraction_flight = {
             let mut flights = self.extraction_flights.lock().await;
@@ -109,8 +122,8 @@ impl VideoCache {
                 let _coordinator_guard = extraction_coordinator.lock().await;
 
                 // Another flight may have populated the cache while this one
-                // waited. Recompute the fingerprint because the prior yt-dlp
-                // run may also have rotated the canonical cookie jar.
+                // waited. Recompute the fingerprint because the configuration
+                // may have changed while we were queued.
                 let active_config_key = current_extractor_config_key(pool, cfg)
                     .await
                     .map_err(shared_error)?;
@@ -123,10 +136,10 @@ impl VideoCache {
                 }
 
                 // Miss: shell out to yt-dlp. This is a normal cache fill, not
-                // an upstream-response retry. yt-dlp may update the canonical
-                // cookie jar, so fingerprint again afterward and store the
-                // result under the configuration that will be observed by the
-                // next request.
+                // an upstream-response retry. The configuration may change
+                // while yt-dlp runs (e.g. the cron job updates the binary), so
+                // fingerprint again afterward and store the result under the
+                // configuration that will be observed by the next request.
                 let result = ytdlp::extract(cfg, video_id).await.map_err(shared_error)?;
                 let now = Utc::now().timestamp();
                 if !media_urls_are_fresh(&result, now) {
@@ -216,9 +229,20 @@ impl VideoCache {
     }
 }
 
-/// Hash every input that can change yt-dlp's direct media URLs. The hash is
-/// persisted rather than the raw values so cookie contents never land in the
-/// metadata-cache table.
+/// Hash every *operator-controlled* input that can change yt-dlp's direct
+/// media URLs: the binary, its version, the player-client / PO-token /
+/// plugin / JS-runtime settings, and the cookie jar as uploaded through
+/// the parent UI (`app_config`). The hash is persisted rather than the raw
+/// values so cookie contents never land in the metadata-cache table.
+///
+/// The on-disk `cookies.txt` is deliberately *not* part of the fingerprint.
+/// yt-dlp rewrites that file after every successful cookie run (session
+/// cookies such as `__Secure-1PSIDTS` / `SIDCC` rotate on every request),
+/// so hashing it would invalidate the metadata cache for *every* video each
+/// time yt-dlp ran for *any* video — including channel backfills and
+/// caption fetches. Rotated session cookies don't change which formats or
+/// media URLs YouTube serves; a genuinely new login does, and that only
+/// arrives through the upload endpoint, which updates `app_config`.
 pub async fn current_extractor_config_key(pool: &SqlitePool, cfg: &Config) -> AppResult<String> {
     let cookies = get_config_value(pool, KEY_YTDLP_COOKIES)
         .await?
@@ -229,15 +253,6 @@ pub async fn current_extractor_config_key(pool: &SqlitePool, cfg: &Config) -> Ap
             .await?
             .flatten();
 
-    let cookies_path = ytdlp::cookies_file_path();
-    let cookies_file_digest = match tokio::fs::read(&cookies_path).await {
-        Ok(body) => format!(
-            "present:{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(body))
-        ),
-        Err(error) => format!("unavailable:{:?}", error.kind()),
-    };
-
     let fields = [
         cfg.ytdlp_path.clone(),
         std::env::var("YTDLP_PLAYER_CLIENT")
@@ -246,14 +261,12 @@ pub async fn current_extractor_config_key(pool: &SqlitePool, cfg: &Config) -> Ap
         std::env::var("YTDLP_PLUGIN_DIR")
             .unwrap_or_else(|_| "/usr/local/share/yt-dlp-plugins".to_string()),
         std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "deno".to_string()),
-        cookies_path.to_string_lossy().into_owned(),
-        cookies_file_digest,
         ytdlp_version.unwrap_or_default(),
         cookies,
     ];
 
     let mut hasher = Sha256::new();
-    hasher.update(b"hometube-ytdlp-cache-v2\0");
+    hasher.update(b"hometube-ytdlp-cache-v3\0");
     for field in fields {
         hasher.update(field.as_bytes());
         hasher.update(b"\0");

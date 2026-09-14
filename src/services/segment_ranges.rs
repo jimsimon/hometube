@@ -94,6 +94,59 @@ pub async fn store(pool: &SqlitePool, video_id: &str, format_id: &str, ranges: B
     }
 }
 
+/// Persist many range results for one video in a **single transaction**.
+///
+/// A cookie-less yt-dlp run with `formats=duplicate` resolves several
+/// hundred ranged formats per video. Writing those one autocommit
+/// statement at a time means one WAL fsync per row, which on a
+/// ZFS-backed volume serializes to 10–25 s of held write lock — long
+/// enough to stall the segment proxy's own DB writes while the player
+/// is waiting for its first bytes. One transaction is one fsync.
+///
+/// Upserts on the `(video_id, format_id)` key, updating only the range
+/// columns so a `total_bytes` value recorded by the segment store
+/// survives a re-store (unlike `INSERT OR REPLACE`, which drops the row).
+pub async fn store_all(pool: &SqlitePool, video_id: &str, rows: &[(String, BoxRanges)]) {
+    if rows.is_empty() {
+        return;
+    }
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            warn!(%err, %video_id, "beginning format_box_ranges transaction failed");
+            return;
+        }
+    };
+    for (format_id, ranges) in rows {
+        let result = sqlx::query(
+            "INSERT INTO format_box_ranges \
+             (video_id, format_id, init_start, init_end, index_start, index_end) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(video_id, format_id) DO UPDATE SET \
+                init_start = excluded.init_start, \
+                init_end = excluded.init_end, \
+                index_start = excluded.index_start, \
+                index_end = excluded.index_end, \
+                cached_at = unixepoch()",
+        )
+        .bind(video_id)
+        .bind(format_id)
+        .bind(ranges.init.start as i64)
+        .bind(ranges.init.end as i64)
+        .bind(ranges.index.start as i64)
+        .bind(ranges.index.end as i64)
+        .execute(&mut *tx)
+        .await;
+        if let Err(err) = result {
+            warn!(%err, %video_id, %format_id, "persisting format_box_ranges failed");
+            return; // dropping `tx` rolls back
+        }
+    }
+    if let Err(err) = tx.commit().await {
+        warn!(%err, %video_id, rows = rows.len(), "committing format_box_ranges failed");
+    }
+}
+
 /// Pure cache lookup for box ranges across a list of formats.
 ///
 /// Never touches the network. Missing entries are simply absent from

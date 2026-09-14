@@ -211,6 +211,9 @@ pub async fn set_cookies(
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
         .map_err(|e| AppError::Other(anyhow::anyhow!("failed to write cookies file: {e}")))?;
+    // A new login may no longer be SABR-only; let the next extraction
+    // try the cookie-authenticated run again.
+    ytdlp::forget_sabr_only_session();
 
     let line_count = content.lines().count();
     Ok(Json(CookiesStatus {
@@ -230,6 +233,7 @@ pub async fn delete_cookies(State(state): State<AppState>) -> AppResult<Json<Coo
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
         .map_err(|e| AppError::Other(anyhow::anyhow!("failed to remove cookies file: {e}")))?;
+    ytdlp::forget_sabr_only_session();
 
     Ok(Json(CookiesStatus {
         configured: false,

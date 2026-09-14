@@ -116,6 +116,9 @@ struct Fixture {
 impl Fixture {
     fn new(with_cookies_json: &str, no_cookies_json: &str) -> Self {
         let env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The SABR-only verdict is process-wide state; start every test
+        // from "no verdict" so ordering doesn't matter.
+        ytdlp::forget_sabr_only_session();
         let nonce: u64 = rand::random();
         let dir = std::env::temp_dir().join(format!("hometube-sabr-fallback-{nonce:x}"));
         std::fs::create_dir_all(&dir).unwrap();
@@ -294,4 +297,69 @@ async fn sabr_only_everywhere_keeps_cookie_result() {
     assert_eq!(result.title.as_deref(), Some("SABR"));
     assert_eq!(result.usable_format_count(), 0);
     assert_eq!(fx.invocations().len(), 2);
+}
+
+/// Once the cookie-less retry has recovered playable formats, later
+/// extractions must not keep paying for the doomed cookie run: they go
+/// straight to the cookie-less attempt.
+#[tokio::test]
+async fn sabr_only_verdict_skips_cookie_run_on_later_extractions() {
+    let fx = Fixture::new(SABR_ONLY_JSON, DIRECT_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    let first = ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    assert_eq!(first.usable_format_count(), 2);
+    assert_eq!(
+        fx.invocations().len(),
+        2,
+        "first extraction pays for the probe"
+    );
+
+    let second = ytdlp::extract(&cfg, "vid-2").await.unwrap();
+    assert_eq!(second.title.as_deref(), Some("Direct"));
+    assert_eq!(second.usable_format_count(), 2);
+    let calls = fx.invocations();
+    assert_eq!(
+        calls.len(),
+        3,
+        "second extraction must be a single run: {calls:?}"
+    );
+    assert!(
+        !calls[2].contains("--cookies"),
+        "remembered SABR-only session must skip cookies: {}",
+        calls[2]
+    );
+    assert!(!calls[2].contains("web_creator"));
+
+    // Replacing the jar (a fresh login) clears the verdict, so the
+    // cookie-authenticated run is tried again.
+    ytdlp::forget_sabr_only_session();
+    ytdlp::extract(&cfg, "vid-3").await.unwrap();
+    let calls = fx.invocations();
+    assert_eq!(
+        calls.len(),
+        5,
+        "after reset the probe runs again: {calls:?}"
+    );
+    assert!(calls[3].contains("--cookies"));
+    assert!(!calls[4].contains("--cookies"));
+}
+
+/// A SABR-only cookie run whose cookie-less retry *also* finds nothing
+/// playable says nothing about the session (the video itself may be
+/// unavailable), so no verdict is recorded.
+#[tokio::test]
+async fn unplayable_everywhere_does_not_record_a_verdict() {
+    let fx = Fixture::new(SABR_ONLY_JSON, SABR_ONLY_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    ytdlp::extract(&cfg, "vid-2").await.unwrap();
+    let calls = fx.invocations();
+    assert_eq!(
+        calls.len(),
+        4,
+        "both extractions probe with cookies: {calls:?}"
+    );
+    assert!(calls[2].contains("--cookies"));
 }

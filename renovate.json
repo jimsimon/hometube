@@ -17,6 +17,22 @@
     {
       "matchManagers": ["dockerfile", "docker-compose"],
       "groupName": "docker"
+    },
+    {
+      "matchPackageNames": [
+        "brainicism/bgutil-ytdlp-pot-provider",
+        "Brainicism/bgutil-ytdlp-pot-provider"
+      ],
+      "groupName": "bgutil pot provider"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^docker/Dockerfile$/"],
+      "matchStrings": ["ARG BGUTIL_VERSION=(?<currentValue>\\S+)"],
+      "depNameTemplate": "Brainicism/bgutil-ytdlp-pot-provider",
+      "datasourceTemplate": "github-releases"
     }
   ],
   "schedule": ["every weekend"],
