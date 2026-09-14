@@ -457,7 +457,10 @@ async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppRes
             Err(err)
         }
     };
-    forget_sabr_only_session();
+    // Only the verdict is stale here; the cookie jar itself did not
+    // change, so leave the generation alone and let overlapping flights
+    // keep caching their results.
+    clear_sabr_only_verdict();
 
     // The cookie-less attempt is exactly the retry the normal path would
     // end with, so don't repeat it: try cookies once and settle.
@@ -580,12 +583,19 @@ pub fn remember_sabr_only_session() {
     remember_sabr_only_session_for(generation);
 }
 
-/// Clear the SABR-only memo so the next extraction tries cookies again.
-/// Call this once a cookie upload/removal has fully landed (after the
-/// `app_config` row and `cookies.txt` are both updated) — a fresh login
-/// is exactly the event that could lift the SABR-only verdict.
+/// Clear the SABR-only verdict without touching the cookie generation.
+/// For internal invalidation (the memoised cookie-less run turned out
+/// not to be good enough) where the jar is unchanged and extractions in
+/// flight may still publish their results.
+pub fn clear_sabr_only_verdict() {
+    lock_sabr_memo().verdict_until = None;
+}
+
+/// Mark the *end* of a cookie upload/removal (see [`begin_cookie_change`])
+/// and clear the SABR-only verdict so the next extraction tries cookies
+/// again — a fresh login is exactly the event that could lift it.
 ///
-/// Also advances the cookie generation, so extractions already in
+/// Advances the cookie generation, so extractions already in
 /// flight against the previous jar cannot re-record their verdict or
 /// cache their result under the new fingerprint.
 pub fn forget_sabr_only_session() {
@@ -1148,11 +1158,74 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
             }
         }
-        _ => {
-            let _ = std::fs::remove_file(&path);
-        }
+        _ => match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        },
     }
     Ok(())
+}
+
+/// Replace (or, with `None`, remove) the cookie jar in both places it
+/// lives: the `app_config` row that the metadata-cache fingerprint hashes
+/// and the `cookies.txt` file yt-dlp reads. The two must agree or the
+/// cache can file yt-dlp output under a fingerprint for a different jar.
+///
+/// The database is the source of truth (startup re-derives the file from
+/// it), so the file is written first: if that fails nothing has changed.
+/// If the database write then fails, the file is restored from the
+/// previous database value. The whole transition, including any restore,
+/// is bracketed by [`begin_cookie_change`] / [`forget_sabr_only_session`]
+/// so an extraction overlapping it will not cache what it derived.
+pub async fn replace_cookies(pool: &sqlx::SqlitePool, content: Option<&str>) -> AppResult<()> {
+    begin_cookie_change();
+    let outcome = replace_cookies_inner(pool, content).await;
+    forget_sabr_only_session();
+    outcome
+}
+
+/// [`replace_cookies`] minus the generation bracket.
+async fn replace_cookies_inner(pool: &sqlx::SqlitePool, content: Option<&str>) -> AppResult<()> {
+    use crate::services::setup::{get_config_value, set_config_value, KEY_YTDLP_COOKIES};
+
+    let previous = get_config_value(pool, KEY_YTDLP_COOKIES).await?;
+
+    sync_cookies_to_disk_blocking(content.map(str::to_owned))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to update cookies file: {e}")))?;
+
+    let db_result = match content {
+        Some(c) => set_config_value(pool, KEY_YTDLP_COOKIES, c).await,
+        None => sqlx::query("DELETE FROM app_config WHERE key = ?")
+            .bind(KEY_YTDLP_COOKIES)
+            .execute(pool)
+            .await
+            .map(|_| ())
+            .map_err(AppError::from),
+    };
+    if let Err(db_err) = db_result {
+        // Put the file back in step with the row that still holds the
+        // old value. If even that fails, startup's DB-to-disk sync is
+        // the durable reconciliation; log loudly in the meantime.
+        if let Err(restore_err) = sync_cookies_to_disk_blocking(previous).await {
+            tracing::error!(
+                %db_err,
+                %restore_err,
+                "cookie database write failed and cookies.txt could not be restored; \
+                 it will be re-derived from the database at next startup"
+            );
+        }
+        return Err(db_err);
+    }
+    Ok(())
+}
+
+/// [`sync_cookies_to_disk`] on the blocking pool.
+async fn sync_cookies_to_disk_blocking(content: Option<String>) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || sync_cookies_to_disk(content.as_deref()))
+        .await
+        .map_err(|e| std::io::Error::other(format!("sync task panicked: {e}")))?
 }
 
 /// Guard returned by [`append_youtube_args`] that owns any per-invocation

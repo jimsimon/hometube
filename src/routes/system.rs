@@ -204,22 +204,10 @@ pub async fn set_cookies(
         ));
     }
 
-    // Bracket the change: the `app_config` row (part of the metadata-cache
-    // fingerprint) and `cookies.txt` (what yt-dlp reads) are updated one
-    // after the other. Bumping the cookie generation before the first
-    // write and after the last lets any overlapping extraction notice it
-    // straddled the change and discard what it derived.
-    ytdlp::begin_cookie_change();
-    setup::set_config_value(&state.db, setup::KEY_YTDLP_COOKIES, &content).await?;
-
-    let to_write = content.clone();
-    tokio::task::spawn_blocking(move || ytdlp::sync_cookies_to_disk(Some(&to_write)))
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to write cookies file: {e}")))?;
-    // Change complete. A new login may no longer be SABR-only; let the
-    // next extraction try the cookie-authenticated run again.
-    ytdlp::forget_sabr_only_session();
+    // Updates `app_config` and `cookies.txt` together (with rollback and
+    // the cookie-generation bracket) so the cache fingerprint and what
+    // yt-dlp reads can't disagree.
+    ytdlp::replace_cookies(&state.db, Some(&content)).await?;
 
     let line_count = content.lines().count();
     Ok(Json(CookiesStatus {
@@ -230,17 +218,7 @@ pub async fn set_cookies(
 
 /// `DELETE /api/system/ytdlp/cookies` — remove stored cookies from DB and disk.
 pub async fn delete_cookies(State(state): State<AppState>) -> AppResult<Json<CookiesStatus>> {
-    ytdlp::begin_cookie_change();
-    sqlx::query("DELETE FROM app_config WHERE key = ?")
-        .bind(setup::KEY_YTDLP_COOKIES)
-        .execute(&state.db)
-        .await?;
-
-    tokio::task::spawn_blocking(|| ytdlp::sync_cookies_to_disk(None))
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
-        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to remove cookies file: {e}")))?;
-    ytdlp::forget_sabr_only_session();
+    ytdlp::replace_cookies(&state.db, None).await?;
 
     Ok(Json(CookiesStatus {
         configured: false,
