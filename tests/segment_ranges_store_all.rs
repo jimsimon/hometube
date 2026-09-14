@@ -10,6 +10,7 @@ use hometube::services::segment_ranges::{
     lookup_all, store_all, BoxRanges, ByteRange, RangePersistMemo,
 };
 
+/// Arbitrary but valid init/index byte ranges for one format.
 fn sample_ranges() -> BoxRanges {
     BoxRanges {
         init: ByteRange {
@@ -23,6 +24,7 @@ fn sample_ranges() -> BoxRanges {
     }
 }
 
+/// Build `(format_id, url)` pairs for the memo from bare format ids.
 fn inputs(ids: &[&str]) -> Vec<(String, String)> {
     ids.iter()
         .map(|id| ((*id).to_string(), format!("https://example/{id}")))
@@ -87,21 +89,49 @@ async fn store_all_preserves_total_bytes() {
 }
 
 /// A failed batch surfaces as an error (so the caller can retry) and
-/// writes nothing: the transaction rolls back as a unit.
+/// writes nothing: the transaction rolls back as a unit, so a row that
+/// was inserted before the failing one does not survive.
 #[tokio::test]
 async fn store_all_reports_failure_and_writes_nothing() {
     let app = boot().await;
-    sqlx::query("DROP TABLE format_box_ranges")
+    // Make the second row's insert fail after the first has already been
+    // written inside the same transaction.
+    sqlx::query(
+        "CREATE TRIGGER reject_248 BEFORE INSERT ON format_box_ranges \
+         WHEN NEW.format_id = '248' \
+         BEGIN SELECT RAISE(ABORT, 'rejected by test trigger'); END",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let err = store_all(
+        &app.pool,
+        "vid",
+        &[
+            ("137".to_string(), sample_ranges()),
+            ("248".to_string(), sample_ranges()),
+        ],
+    )
+    .await
+    .expect_err("a failing row must be reported, not swallowed");
+    assert!(
+        err.to_string().contains("rejected by test trigger"),
+        "unexpected error: {err}"
+    );
+
+    sqlx::query("DROP TRIGGER reject_248")
         .execute(&app.pool)
         .await
         .unwrap();
-
-    let err = store_all(&app.pool, "vid", &[("137".to_string(), sample_ranges())])
-        .await
-        .expect_err("missing table must be reported, not swallowed");
-    assert!(
-        err.to_string().contains("format_box_ranges"),
-        "unexpected error: {err}"
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM format_box_ranges WHERE video_id = 'vid'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, 0,
+        "the row inserted before the failure must roll back"
     );
 }
 

@@ -124,6 +124,15 @@ impl VideoCache {
                 // Another flight may have populated the cache while this one
                 // waited. Recompute the fingerprint because the configuration
                 // may have changed while we were queued.
+                //
+                // Snapshot the cookie generation *before* fingerprinting: the
+                // fingerprint reads the cookie jar from `app_config` while
+                // yt-dlp reads it from `cookies.txt`, and a cookie upload
+                // updates those one after the other. The generation is bumped
+                // on both sides of that update, so any extraction overlapping
+                // it can tell that its key and result may describe different
+                // jars, and decline to cache.
+                let cookie_generation = ytdlp::cookie_generation();
                 let active_config_key = current_extractor_config_key(pool, cfg)
                     .await
                     .map_err(shared_error)?;
@@ -149,6 +158,16 @@ impl VideoCache {
                         "yt-dlp returned media URLs that expire within \
                          {MEDIA_URL_EXPIRY_MARGIN_SECONDS} seconds"
                     )));
+                }
+                if ytdlp::cookie_generation() != cookie_generation {
+                    // Straddled a cookie change (see above): hand the result
+                    // to the waiting callers but don't cache it. The next
+                    // request fingerprints and extracts against the new jar.
+                    debug!(
+                        %video_id,
+                        "cookies changed during extraction; returning result without caching it"
+                    );
+                    return Ok(result);
                 }
                 let ttl = current_ttl(pool).await;
                 let expires_at = store_in_db(pool, video_id, &result, ttl, &active_config_key)

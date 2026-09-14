@@ -381,7 +381,7 @@ pub async fn extract(cfg: &Config, video_id: &str) -> AppResult<ExtractResult> {
     // extraction describes the jar it *started* with. If a parent uploads
     // new cookies while yt-dlp is running, the verdict must not be
     // recorded against the new jar.
-    let generation = sabr_session_generation();
+    let generation = cookie_generation();
     if sabr_only_session_active() {
         debug!(
             %video_id,
@@ -496,11 +496,18 @@ async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppRes
 /// extraction attempt.
 pub const SABR_ONLY_SESSION_MEMO_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Identifies one incarnation of the cookie jar. Bumped by
-/// [`forget_sabr_only_session`] whenever cookies are replaced or
-/// removed, so a verdict formed against an older jar can be rejected.
+/// Identifies one incarnation of the cookie jar as seen by this process.
+///
+/// Advanced by [`begin_cookie_change`] and [`forget_sabr_only_session`],
+/// which bracket every cookie upload/removal. Anything derived from the
+/// jar during an extraction (the SABR-only verdict, the metadata-cache
+/// entry) compares the generation it started with against the current
+/// one before publishing, and discards its result if they differ. This
+/// closes the window in which the `app_config` cookie value, the on-disk
+/// `cookies.txt`, and the SABR memo are updated one after another and an
+/// extraction could observe a mix of old and new inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SabrSessionGeneration(u64);
+pub struct CookieGeneration(u64);
 
 #[derive(Debug, Clone, Copy)]
 struct SabrSessionMemo {
@@ -526,8 +533,19 @@ fn lock_sabr_memo() -> std::sync::MutexGuard<'static, SabrSessionMemo> {
 }
 
 /// The cookie generation an extraction starting now would observe.
-pub fn sabr_session_generation() -> SabrSessionGeneration {
-    SabrSessionGeneration(lock_sabr_memo().generation)
+pub fn cookie_generation() -> CookieGeneration {
+    CookieGeneration(lock_sabr_memo().generation)
+}
+
+/// Mark the *start* of a cookie upload/removal. Call before the first
+/// of the cookie inputs (`app_config`, `cookies.txt`) is modified; pair
+/// with [`forget_sabr_only_session`] after the last one. Any extraction
+/// that overlaps the change in either direction then sees a generation
+/// mismatch and refuses to publish what it derived.
+pub fn begin_cookie_change() {
+    let mut memo = lock_sabr_memo();
+    memo.generation = memo.generation.wrapping_add(1);
+    memo.verdict_until = None;
 }
 
 /// Whether an unexpired SABR-only verdict is on record.
@@ -541,7 +559,7 @@ fn sabr_only_session_active() -> bool {
 /// [`SABR_ONLY_SESSION_MEMO_TTL`], but only if `generation` is still the
 /// current cookie generation. A verdict from an extraction that started
 /// before a cookie upload says nothing about the new jar and is dropped.
-pub fn remember_sabr_only_session_for(generation: SabrSessionGeneration) {
+pub fn remember_sabr_only_session_for(generation: CookieGeneration) {
     let mut memo = lock_sabr_memo();
     if memo.generation != generation.0 {
         debug!(
@@ -558,16 +576,18 @@ pub fn remember_sabr_only_session_for(generation: SabrSessionGeneration) {
 /// Public so tests can start from an established verdict; production
 /// code goes through [`remember_sabr_only_session_for`] from [`extract`].
 pub fn remember_sabr_only_session() {
-    let generation = sabr_session_generation();
+    let generation = cookie_generation();
     remember_sabr_only_session_for(generation);
 }
 
 /// Clear the SABR-only memo so the next extraction tries cookies again.
-/// Call this whenever the cookie jar is replaced or removed — a fresh
-/// login is exactly the event that could lift the SABR-only verdict.
+/// Call this once a cookie upload/removal has fully landed (after the
+/// `app_config` row and `cookies.txt` are both updated) — a fresh login
+/// is exactly the event that could lift the SABR-only verdict.
 ///
 /// Also advances the cookie generation, so extractions already in
-/// flight against the previous jar cannot re-record their verdict.
+/// flight against the previous jar cannot re-record their verdict or
+/// cache their result under the new fingerprint.
 pub fn forget_sabr_only_session() {
     let mut memo = lock_sabr_memo();
     memo.generation = memo.generation.wrapping_add(1);

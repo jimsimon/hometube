@@ -204,6 +204,12 @@ pub async fn set_cookies(
         ));
     }
 
+    // Bracket the change: the `app_config` row (part of the metadata-cache
+    // fingerprint) and `cookies.txt` (what yt-dlp reads) are updated one
+    // after the other. Bumping the cookie generation before the first
+    // write and after the last lets any overlapping extraction notice it
+    // straddled the change and discard what it derived.
+    ytdlp::begin_cookie_change();
     setup::set_config_value(&state.db, setup::KEY_YTDLP_COOKIES, &content).await?;
 
     let to_write = content.clone();
@@ -211,8 +217,8 @@ pub async fn set_cookies(
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("sync task panicked: {e}")))?
         .map_err(|e| AppError::Other(anyhow::anyhow!("failed to write cookies file: {e}")))?;
-    // A new login may no longer be SABR-only; let the next extraction
-    // try the cookie-authenticated run again.
+    // Change complete. A new login may no longer be SABR-only; let the
+    // next extraction try the cookie-authenticated run again.
     ytdlp::forget_sabr_only_session();
 
     let line_count = content.lines().count();
@@ -224,6 +230,7 @@ pub async fn set_cookies(
 
 /// `DELETE /api/system/ytdlp/cookies` — remove stored cookies from DB and disk.
 pub async fn delete_cookies(State(state): State<AppState>) -> AppResult<Json<CookiesStatus>> {
+    ytdlp::begin_cookie_change();
     sqlx::query("DELETE FROM app_config WHERE key = ?")
         .bind(setup::KEY_YTDLP_COOKIES)
         .execute(&state.db)

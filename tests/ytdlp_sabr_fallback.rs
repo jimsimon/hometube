@@ -65,6 +65,7 @@ struct LoggedOut<'a> {
 }
 
 impl<'a> LoggedOut<'a> {
+    /// A cookie-less run that prints `json` immediately and exits 0.
     fn json(json: &'a str) -> Self {
         Self {
             json: Some(json),
@@ -144,6 +145,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Fixture whose cookie-less run prints `no_cookies_json` immediately.
     fn new(with_cookies_json: &str, no_cookies_json: &str) -> Self {
         Self::build(with_cookies_json, LoggedOut::json(no_cookies_json))
     }
@@ -174,6 +176,8 @@ impl Fixture {
         )
     }
 
+    /// Fixture with full control over the cookie-less run's behaviour
+    /// (output, exit code, delay). Starts from a clear SABR-only memo.
     fn build(with_cookies_json: &str, logged_out: LoggedOut<'_>) -> Self {
         let env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The SABR-only verdict is process-wide state; start every test
