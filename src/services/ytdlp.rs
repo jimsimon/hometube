@@ -249,7 +249,8 @@ impl ExtractResult {
     /// Number of formats the DASH synthesizer can actually stream, as
     /// judged by [`crate::services::dash::is_dash_usable`]: direct-URL
     /// video-only VP9/AVC1 or audio-only opus/mp4a formats, excluding
-    /// storyboards, DRC variants and muxed streams.
+    /// storyboards, DRC variants and muxed streams — and for which
+    /// innertube gave us `<SegmentBase>` byte ranges.
     ///
     /// When this is `0` on an otherwise successful extraction, YouTube
     /// served only SABR (server-side adaptive bitrate) streams to the
@@ -267,10 +268,19 @@ impl ExtractResult {
     /// returns muxed format 18 with a URL, and counting that as
     /// "playable" would suppress the fallback while the manifest
     /// route goes on 404ing.
+    ///
+    /// Additionally requires an entry in [`Self::format_box_ranges`],
+    /// mirroring the synthesizer's `has_ranges` filter: it drops
+    /// unranged Representations, so a URL alone isn't playable. The
+    /// manifest route can also recover ranges from the SQLite cache,
+    /// which we can't see here; the worst case of ignoring that is one
+    /// unnecessary cookie-less yt-dlp run whose result is only adopted
+    /// if it is itself playable.
     fn usable_formats(&self) -> impl Iterator<Item = &Format> {
-        self.formats
-            .iter()
-            .filter(|f| crate::services::dash::is_dash_usable(f))
+        self.formats.iter().filter(|f| {
+            crate::services::dash::is_dash_usable(f)
+                && self.format_box_ranges.contains_key(&f.format_id)
+        })
     }
 
     /// Usable format count per yt-dlp player client, e.g.
@@ -447,42 +457,6 @@ async fn extract_once(
     let mut result: ExtractResult = serde_json::from_str(&stdout)
         .map_err(|e| AppError::Other(anyhow::anyhow!("parsing yt-dlp JSON: {e}")))?;
 
-    // Surface yt-dlp's warnings. They're WARN-worthy when the run
-    // produced nothing we can stream (that's exactly the SABR / PO
-    // token situation they describe); otherwise DEBUG so a healthy
-    // deployment isn't spammed by e.g. "skipped ios formats" noise.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim();
-    let cookies = yt_args_guard.cookies_used();
-    let requested_clients = yt_args_guard.player_clients();
-    if !stderr.is_empty() {
-        if result.usable_format_count() == 0 {
-            warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no usable formats returned)");
-        } else {
-            debug!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings");
-        }
-    }
-
-    // One line per extraction answering the operational questions:
-    // were cookies in play, which clients did we ask for, and which
-    // client(s) actually delivered playable formats. Rendered as e.g.
-    // `serving_clients=WEB-C:56,WEB-E:2` so it greps cleanly.
-    let by_client = result.usable_formats_by_client();
-    let serving_clients = by_client
-        .iter()
-        .map(|(client, n)| format!("{client}:{n}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    info!(
-        %video_id,
-        cookies,
-        requested_clients,
-        total_formats = result.formats.len(),
-        usable_formats = result.usable_format_count(),
-        serving_clients = %serving_clients,
-        "yt-dlp extraction complete"
-    );
-
     // Parse SegmentBase ranges from the innertube player dump(s) and
     // resolve them per-format-id. Innertube's `adaptiveFormats` array
     // contains one entry per file variant — for itag 249 there may be
@@ -525,6 +499,45 @@ async fn extract_once(
     } else {
         debug!(%video_id, "no segment ranges found in player dumps");
     }
+
+    // Surface yt-dlp's warnings. They're WARN-worthy when the run
+    // produced nothing we can stream (that's exactly the SABR / PO
+    // token situation they describe); otherwise DEBUG so a healthy
+    // deployment isn't spammed by e.g. "skipped ios formats" noise.
+    // This must run after range resolution because usability counts
+    // only ranged formats.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let cookies = yt_args_guard.cookies_used();
+    let requested_clients = yt_args_guard.player_clients();
+    if !stderr.is_empty() {
+        if result.usable_format_count() == 0 {
+            warn!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings (no usable formats returned)");
+        } else {
+            debug!(%video_id, cookies, requested_clients, %stderr, "yt-dlp warnings");
+        }
+    }
+
+    // One line per extraction answering the operational questions:
+    // were cookies in play, which clients did we ask for, and which
+    // client(s) actually delivered playable formats. Rendered as e.g.
+    // `serving_clients=WEB-C:56,WEB-E:2` so it greps cleanly.
+    let by_client = result.usable_formats_by_client();
+    let serving_clients = by_client
+        .iter()
+        .map(|(client, n)| format!("{client}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    info!(
+        %video_id,
+        cookies,
+        requested_clients,
+        total_formats = result.formats.len(),
+        ranged_formats = result.format_box_ranges.len(),
+        usable_formats = result.usable_format_count(),
+        serving_clients = %serving_clients,
+        "yt-dlp extraction complete"
+    );
 
     // Cleanup pages temp dir (best-effort).
     let _ = tokio::fs::remove_dir_all(&pages_dir).await;

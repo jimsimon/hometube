@@ -31,7 +31,23 @@ const SABR_WITH_FORMAT_18_JSON: &str = r#"{"id":"vid-1","title":"SABR+18","durat
   {"format_id":"233","protocol":"m3u8_native","acodec":"mp4a.40.5","vcodec":"none","url":"https://manifest.googlevideo.com/hls/233.m3u8"}
 ]}"#;
 
+/// A healthy result: direct adaptive formats *with* the innertube
+/// `<SegmentBase>` ranges the synthesizer needs. (In production these
+/// come from `--write-pages` dumps; the shim can't produce those, so
+/// they ride along in the JSON via the `#[serde(default)]` field.)
 const DIRECT_JSON: &str = r#"{"id":"vid-1","title":"Direct","duration":10.0,"formats":[
+  {"format_id":"sb0","protocol":"mhtml","url":"https://i.ytimg.com/sb/x"},
+  {"format_id":"251","protocol":"https","acodec":"opus","vcodec":"none","filesize":100,"url":"https://rr1.googlevideo.com/videoplayback?itag=251"},
+  {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"filesize":200,"url":"https://rr1.googlevideo.com/videoplayback?itag=303"}
+],"format_box_ranges":{
+  "251":{"init_start":0,"init_end":99,"index_start":100,"index_end":199},
+  "303":{"init_start":0,"init_end":99,"index_start":100,"index_end":199}
+}}"#;
+
+/// Same direct formats, but no ranges resolved. `synthesize_manifest`
+/// drops every unranged Representation, so this is just as
+/// unplayable as the SABR-only shape and must trigger the retry.
+const DIRECT_UNRANGED_JSON: &str = r#"{"id":"vid-1","title":"Unranged","duration":10.0,"formats":[
   {"format_id":"sb0","protocol":"mhtml","url":"https://i.ytimg.com/sb/x"},
   {"format_id":"251","protocol":"https","acodec":"opus","vcodec":"none","filesize":100,"url":"https://rr1.googlevideo.com/videoplayback?itag=251"},
   {"format_id":"303","protocol":"https","acodec":"none","vcodec":"vp9","height":1080,"filesize":200,"url":"https://rr1.googlevideo.com/videoplayback?itag=303"}
@@ -190,6 +206,25 @@ async fn muxed_only_cookie_result_still_retries_without_cookies() {
 
     // Format 18 has a URL but is muxed, so it must not be mistaken for
     // a playable result: the retry fires and its output wins.
+    assert_eq!(result.title.as_deref(), Some("Direct"));
+    assert_eq!(result.usable_format_count(), 2);
+    let calls = fx.invocations();
+    assert_eq!(calls.len(), 2, "expected a retry, got {calls:?}");
+    assert!(calls[0].contains("--cookies"));
+    assert!(!calls[1].contains("--cookies"));
+}
+
+#[tokio::test]
+async fn unranged_direct_cookie_result_still_retries_without_cookies() {
+    let fx = Fixture::new(DIRECT_UNRANGED_JSON, DIRECT_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+
+    let result = ytdlp::extract(&cfg, "vid-1")
+        .await
+        .expect("extract succeeds");
+
+    // Direct URLs alone aren't playable: without SegmentBase ranges
+    // the synthesizer emits nothing, so the retry must fire.
     assert_eq!(result.title.as_deref(), Some("Direct"));
     assert_eq!(result.usable_format_count(), 2);
     let calls = fx.invocations();

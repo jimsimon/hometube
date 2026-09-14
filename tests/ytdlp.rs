@@ -209,14 +209,27 @@ fn usable_formats_by_client_counts_only_dash_usable_formats() {
         {"format_id":"136","protocol":"https","acodec":"none","vcodec":"avc1.4d401f","height":720,"format_note":"720p, WEB"},
         {"format_id":"18","protocol":"https","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"url":"u","format_note":"360p, MWEB"},
         {"format_id":"399","protocol":"https","acodec":"none","vcodec":"av01.0.09M.08","height":1080,"url":"u","format_note":"1080p60, WEB-C"},
-        {"format_id":"248","protocol":"https","acodec":"none","vcodec":"vp9","url":"u","format_note":"1080p, TV-D"}
-    ]}"#;
+        {"format_id":"248","protocol":"https","acodec":"none","vcodec":"vp9","url":"u","format_note":"1080p, TV-D"},
+        {"format_id":"250","protocol":"https","acodec":"opus","vcodec":"none","url":"u","format_note":"low, IOS"}
+    ],"format_box_ranges":{
+        "251":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "251-dashy":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "251-drc":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "303":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "137":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "18":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "399":{"init_start":0,"init_end":1,"index_start":2,"index_end":3},
+        "248":{"init_start":0,"init_end":1,"index_start":2,"index_end":3}
+    }}"#;
     let result: ExtractResult = serde_json::from_str(json).unwrap();
     let by_client = result.usable_formats_by_client();
     // 251 + 251-dashy; the DRC variant and AV1 are not DASH-usable.
     assert_eq!(by_client.get("WEB-C"), Some(&2));
     // Video without `height` can't survive the per-height trim.
     assert_eq!(by_client.get("TV-D"), None);
+    // Otherwise-usable but with no resolved segment ranges: the
+    // synthesizer drops it, so it doesn't count.
+    assert_eq!(by_client.get("IOS"), None);
     assert_eq!(by_client.get("VISI"), Some(&1));
     // Untagged usable format lands in the "?" bucket.
     assert_eq!(by_client.get("?"), Some(&1));
