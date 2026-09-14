@@ -463,9 +463,23 @@ async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppRes
     clear_sabr_only_verdict();
 
     // The cookie-less attempt is exactly the retry the normal path would
-    // end with, so don't repeat it: try cookies once and settle.
-    match extract_once(cfg, video_id, true).await {
-        Ok((with_cookies, _)) if with_cookies.usable_format_count() > 0 => {
+    // end with, so don't repeat it: try cookies once and settle. If no
+    // jar can actually be attached (none on disk, or staging failed) a
+    // second run would be identical to the first, so settle on it.
+    let with_cookies = match run_extraction(cfg, video_id, CookieMode::Required).await {
+        Ok(Some((result, _))) => Ok(result),
+        Ok(None) => {
+            warn!(
+                %video_id,
+                "no cookies could be attached for the follow-up run; \
+                 keeping the cookie-less result"
+            );
+            return logged_out;
+        }
+        Err(err) => Err(err),
+    };
+    match with_cookies {
+        Ok(with_cookies) if with_cookies.usable_format_count() > 0 => {
             info!(
                 %video_id,
                 usable_formats = with_cookies.usable_format_count(),
@@ -475,7 +489,7 @@ async fn extract_logged_out_then_cookies(cfg: &Config, video_id: &str) -> AppRes
             );
             Ok(with_cookies)
         }
-        Ok((with_cookies, _)) => {
+        Ok(with_cookies) => {
             warn!(
                 %video_id,
                 "cookie-authenticated yt-dlp run also returned no usable formats; \
@@ -604,6 +618,20 @@ pub fn forget_sabr_only_session() {
     memo.verdict_until = None;
 }
 
+/// How a single yt-dlp run should treat the cookie jar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CookieMode {
+    /// Run logged-out regardless of what is on disk.
+    Never,
+    /// Attach the jar if it exists and can be staged; otherwise run
+    /// logged-out and report that via the returned `cookies_used` flag.
+    IfStaged,
+    /// Only worth running if the jar is actually attached. If it can't
+    /// be, don't spawn yt-dlp at all and return `None`, so callers who
+    /// already hold a logged-out result don't repeat it.
+    Required,
+}
+
 /// Single yt-dlp `--dump-json` invocation. See [`extract`] for the
 /// retry policy layered on top.
 ///
@@ -618,6 +646,23 @@ async fn extract_once(
     video_id: &str,
     with_cookies: bool,
 ) -> AppResult<(ExtractResult, bool)> {
+    let mode = if with_cookies {
+        CookieMode::IfStaged
+    } else {
+        CookieMode::Never
+    };
+    run_extraction(cfg, video_id, mode)
+        .await
+        .map(|ran| ran.expect("only CookieMode::Required declines to run"))
+}
+
+/// [`extract_once`] with an explicit [`CookieMode`]. Returns `Ok(None)`
+/// only for [`CookieMode::Required`] when no jar could be attached.
+async fn run_extraction(
+    cfg: &Config,
+    video_id: &str,
+    mode: CookieMode,
+) -> AppResult<Option<(ExtractResult, bool)>> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
 
     // yt-dlp's --write-pages dumps all HTTP responses to the working
@@ -639,11 +684,15 @@ async fn extract_once(
         .arg("--skip-download")
         .arg("--write-pages")
         .current_dir(&pages_dir);
-    let yt_args_guard = append_youtube_args_with(&mut cmd, with_cookies);
+    let yt_args_guard = append_youtube_args_with(&mut cmd, mode != CookieMode::Never);
     cmd.arg(&url);
     // What was *actually* passed, as opposed to what was requested:
     // `cookies` is false if staging the jar failed.
     let cookies = yt_args_guard.cookies_used();
+    if mode == CookieMode::Required && !cookies {
+        let _ = tokio::fs::remove_dir_all(&pages_dir).await;
+        return Ok(None);
+    }
     let requested_clients = yt_args_guard.player_clients();
     debug!(?cmd, %video_id, cookies, requested_clients, "running yt-dlp");
 
@@ -755,7 +804,7 @@ async fn extract_once(
     // into the canonical cookie file, but only if every original cookie
     // name still survived yt-dlp's cookiejar rewrite.
     yt_args_guard.persist_cookies_if_safe().await;
-    Ok((result, cookies))
+    Ok(Some((result, cookies)))
 }
 
 /// One entry from yt-dlp's `--flat-playlist -j` output for a channel
@@ -1141,8 +1190,23 @@ pub fn cookies_file_path() -> std::path::PathBuf {
     )
 }
 
+/// Serializes every writer of the canonical cookies file:
+/// [`replace_cookies`] (upload/removal, together with its `app_config`
+/// row) and [`YoutubeArgsGuard::persist_cookies_if_safe`] (yt-dlp's
+/// refreshed jar). Without it two replacements could interleave their
+/// file and row writes and end up disagreeing, or a slow extraction
+/// could persist a rewrite of the *previous* jar over a fresh upload.
+static COOKIE_FILE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Write cookie content to the deterministic cookies file path.
 /// If `content` is `None` or empty, removes the file instead.
+///
+/// The write is staged to a sibling file (with permissions applied) and
+/// renamed into place, so a failure at any step leaves the canonical
+/// file untouched rather than partially written or world-readable.
+///
+/// Callers that can race other writers must hold [`COOKIE_FILE_LOCK`];
+/// the only exception is startup, before any request can run.
 pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
     let path = cookies_file_path();
     match content {
@@ -1150,13 +1214,22 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&path, c)?;
-            // Restrict permissions to owner-only on Unix.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let nonce: u64 = rand::random();
+            let staging = path.with_extension(format!("txt.new.{nonce:x}"));
+            let staged = (|| {
+                std::fs::write(&staging, c)?;
+                // Restrict permissions to owner-only on Unix.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
+                }
+                std::fs::rename(&staging, &path)
+            })();
+            if staged.is_err() {
+                let _ = std::fs::remove_file(&staging);
             }
+            staged?;
         }
         _ => match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -1177,19 +1250,37 @@ pub fn sync_cookies_to_disk(content: Option<&str>) -> std::io::Result<()> {
 /// If the database write then fails, the file is restored from the
 /// previous database value. The whole transition, including any restore,
 /// is bracketed by [`begin_cookie_change`] / [`forget_sabr_only_session`]
-/// so an extraction overlapping it will not cache what it derived.
+/// so an extraction overlapping it will not cache what it derived, and
+/// runs under [`COOKIE_FILE_LOCK`] so no other writer can interleave.
+///
+/// Re-uploading the jar that is already stored is a no-op apart from
+/// clearing the SABR-only verdict: the generation is left alone so
+/// extractions in flight keep caching.
 pub async fn replace_cookies(pool: &sqlx::SqlitePool, content: Option<&str>) -> AppResult<()> {
+    use crate::services::setup::{get_config_value, KEY_YTDLP_COOKIES};
+
+    let _writer = COOKIE_FILE_LOCK.lock().await;
+    let previous = get_config_value(pool, KEY_YTDLP_COOKIES).await?;
+    let content = content.filter(|c| !c.trim().is_empty());
+    if previous.as_deref() == content {
+        debug!("cookie jar unchanged; skipping rewrite");
+        clear_sabr_only_verdict();
+        return Ok(());
+    }
+
     begin_cookie_change();
-    let outcome = replace_cookies_inner(pool, content).await;
+    let outcome = replace_cookies_inner(pool, previous, content).await;
     forget_sabr_only_session();
     outcome
 }
 
-/// [`replace_cookies`] minus the generation bracket.
-async fn replace_cookies_inner(pool: &sqlx::SqlitePool, content: Option<&str>) -> AppResult<()> {
-    use crate::services::setup::{get_config_value, set_config_value, KEY_YTDLP_COOKIES};
-
-    let previous = get_config_value(pool, KEY_YTDLP_COOKIES).await?;
+/// [`replace_cookies`] minus the lock, no-op check and generation bracket.
+async fn replace_cookies_inner(
+    pool: &sqlx::SqlitePool,
+    previous: Option<String>,
+    content: Option<&str>,
+) -> AppResult<()> {
+    use crate::services::setup::{set_config_value, KEY_YTDLP_COOKIES};
 
     sync_cookies_to_disk_blocking(content.map(str::to_owned))
         .await
@@ -1240,6 +1331,10 @@ async fn sync_cookies_to_disk_blocking(content: Option<String>) -> std::io::Resu
 /// original instead of letting yt-dlp's cookiejar pruning erode auth.
 pub struct YoutubeArgsGuard {
     cookies_tempfile: Option<std::path::PathBuf>,
+    /// Cookie generation at the moment the jar was copied for this run.
+    /// If it has moved by the time yt-dlp finishes, the jar on disk is a
+    /// different one and the rewrite must not be persisted over it.
+    generation: CookieGeneration,
     /// Snapshot of cookie names present in the file we passed to
     /// yt-dlp (i.e. read from the tempfile copy itself, not the
     /// canonical source). Used as the survivor list for persistence.
@@ -1303,7 +1398,16 @@ impl YoutubeArgsGuard {
         // All original cookie names survived; persist the refreshed
         // jar. Stage to a unique-per-invocation filename so concurrent
         // runs cannot overwrite each other's staged content, then
-        // atomically rename onto the canonical path.
+        // atomically rename onto the canonical path. Take the writer
+        // lock for the generation check *and* the rename so a
+        // replacement can't land in between.
+        let _writer = COOKIE_FILE_LOCK.lock().await;
+        if cookie_generation() != self.generation {
+            debug!(
+                "cookies were replaced while yt-dlp ran; not persisting its rewrite of the old jar"
+            );
+            return;
+        }
         let dest = &self.canonical_cookies_path;
         let nonce: u64 = rand::random();
         let staging = dest.with_extension(format!("txt.new.{nonce:x}"));
@@ -1485,6 +1589,7 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
     // copy fails we run logged-out, and must not request `web_creator`
     // (LOGIN_REQUIRED without cookies) or report `cookies_used()`.
     let cookies_path = cookies_file_path();
+    let generation = cookie_generation();
     let mut cookies_tempfile: Option<std::path::PathBuf> = None;
     let mut original_cookie_names = std::collections::HashSet::new();
     if with_cookies && cookies_path.exists() {
@@ -1556,6 +1661,7 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
 
     YoutubeArgsGuard {
         cookies_tempfile,
+        generation,
         original_cookie_names,
         canonical_cookies_path: cookies_path,
         player_clients,

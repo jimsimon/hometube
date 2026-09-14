@@ -131,3 +131,77 @@ async fn failed_row_delete_restores_the_previous_file() {
         OLD
     );
 }
+
+/// Re-uploading the jar already on record changes nothing, and in
+/// particular must not advance the cookie generation (which would make
+/// every extraction in flight decline to cache).
+#[tokio::test]
+async fn unchanged_upload_does_not_advance_the_generation() {
+    let _serial = SERIAL.lock().await;
+    let app = boot().await;
+    seed_old(&app.pool).await;
+    let before = ytdlp::cookie_generation();
+
+    ytdlp::replace_cookies(&app.pool, Some(OLD)).await.unwrap();
+
+    assert_eq!(ytdlp::cookie_generation(), before);
+    assert_eq!(
+        std::fs::read_to_string(ytdlp::cookies_file_path()).unwrap(),
+        OLD
+    );
+
+    // Deleting when nothing is stored is likewise a no-op.
+    ytdlp::replace_cookies(&app.pool, None).await.unwrap();
+    let after_delete = ytdlp::cookie_generation();
+    ytdlp::replace_cookies(&app.pool, None).await.unwrap();
+    assert_eq!(ytdlp::cookie_generation(), after_delete);
+}
+
+/// If the file can't be written, the transition stops before the row
+/// write: both sides still hold the previous jar and the canonical file
+/// is not partially rewritten.
+#[tokio::test]
+async fn failed_file_write_leaves_both_sides_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _serial = SERIAL.lock().await;
+    let app = boot().await;
+    // A private directory we're allowed to make read-only (the shared
+    // fixture path lives directly under the system temp dir).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let path = dir.join("cookies.txt");
+    let shared_path = std::env::var("YTDLP_COOKIES_PATH").unwrap();
+    unsafe { std::env::set_var("YTDLP_COOKIES_PATH", path.to_str().unwrap()) };
+    seed_old(&app.pool).await;
+    // Read-only directory: the staged sibling file can't be created.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(dir.join("probe"), b"").is_ok() {
+        // Running as root; directory permissions aren't enforced.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("YTDLP_COOKIES_PATH", &shared_path) };
+        return;
+    }
+
+    let outcome = ytdlp::replace_cookies(&app.pool, Some(NEW)).await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    unsafe { std::env::set_var("YTDLP_COOKIES_PATH", &shared_path) };
+    outcome.expect_err("file write failure must surface");
+
+    assert_eq!(
+        get_config_value(&app.pool, KEY_YTDLP_COOKIES)
+            .await
+            .unwrap(),
+        Some(OLD.to_string())
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), OLD);
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".new."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "staging files left behind: {leftovers:?}"
+    );
+}

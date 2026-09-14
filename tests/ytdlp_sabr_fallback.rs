@@ -93,6 +93,13 @@ fn write_shim(
         writeln!(f, "printf '%s\\n' \"$*\" >> '{}'", argv_log.display()).unwrap();
         writeln!(f, "case \" $* \" in").unwrap();
         writeln!(f, "  *' --cookies '*)").unwrap();
+        // Behave like yt-dlp: rewrite the staged jar in place (append a
+        // rotated cookie) so the persist-back path is exercised. An
+        // optional delay lets a test act while the cookie run is going.
+        writeln!(f, "    sleep \"${{HOMETUBE_TEST_COOKIE_RUN_DELAY:-0}}\"").unwrap();
+        writeln!(f, "    prev=''; for a in \"$@\"; do").unwrap();
+        writeln!(f, "      if [ \"$prev\" = '--cookies' ]; then printf '.youtube.com\\tTRUE\\t/\\tTRUE\\t0\\tROTATED\\t1\\n' >> \"$a\"; fi").unwrap();
+        writeln!(f, "      prev=\"$a\"; done").unwrap();
         writeln!(
             f,
             "    printf '%s\\n' 'WARNING: [youtube] vid-1: Some web_embedded client https formats have been skipped as they are missing a URL. YouTube may have enabled the SABR-only streaming experiment for the current session.' >&2"
@@ -193,6 +200,7 @@ impl Fixture {
         )
         .unwrap();
         unsafe { std::env::set_var("YTDLP_COOKIES_PATH", cookies.to_str().unwrap()) };
+        unsafe { std::env::remove_var("HOMETUBE_TEST_COOKIE_RUN_DELAY") };
         let argv_log = dir.join("argv.log");
         let shim = write_shim(&argv_log, with_cookies_json, logged_out);
         Self {
@@ -540,4 +548,79 @@ async fn cookie_change_during_extraction_discards_the_stale_verdict() {
         "fresh cookies must be tried after an upload: {}",
         calls[2]
     );
+}
+
+/// After a cookie run, yt-dlp's rewritten jar (with rotated session
+/// cookies) is persisted back over the canonical file — unless the jar
+/// was replaced while yt-dlp ran, in which case the rewrite describes
+/// the *old* jar and must not clobber the new one.
+#[tokio::test]
+async fn rewritten_jar_is_not_persisted_over_a_newer_upload() {
+    let fx = Fixture::new(DIRECT_JSON, DIRECT_JSON);
+    let cfg = config_with_ytdlp(&fx.shim);
+    let cookies = fx.dir.join("cookies.txt");
+
+    // Control: with no concurrent change the rotation is persisted.
+    ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    assert!(
+        std::fs::read_to_string(&cookies)
+            .unwrap()
+            .contains("ROTATED"),
+        "rotated cookie should be folded back into the canonical jar"
+    );
+
+    // Now upload a new jar while a cookie run is in flight.
+    let fresh = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tfresh\n";
+    std::fs::write(
+        &cookies,
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+    )
+    .unwrap();
+    unsafe { std::env::set_var("HOMETUBE_TEST_COOKIE_RUN_DELAY", "1") };
+    let extraction = {
+        let cfg = cfg.clone();
+        tokio::spawn(async move { ytdlp::extract(&cfg, "vid-2").await })
+    };
+    for _ in 0..200 {
+        if fx.invocations().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(fx.invocations().len(), 2, "cookie run should be in flight");
+    // What `replace_cookies` does around its file write.
+    ytdlp::begin_cookie_change();
+    std::fs::write(&cookies, fresh).unwrap();
+    ytdlp::forget_sabr_only_session();
+
+    extraction.await.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&cookies).unwrap(),
+        fresh,
+        "the stale run's rewrite must not overwrite the newer upload"
+    );
+}
+
+/// SABR-only fast path with a jar that can't be staged (it's a
+/// directory): the cookie-less run comes up empty, but a "cookie" run
+/// would be identical to it, so no second subprocess is started.
+#[tokio::test]
+async fn memo_skipped_run_does_not_repeat_itself_when_cookies_cannot_be_staged() {
+    let fx = Fixture::new(DIRECT_JSON, SABR_ONLY_JSON);
+    let cookies = fx.dir.join("cookies.txt");
+    std::fs::remove_file(&cookies).unwrap();
+    std::fs::create_dir(&cookies).unwrap();
+    let cfg = config_with_ytdlp(&fx.shim);
+    ytdlp::remember_sabr_only_session();
+
+    let result = ytdlp::extract(&cfg, "vid-1").await.unwrap();
+    assert_eq!(result.title.as_deref(), Some("SABR"));
+    assert_eq!(result.usable_format_count(), 0);
+    let calls = fx.invocations();
+    assert_eq!(
+        calls.len(),
+        1,
+        "no identical second run expected: {calls:?}"
+    );
+    assert!(!calls[0].contains("--cookies"));
 }
