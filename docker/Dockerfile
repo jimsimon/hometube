@@ -121,7 +121,7 @@ RUN mkdir -p /usr/local/lib/hometube \
 # — without the package-wrapper subdirectory the loader silently
 # ignores the plugin. The release zip lays out the inner tree (`yt_dlp_plugins/`)
 # so we extract it under a `bgutil/` wrapper.
-ARG BGUTIL_VERSION=2.0.0
+ARG BGUTIL_VERSION=2.0.2
 RUN curl -fsSL \
         "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${BGUTIL_VERSION}/bgutil-ytdlp-pot-provider.zip" \
         -o /tmp/pot-plugin.zip \
