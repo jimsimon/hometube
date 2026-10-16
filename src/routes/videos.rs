@@ -698,6 +698,16 @@ pub struct FormatQuery {
 /// range are already cached on disk, the response is served directly from
 /// the filesystem. Otherwise, bytes are proxied from upstream and
 /// tee-cached into aligned chunks for future requests.
+///
+/// Chunks are only reused when they were copied from the *same upstream
+/// file* the manifest currently describes (see
+/// [`segment_store::format_fingerprint`]). YouTube re-encodes format
+/// files from time to time; serving bytes from the previous encode
+/// against the new file's init/index ranges hands the browser
+/// undecodable media, and Shaka Player responds by permanently
+/// disabling every variant it trips over until only the lowest rung is
+/// left. Chunks from an old encode are bypassed and purged in the
+/// background.
 pub async fn get_format(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -732,6 +742,10 @@ pub async fn get_format(
     // Guard against negative sentinel values (yt-dlp may use -1 for unknown).
     let total_size: Option<u64> = format.filesize.and_then(|s| u64::try_from(s).ok());
 
+    // Identity of the upstream file this extraction points at. Cached
+    // chunks are only trusted when they were written from the same file.
+    let fingerprint = segment_store::format_fingerprint(format);
+
     // Parse the incoming Range header to determine byte offsets.
     let range_header = headers
         .get(header::RANGE)
@@ -744,12 +758,38 @@ pub async fn get_format(
     // If we have a defined range with known end AND all chunks are cached, serve from disk.
     // If the file read fails (e.g., eviction race), we fall through to the upstream path.
     if let Some((byte_start, Some(end))) = parsed_range {
-        let is_cached =
-            segment_store::range_fully_cached(&state.db, &q.video_id, &q.format, byte_start, end)
-                .await
-                .unwrap_or(false);
+        let status = segment_store::range_status(
+            &state.db,
+            &q.video_id,
+            &q.format,
+            fingerprint.as_deref(),
+            byte_start,
+            end,
+        )
+        .await;
 
-        if is_cached {
+        if status.stale_chunks > 0 {
+            // The on-disk copy of this format belongs to a different
+            // encode of the file (or predates fingerprinting). It can
+            // never be served again, so reclaim the space now rather
+            // than waiting for LRU eviction.
+            warn!(
+                video_id = %q.video_id,
+                format = %q.format,
+                fingerprint = fingerprint.as_deref().unwrap_or("-"),
+                stale_chunks = status.stale_chunks,
+                "segment cache holds chunks from a different upstream file; purging"
+            );
+            let pool = state.db.clone();
+            let vid = q.video_id.clone();
+            let fmt = q.format.clone();
+            let fp = fingerprint.clone();
+            tokio::spawn(async move {
+                segment_store::purge_stale_chunks(&pool, &vid, &fmt, fp.as_deref()).await;
+            });
+        }
+
+        if status.fully_cached {
             let read_result = segment_store::read_range_from_cache(
                 &state.config.cache_dir,
                 &q.video_id,
@@ -821,6 +861,18 @@ pub async fn get_format(
     }
     let res = req.send().await.map_err(AppError::Http)?;
     let status = res.status();
+    if !status.is_success() {
+        // Previously invisible: the status was passed straight through
+        // to the player, so an upstream 403 (expired/revoked URL) or 416
+        // (range beyond the current file) left no trace server-side.
+        warn!(
+            video_id = %q.video_id,
+            format = %q.format,
+            %status,
+            range = range_header.as_deref().unwrap_or("-"),
+            "upstream format fetch returned non-2xx"
+        );
+    }
     let upstream_content_type = res
         .headers()
         .get(header::CONTENT_TYPE)
@@ -867,33 +919,39 @@ pub async fn get_format(
         .and_then(parse_content_range_start)
         .or_else(|| parsed_range.map(|(s, _)| s));
 
+    // Never tee an error body into the chunk cache: a non-2xx response
+    // carries an error page, not media bytes.
+    let cacheable = status.is_success();
+
     let raw_stream = res.bytes_stream().map_err(std::io::Error::other);
-    let body = if let Some(start) = stream_start {
+    let body = if let (true, Some(start)) = (cacheable, stream_start) {
         let tee = TeeStream::new(
             Box::pin(raw_stream),
             state.db.clone(),
             state.config.cache_dir.clone(),
             q.video_id.clone(),
             q.format.clone(),
+            fingerprint.clone(),
             start,
             effective_total,
         );
         Body::from_stream(tee)
+    } else if cacheable
+        && (!range_header.as_ref().is_some_and(|r| r.contains('=')) || status == StatusCode::OK)
+    {
+        let tee = TeeStream::new(
+            Box::pin(raw_stream),
+            state.db.clone(),
+            state.config.cache_dir.clone(),
+            q.video_id.clone(),
+            q.format.clone(),
+            fingerprint.clone(),
+            0,
+            effective_total,
+        );
+        Body::from_stream(tee)
     } else {
-        if !range_header.as_ref().is_some_and(|r| r.contains('=')) || status == StatusCode::OK {
-            let tee = TeeStream::new(
-                Box::pin(raw_stream),
-                state.db.clone(),
-                state.config.cache_dir.clone(),
-                q.video_id.clone(),
-                q.format.clone(),
-                0,
-                effective_total,
-            );
-            Body::from_stream(tee)
-        } else {
-            Body::from_stream(raw_stream)
-        }
+        Body::from_stream(raw_stream)
     };
 
     let mut response = Response::new(body);

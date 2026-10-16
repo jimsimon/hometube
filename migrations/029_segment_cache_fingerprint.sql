@@ -1,0 +1,18 @@
+-- Record which upstream file each cached chunk was copied from.
+--
+-- YouTube periodically re-encodes the files behind a video's adaptive
+-- formats (the `lmt=` last-modified stamp on the `videoplayback` URL
+-- changes, and so do the bytes). The chunk cache was keyed only on
+-- `(video_id, format_id, segment_number)`, so after a re-encode it kept
+-- serving bytes from the *old* file against the init/index ranges of the
+-- *new* one. The browser could not decode the result and Shaka Player
+-- permanently disabled every variant it tripped over, collapsing the
+-- quality menu to a single rung.
+--
+-- `fingerprint` identifies the upstream file a chunk came from (see
+-- `segment_store::format_fingerprint`). A cache lookup only counts chunks
+-- whose fingerprint matches the format's current one; mismatched chunks
+-- are bypassed and purged lazily. Pre-existing rows are NULL, which never
+-- matches a fingerprinted format, so chunks written before this migration
+-- are treated as stale and re-fetched on their next request.
+ALTER TABLE segment_cache ADD COLUMN fingerprint TEXT;
