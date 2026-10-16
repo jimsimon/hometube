@@ -12,6 +12,14 @@
 //! ```
 //!
 //! SQLite `segment_cache` table tracks every chunk for LRU eviction.
+//!
+//! Every chunk also records a **fingerprint** of the upstream file it was
+//! copied from (see [`format_fingerprint`]). YouTube re-encodes the files
+//! behind a video's formats from time to time; the byte offsets in the
+//! synthesized DASH manifest always describe the *current* file, so bytes
+//! cached from an older one must never be served against it. Lookups only
+//! count chunks whose fingerprint matches, and mismatched chunks are
+//! purged (see [`purge_stale_chunks`]).
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -20,9 +28,10 @@ use std::task::{Context, Poll};
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use sqlx::SqlitePool;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{AppError, AppResult};
+use crate::services::ytdlp::Format;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,36 +90,180 @@ pub fn chunk_byte_start(chunk_num: u32) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Fingerprints
+// ---------------------------------------------------------------------------
+
+/// Identify the upstream file behind a format so cached chunks can be
+/// tied to it.
+///
+/// YouTube's `videoplayback` URLs carry an `lmt=` (last-modified, µs)
+/// query parameter that changes whenever the file is re-encoded, which
+/// is the most precise signal available. We fall back to the URL's
+/// `clen=` (content length) and then yt-dlp's `filesize`, either of
+/// which still catches the common case where a re-encode changes the
+/// file's length. Returns `None` when nothing identifying is available;
+/// such formats keep the legacy "any chunk matches" behaviour.
+///
+/// The value is prefixed with its source (`lmt:`, `clen:`, `size:`) so
+/// fingerprints derived from different signals never collide.
+pub fn format_fingerprint(format: &Format) -> Option<String> {
+    if let Some(url) = format.url.as_deref() {
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            let mut lmt = None;
+            let mut clen = None;
+            for (k, v) in parsed.query_pairs() {
+                match &*k {
+                    "lmt" if !v.is_empty() => lmt = Some(v.into_owned()),
+                    "clen" if !v.is_empty() => clen = Some(v.into_owned()),
+                    _ => {}
+                }
+            }
+            if let Some(lmt) = lmt {
+                return Some(format!("lmt:{lmt}"));
+            }
+            if let Some(clen) = clen {
+                return Some(format!("clen:{clen}"));
+            }
+        }
+    }
+    format
+        .filesize
+        .filter(|s| *s > 0)
+        .map(|s| format!("size:{s}"))
+}
+
+// ---------------------------------------------------------------------------
 // DB queries
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if ALL chunks covering `[byte_start, byte_end]` are present
-/// in the cache.
-pub async fn range_fully_cached(
+/// Result of [`range_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RangeStatus {
+    /// Every chunk covering the requested range is on disk **and** was
+    /// copied from the file identified by the current fingerprint.
+    pub fully_cached: bool,
+    /// Number of chunks cached for this `(video_id, format_id)` — across
+    /// the whole file, not just the requested range — whose fingerprint
+    /// does not match the current one. Includes pre-fingerprint rows
+    /// (`NULL`) when the format now has a fingerprint. Anything > 0
+    /// means the on-disk copy belongs to a different encode of the
+    /// file and should be purged.
+    pub stale_chunks: u64,
+}
+
+/// Check whether `[byte_start, byte_end]` can be served from cache for
+/// the upstream file identified by `fingerprint`, and count any chunks
+/// left over from a different upstream file.
+///
+/// `fingerprint IS ?` is SQLite's null-safe equality: a `None`
+/// fingerprint matches only `NULL` rows, so formats we can't fingerprint
+/// keep working against chunks that were also stored without one.
+pub async fn range_status(
     pool: &SqlitePool,
     video_id: &str,
     format_id: &str,
+    fingerprint: Option<&str>,
     byte_start: u64,
     byte_end: u64,
-) -> AppResult<bool> {
+) -> RangeStatus {
     let first_chunk = chunk_index(byte_start);
     let last_chunk = chunk_index(byte_end);
     let needed = (last_chunk - first_chunk + 1) as i64;
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM segment_cache \
-         WHERE video_id = ? AND format_id = ? \
-         AND segment_number >= ? AND segment_number <= ?",
+    let row: Result<(i64, i64), _> = sqlx::query_as(
+        "SELECT \
+            COALESCE(SUM(CASE WHEN fingerprint IS ? \
+                               AND segment_number >= ? AND segment_number <= ? \
+                          THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN fingerprint IS NOT ? THEN 1 ELSE 0 END), 0) \
+         FROM segment_cache \
+         WHERE video_id = ? AND format_id = ?",
+    )
+    .bind(fingerprint)
+    .bind(first_chunk as i64)
+    .bind(last_chunk as i64)
+    .bind(fingerprint)
+    .bind(video_id)
+    .bind(format_id)
+    .fetch_one(pool)
+    .await;
+
+    match row {
+        Ok((matching, stale)) => RangeStatus {
+            fully_cached: matching >= needed,
+            stale_chunks: stale.max(0) as u64,
+        },
+        Err(err) => {
+            debug!(%err, %video_id, %format_id, "segment cache lookup failed");
+            RangeStatus::default()
+        }
+    }
+}
+
+/// Delete every chunk of `(video_id, format_id)` whose fingerprint does
+/// not match `fingerprint` — i.e. chunks copied from an older encode of
+/// the file that can no longer be served against the current manifest.
+///
+/// Returns `(chunks_removed, bytes_freed)`. Each row is deleted before
+/// its file, and only if its fingerprint still mismatches at that
+/// moment, so a concurrent [`store_chunk`] that has already refreshed
+/// the chunk is left alone.
+pub async fn purge_stale_chunks(
+    pool: &SqlitePool,
+    video_id: &str,
+    format_id: &str,
+    fingerprint: Option<&str>,
+) -> (u64, u64) {
+    let rows: Vec<(i64, String, i64)> = match sqlx::query_as(
+        "SELECT id, file_path, file_size_bytes FROM segment_cache \
+         WHERE video_id = ? AND format_id = ? AND fingerprint IS NOT ?",
     )
     .bind(video_id)
     .bind(format_id)
-    .bind(first_chunk as i64)
-    .bind(last_chunk as i64)
-    .fetch_one(pool)
+    .bind(fingerprint)
+    .fetch_all(pool)
     .await
-    .unwrap_or(0);
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!(%err, %video_id, %format_id, "listing stale chunks failed");
+            return (0, 0);
+        }
+    };
 
-    Ok(count >= needed)
+    let mut removed = 0u64;
+    let mut bytes = 0u64;
+    for (id, path, size) in rows {
+        let deleted =
+            sqlx::query("DELETE FROM segment_cache WHERE id = ? AND fingerprint IS NOT ?")
+                .bind(id)
+                .bind(fingerprint)
+                .execute(pool)
+                .await;
+        match deleted {
+            Ok(res) if res.rows_affected() == 1 => {
+                if let Err(err) = tokio::fs::remove_file(&path).await {
+                    debug!(%path, %err, "failed to remove stale chunk file");
+                }
+                removed += 1;
+                bytes += size.max(0) as u64;
+            }
+            Ok(_) => {}
+            Err(err) => debug!(%err, id, "failed to delete stale chunk row"),
+        }
+    }
+
+    if removed > 0 {
+        info!(
+            %video_id,
+            %format_id,
+            fingerprint = fingerprint.unwrap_or("-"),
+            chunks = removed,
+            bytes,
+            "purged stale segment cache chunks (upstream file changed)"
+        );
+    }
+    (removed, bytes)
 }
 
 /// Touch `last_accessed_at` for chunks in a range (LRU bookkeeping).
@@ -140,6 +293,10 @@ pub async fn touch_chunks(
 
 /// Write a single chunk to disk and insert/update the DB tracking row.
 ///
+/// `fingerprint` identifies the upstream file the bytes came from (see
+/// [`format_fingerprint`]); it is what later lets [`range_status`] tell
+/// a current chunk from one left over after YouTube re-encoded the file.
+///
 /// Uses atomic write (temp file + rename) to prevent concurrent readers
 /// from observing partially-written data.
 pub async fn store_chunk(
@@ -147,6 +304,7 @@ pub async fn store_chunk(
     cache_dir: &str,
     video_id: &str,
     format_id: &str,
+    fingerprint: Option<&str>,
     chunk_num: u32,
     data: &[u8],
 ) -> AppResult<()> {
@@ -171,11 +329,14 @@ pub async fn store_chunk(
 
     // Upsert the DB row.
     sqlx::query(
-        "INSERT INTO segment_cache (video_id, format_id, segment_number, file_path, file_size_bytes) \
-         VALUES (?, ?, ?, ?, ?) \
+        "INSERT INTO segment_cache \
+            (video_id, format_id, segment_number, file_path, file_size_bytes, fingerprint) \
+         VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(video_id, format_id, segment_number) DO UPDATE SET \
             file_path = excluded.file_path, \
             file_size_bytes = excluded.file_size_bytes, \
+            fingerprint = excluded.fingerprint, \
+            cached_at = unixepoch(), \
             last_accessed_at = unixepoch()",
     )
     .bind(video_id)
@@ -183,16 +344,17 @@ pub async fn store_chunk(
     .bind(chunk_num as i64)
     .bind(&path_str)
     .bind(size)
+    .bind(fingerprint)
     .execute(pool)
     .await?;
 
-    debug!(%video_id, %format_id, chunk_num, size, "stored chunk");
+    debug!(%video_id, %format_id, chunk_num, size, fingerprint = fingerprint.unwrap_or("-"), "stored chunk");
     Ok(())
 }
 
 /// Read bytes from cached chunks covering `[byte_start, byte_end]`.
 ///
-/// Caller MUST ensure all chunks exist (via `range_fully_cached`).
+/// Caller MUST ensure all chunks exist (via [`range_status`]).
 /// Returns the exact bytes for the requested range, slicing within
 /// the first and last chunk as needed.
 pub async fn read_range_from_cache(
@@ -320,15 +482,19 @@ pub struct TeeStream {
 impl TeeStream {
     /// Wrap an upstream byte stream for tee-caching.
     ///
+    /// - `fingerprint`: identity of the upstream file being streamed (see
+    ///   [`format_fingerprint`]), recorded on every chunk written
     /// - `range_start`: absolute byte offset of the first byte in this stream
     /// - `total_size`: total file size (for deciding whether to cache the final
     ///   partial chunk)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
         pool: SqlitePool,
         cache_dir: String,
         video_id: String,
         format_id: String,
+        fingerprint: Option<String>,
         range_start: u64,
         total_size: Option<u64>,
     ) -> Self {
@@ -345,6 +511,7 @@ impl TeeStream {
             cache_dir,
             video_id,
             format_id,
+            fingerprint,
             range_start,
             total_size,
         ));
@@ -395,15 +562,18 @@ impl Stream for TeeStream {
 ///
 /// Receives `TeeMsg` items sequentially from the MPSC channel, accumulates
 /// bytes in a buffer, and writes complete aligned chunks to disk.
+#[allow(clippy::too_many_arguments)]
 async fn tee_writer_task(
     mut rx: tokio::sync::mpsc::Receiver<TeeMsg>,
     pool: SqlitePool,
     cache_dir: String,
     video_id: String,
     format_id: String,
+    fingerprint: Option<String>,
     range_start: u64,
     total_size: Option<u64>,
 ) {
+    let fingerprint = fingerprint.as_deref();
     let mut buf = BytesMut::new();
     let mut position: u64 = range_start;
 
@@ -412,8 +582,16 @@ async fn tee_writer_task(
             TeeMsg::Data(bytes) => {
                 buf.extend_from_slice(&bytes);
                 position += bytes.len() as u64;
-                flush_complete_chunks(&pool, &cache_dir, &video_id, &format_id, &mut buf, position)
-                    .await;
+                flush_complete_chunks(
+                    &pool,
+                    &cache_dir,
+                    &video_id,
+                    &format_id,
+                    fingerprint,
+                    &mut buf,
+                    position,
+                )
+                .await;
             }
             TeeMsg::Eof => {
                 break;
@@ -432,7 +610,16 @@ async fn tee_writer_task(
 
         if is_end_of_file && starts_at_boundary {
             let data = buf.freeze();
-            if let Err(err) = store_chunk(&pool, &cache_dir, &video_id, &format_id, cn, &data).await
+            if let Err(err) = store_chunk(
+                &pool,
+                &cache_dir,
+                &video_id,
+                &format_id,
+                fingerprint,
+                cn,
+                &data,
+            )
+            .await
             {
                 debug!(%err, cn, "failed to cache final chunk (non-fatal)");
             }
@@ -454,6 +641,7 @@ async fn flush_complete_chunks(
     cache_dir: &str,
     video_id: &str,
     format_id: &str,
+    fingerprint: Option<&str>,
     buf: &mut BytesMut,
     position: u64,
 ) {
@@ -479,7 +667,9 @@ async fn flush_complete_chunks(
             // We have a full chunk — write it out.
             let chunk_data = buf.split_to(CHUNK_SIZE as usize);
             let data = chunk_data.freeze();
-            if let Err(err) = store_chunk(pool, cache_dir, video_id, format_id, cn, &data).await {
+            if let Err(err) =
+                store_chunk(pool, cache_dir, video_id, format_id, fingerprint, cn, &data).await
+            {
                 debug!(%err, cn, "failed to cache chunk (non-fatal)");
             }
         } else {
@@ -561,7 +751,7 @@ mod tests {
         let cache_dir = dir.path().to_str().unwrap();
         let data = vec![42u8; CHUNK_SIZE as usize];
 
-        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 0, &data)
             .await
             .unwrap();
 
@@ -578,34 +768,179 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn range_fully_cached_reports_correctly() {
+    async fn range_status_reports_correctly() {
         let pool = test_pool().await;
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().to_str().unwrap();
+        let fp = Some("lmt:1");
 
         // No chunks cached yet.
-        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE - 1)
-            .await
-            .unwrap();
-        assert!(!cached);
+        let st = range_status(&pool, "vid1", "137", fp, 0, CHUNK_SIZE - 1).await;
+        assert_eq!(st, RangeStatus::default());
 
         // Store chunk 0.
         let data = vec![1u8; CHUNK_SIZE as usize];
-        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+        store_chunk(&pool, cache_dir, "vid1", "137", fp, 0, &data)
             .await
             .unwrap();
 
         // Now chunk 0 range is cached.
-        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE - 1)
-            .await
-            .unwrap();
-        assert!(cached);
+        let st = range_status(&pool, "vid1", "137", fp, 0, CHUNK_SIZE - 1).await;
+        assert!(st.fully_cached);
+        assert_eq!(st.stale_chunks, 0);
 
         // But a range spanning chunks 0-1 is not fully cached.
-        let cached = range_fully_cached(&pool, "vid1", "137", 0, CHUNK_SIZE * 2 - 1)
+        let st = range_status(&pool, "vid1", "137", fp, 0, CHUNK_SIZE * 2 - 1).await;
+        assert!(!st.fully_cached);
+        assert_eq!(st.stale_chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn range_status_rejects_chunks_from_other_fingerprint() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        let data = vec![1u8; CHUNK_SIZE as usize];
+        store_chunk(&pool, cache_dir, "vid1", "137", Some("lmt:old"), 0, &data)
             .await
             .unwrap();
-        assert!(!cached);
+        // A legacy row written before fingerprinting existed.
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 1, &data)
+            .await
+            .unwrap();
+
+        // Same encode: chunk 0 hits, chunk 1 (NULL) counts as stale.
+        let st = range_status(&pool, "vid1", "137", Some("lmt:old"), 0, CHUNK_SIZE - 1).await;
+        assert!(st.fully_cached);
+        assert_eq!(st.stale_chunks, 1);
+
+        // New encode: nothing matches, both chunks are stale.
+        let st = range_status(&pool, "vid1", "137", Some("lmt:new"), 0, CHUNK_SIZE - 1).await;
+        assert!(!st.fully_cached);
+        assert_eq!(st.stale_chunks, 2);
+
+        // No fingerprint at all: only the NULL row matches.
+        let st = range_status(&pool, "vid1", "137", None, CHUNK_SIZE, CHUNK_SIZE * 2 - 1).await;
+        assert!(st.fully_cached);
+        assert_eq!(st.stale_chunks, 1);
+        let st = range_status(&pool, "vid1", "137", None, 0, CHUNK_SIZE - 1).await;
+        assert!(!st.fully_cached);
+    }
+
+    #[tokio::test]
+    async fn purge_stale_chunks_removes_only_mismatched() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+
+        let data = vec![1u8; CHUNK_SIZE as usize];
+        store_chunk(&pool, cache_dir, "vid1", "137", Some("lmt:old"), 0, &data)
+            .await
+            .unwrap();
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 1, &data)
+            .await
+            .unwrap();
+        store_chunk(&pool, cache_dir, "vid1", "137", Some("lmt:new"), 2, &data)
+            .await
+            .unwrap();
+        // A different format of the same video must be untouched.
+        store_chunk(&pool, cache_dir, "vid1", "251", Some("lmt:old"), 0, &data)
+            .await
+            .unwrap();
+
+        let (removed, bytes) = purge_stale_chunks(&pool, "vid1", "137", Some("lmt:new")).await;
+        assert_eq!(removed, 2);
+        assert_eq!(bytes, CHUNK_SIZE * 2);
+
+        assert!(!chunk_path(cache_dir, "vid1", "137", 0).exists());
+        assert!(!chunk_path(cache_dir, "vid1", "137", 1).exists());
+        assert!(chunk_path(cache_dir, "vid1", "137", 2).exists());
+        assert!(chunk_path(cache_dir, "vid1", "251", 0).exists());
+
+        let remaining: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT format_id, segment_number, fingerprint FROM segment_cache \
+             WHERE video_id = 'vid1' ORDER BY format_id, segment_number",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining,
+            vec![
+                ("137".to_string(), 2, Some("lmt:new".to_string())),
+                ("251".to_string(), 0, Some("lmt:old".to_string())),
+            ]
+        );
+
+        // Idempotent.
+        let (removed, _) = purge_stale_chunks(&pool, "vid1", "137", Some("lmt:new")).await;
+        assert_eq!(removed, 0);
+    }
+
+    fn format_with(url: Option<&str>, filesize: Option<i64>) -> Format {
+        Format {
+            format_id: "137".into(),
+            ext: None,
+            height: None,
+            width: None,
+            tbr: None,
+            vbr: None,
+            abr: None,
+            fps: None,
+            vcodec: None,
+            acodec: None,
+            filesize,
+            url: url.map(String::from),
+            protocol: None,
+            language: None,
+            language_preference: None,
+            format_note: None,
+        }
+    }
+
+    #[test]
+    fn format_fingerprint_prefers_lmt_then_clen_then_filesize() {
+        let f = format_with(
+            Some("https://rr1.googlevideo.com/videoplayback?expire=1&clen=123&lmt=1758150000000000&sig=x"),
+            Some(123),
+        );
+        assert_eq!(
+            format_fingerprint(&f).as_deref(),
+            Some("lmt:1758150000000000")
+        );
+
+        let f = format_with(
+            Some("https://rr1.googlevideo.com/videoplayback?clen=123&sig=x"),
+            Some(999),
+        );
+        assert_eq!(format_fingerprint(&f).as_deref(), Some("clen:123"));
+
+        let f = format_with(Some("https://example.com/fake"), Some(999));
+        assert_eq!(format_fingerprint(&f).as_deref(), Some("size:999"));
+
+        // Negative/zero filesize sentinels and missing data yield None.
+        let f = format_with(Some("https://example.com/fake"), Some(-1));
+        assert_eq!(format_fingerprint(&f), None);
+        let f = format_with(None, None);
+        assert_eq!(format_fingerprint(&f), None);
+
+        // An unparsable URL falls back to filesize rather than failing.
+        let f = format_with(Some("not a url"), Some(5));
+        assert_eq!(format_fingerprint(&f).as_deref(), Some("size:5"));
+    }
+
+    #[test]
+    fn format_fingerprint_changes_when_file_is_regenerated() {
+        let before = format_with(
+            Some("https://x/videoplayback?clen=100&lmt=1700000000000000"),
+            Some(100),
+        );
+        let after = format_with(
+            Some("https://x/videoplayback?clen=100&lmt=1758150000000000"),
+            Some(100),
+        );
+        assert_ne!(format_fingerprint(&before), format_fingerprint(&after));
     }
 
     #[tokio::test]
@@ -616,7 +951,7 @@ mod tests {
 
         // Store a chunk with sequential bytes.
         let data: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
-        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 0, &data)
             .await
             .unwrap();
 
@@ -636,7 +971,7 @@ mod tests {
         let cache_dir = dir.path().to_str().unwrap();
 
         let data = vec![0u8; CHUNK_SIZE as usize];
-        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 0, &data)
             .await
             .unwrap();
 
@@ -660,7 +995,7 @@ mod tests {
         let cache_dir = dir.path().to_str().unwrap();
 
         let data = vec![99u8; CHUNK_SIZE as usize];
-        store_chunk(&pool, cache_dir, "vid1", "137", 0, &data)
+        store_chunk(&pool, cache_dir, "vid1", "137", None, 0, &data)
             .await
             .unwrap();
 
@@ -707,7 +1042,7 @@ mod tests {
         let mut buf = BytesMut::from(&vec![7u8; (CHUNK_SIZE * 3 / 2) as usize][..]);
         let position = CHUNK_SIZE * 3 / 2; // 3 MiB received
 
-        flush_complete_chunks(&pool, cache_dir, "vid1", "137", &mut buf, position).await;
+        flush_complete_chunks(&pool, cache_dir, "vid1", "137", None, &mut buf, position).await;
 
         // Should have written 1 full chunk (2 MiB), leaving 1 MiB in buffer.
         assert_eq!(buf.len(), (CHUNK_SIZE / 2) as usize);
@@ -732,7 +1067,7 @@ mod tests {
         let start_offset = CHUNK_SIZE / 2; // 1 MiB into chunk 0
         let position = start_offset + data_len as u64;
 
-        flush_complete_chunks(&pool, cache_dir, "vid1", "137", &mut buf, position).await;
+        flush_complete_chunks(&pool, cache_dir, "vid1", "137", None, &mut buf, position).await;
 
         // The first 1 MiB should be discarded (tail of chunk 0).
         // Then we have 2 MiB aligned at chunk 1 boundary → written.
