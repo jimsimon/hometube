@@ -768,25 +768,27 @@ pub async fn get_format(
         )
         .await;
 
-        if status.stale_chunks > 0 {
+        if status.has_stale {
             // The on-disk copy of this format belongs to a different
             // encode of the file (or predates fingerprinting). It can
             // never be served again, so reclaim the space now rather
-            // than waiting for LRU eviction.
-            warn!(
-                video_id = %q.video_id,
-                format = %q.format,
-                fingerprint = fingerprint.as_deref().unwrap_or("-"),
-                stale_chunks = status.stale_chunks,
-                "segment cache holds chunks from a different upstream file; purging"
-            );
-            let pool = state.db.clone();
-            let vid = q.video_id.clone();
-            let fmt = q.format.clone();
-            let fp = fingerprint.clone();
-            tokio::spawn(async move {
-                segment_store::purge_stale_chunks(&pool, &vid, &fmt, fp.as_deref()).await;
-            });
+            // than waiting for LRU eviction. Segment requests arrive in
+            // parallel and all of them see the stale rows until the
+            // purge lands; `schedule_stale_purge` runs it once per
+            // format, so only the request that scheduled it logs.
+            if segment_store::schedule_stale_purge(
+                &state.db,
+                &q.video_id,
+                &q.format,
+                fingerprint.as_deref(),
+            ) {
+                warn!(
+                    video_id = %q.video_id,
+                    format = %q.format,
+                    fingerprint = fingerprint.as_deref().unwrap_or("-"),
+                    "segment cache holds chunks from a different upstream file; purging"
+                );
+            }
         }
 
         if status.fully_cached {

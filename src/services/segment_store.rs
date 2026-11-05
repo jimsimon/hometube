@@ -21,8 +21,11 @@
 //! count chunks whose fingerprint matches, and mismatched chunks are
 //! purged (see [`purge_stale_chunks`]).
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{Context, Poll};
 
 use bytes::{Bytes, BytesMut};
@@ -90,6 +93,103 @@ pub fn chunk_byte_start(chunk_num: u32) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Coordination between chunk writers and the stale purge
+// ---------------------------------------------------------------------------
+
+/// Number of lock stripes guarding chunk files. A collision between two
+/// unrelated chunks only costs one of them a short wait, so a modest
+/// count is plenty.
+const CHUNK_LOCK_STRIPES: usize = 64;
+
+/// Striped async locks keyed by `(video_id, format_id, chunk_num)`.
+///
+/// [`store_chunk`] and [`purge_stale_chunks`] both act on the same
+/// deterministic chunk path: the writer renames a fresh copy onto it
+/// and upserts the row, the purge deletes the row and unlinks the path.
+/// Without mutual exclusion the purge could delete a *stale* row, then
+/// unlink the *fresh* file a concurrent writer had just installed,
+/// leaving a current-fingerprint row with no file behind it. Both sides
+/// hold the chunk's stripe for their whole row-plus-file operation, so
+/// the purge's conditional `DELETE` sees either the stale row (and
+/// removes the stale file) or the fresh row (and leaves everything
+/// alone). The same lock serialises two writers of one chunk, which
+/// previously shared a single `.chunk.tmp` staging path.
+static CHUNK_LOCKS: LazyLock<Vec<tokio::sync::Mutex<()>>> = LazyLock::new(|| {
+    (0..CHUNK_LOCK_STRIPES)
+        .map(|_| tokio::sync::Mutex::new(()))
+        .collect()
+});
+
+fn chunk_lock(video_id: &str, format_id: &str, chunk_num: u32) -> &'static tokio::sync::Mutex<()> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    video_id.hash(&mut hasher);
+    format_id.hash(&mut hasher);
+    chunk_num.hash(&mut hasher);
+    &CHUNK_LOCKS[(hasher.finish() % CHUNK_LOCK_STRIPES as u64) as usize]
+}
+
+/// `(video_id, format_id)` pairs whose stale-chunk purge is currently
+/// running. A player fetches segments in parallel, and until the first
+/// purge has finished every one of those requests still observes the
+/// stale rows; this registry makes them schedule the purge once.
+static PURGES_IN_FLIGHT: LazyLock<std::sync::Mutex<HashSet<(String, String)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+fn purges_in_flight() -> std::sync::MutexGuard<'static, HashSet<(String, String)>> {
+    PURGES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Exclusive claim on the purge slot for one format, returned by
+/// [`begin_purge`]. Dropping it releases the slot so a later stale
+/// detection can schedule another purge.
+#[must_use = "dropping the guard immediately releases the purge slot"]
+pub struct PurgeGuard {
+    key: (String, String),
+}
+
+impl Drop for PurgeGuard {
+    fn drop(&mut self) {
+        purges_in_flight().remove(&self.key);
+    }
+}
+
+/// Claim the purge slot for `(video_id, format_id)`. Returns `None` when
+/// a purge for that format is already in flight.
+pub fn begin_purge(video_id: &str, format_id: &str) -> Option<PurgeGuard> {
+    let key = (video_id.to_string(), format_id.to_string());
+    // Release the registry lock before constructing the guard: a guard
+    // built while the lock is held would, if dropped, re-lock it.
+    let inserted = purges_in_flight().insert(key.clone());
+    inserted.then(|| PurgeGuard { key })
+}
+
+/// Run [`purge_stale_chunks`] on a background task unless one is already
+/// running for this format. Returns `true` when a purge was scheduled,
+/// so the caller can log the detection exactly once.
+pub fn schedule_stale_purge(
+    pool: &SqlitePool,
+    video_id: &str,
+    format_id: &str,
+    fingerprint: Option<&str>,
+) -> bool {
+    let Some(guard) = begin_purge(video_id, format_id) else {
+        return false;
+    };
+    let pool = pool.clone();
+    let video_id = video_id.to_string();
+    let format_id = format_id.to_string();
+    let fingerprint = fingerprint.map(str::to_owned);
+    tokio::spawn(async move {
+        // Hold the slot until the purge has finished.
+        let _guard = guard;
+        purge_stale_chunks(&pool, &video_id, &format_id, fingerprint.as_deref()).await;
+    });
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Fingerprints
 // ---------------------------------------------------------------------------
 
@@ -142,22 +242,27 @@ pub struct RangeStatus {
     /// Every chunk covering the requested range is on disk **and** was
     /// copied from the file identified by the current fingerprint.
     pub fully_cached: bool,
-    /// Number of chunks cached for this `(video_id, format_id)` — across
-    /// the whole file, not just the requested range — whose fingerprint
-    /// does not match the current one. Includes pre-fingerprint rows
-    /// (`NULL`) when the format now has a fingerprint. Anything > 0
-    /// means the on-disk copy belongs to a different encode of the
-    /// file and should be purged.
-    pub stale_chunks: u64,
+    /// At least one chunk cached for this `(video_id, format_id)` —
+    /// anywhere in the file, not just the requested range — has a
+    /// fingerprint other than the current one. Includes pre-fingerprint
+    /// rows (`NULL`) when the format now has a fingerprint. When set, the
+    /// on-disk copy belongs to a different encode of the file and should
+    /// be purged (see [`schedule_stale_purge`]).
+    pub has_stale: bool,
 }
 
 /// Check whether `[byte_start, byte_end]` can be served from cache for
-/// the upstream file identified by `fingerprint`, and count any chunks
-/// left over from a different upstream file.
+/// the upstream file identified by `fingerprint`, and whether any chunk
+/// left over from a different upstream file exists.
 ///
 /// `fingerprint IS ?` is SQLite's null-safe equality: a `None`
 /// fingerprint matches only `NULL` rows, so formats we can't fingerprint
 /// keep working against chunks that were also stored without one.
+///
+/// Both sub-queries are bounded by the `(video_id, format_id,
+/// segment_number)` unique index, and the stale probe is an `EXISTS`
+/// that stops at the first mismatching row, so this stays cheap even
+/// though it runs on every ranged request.
 pub async fn range_status(
     pool: &SqlitePool,
     video_id: &str,
@@ -172,26 +277,27 @@ pub async fn range_status(
 
     let row: Result<(i64, i64), _> = sqlx::query_as(
         "SELECT \
-            COALESCE(SUM(CASE WHEN fingerprint IS ? \
-                               AND segment_number >= ? AND segment_number <= ? \
-                          THEN 1 ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN fingerprint IS NOT ? THEN 1 ELSE 0 END), 0) \
-         FROM segment_cache \
-         WHERE video_id = ? AND format_id = ?",
+            (SELECT COUNT(*) FROM segment_cache \
+              WHERE video_id = ? AND format_id = ? AND fingerprint IS ? \
+                AND segment_number >= ? AND segment_number <= ?), \
+            EXISTS(SELECT 1 FROM segment_cache \
+                    WHERE video_id = ? AND format_id = ? AND fingerprint IS NOT ?)",
     )
+    .bind(video_id)
+    .bind(format_id)
     .bind(fingerprint)
     .bind(first_chunk as i64)
     .bind(last_chunk as i64)
-    .bind(fingerprint)
     .bind(video_id)
     .bind(format_id)
+    .bind(fingerprint)
     .fetch_one(pool)
     .await;
 
     match row {
         Ok((matching, stale)) => RangeStatus {
             fully_cached: matching >= needed,
-            stale_chunks: stale.max(0) as u64,
+            has_stale: stale != 0,
         },
         Err(err) => {
             debug!(%err, %video_id, %format_id, "segment cache lookup failed");
@@ -204,18 +310,23 @@ pub async fn range_status(
 /// not match `fingerprint` — i.e. chunks copied from an older encode of
 /// the file that can no longer be served against the current manifest.
 ///
-/// Returns `(chunks_removed, bytes_freed)`. Each row is deleted before
-/// its file, and only if its fingerprint still mismatches at that
-/// moment, so a concurrent [`store_chunk`] that has already refreshed
-/// the chunk is left alone.
+/// Returns `(chunks_removed, bytes_freed)`. Each chunk is handled under
+/// its [`chunk_lock`]: the row is deleted only if its fingerprint still
+/// mismatches at that moment, and the file is unlinked only when the
+/// row was ours to delete. A concurrent [`store_chunk`] for the same
+/// chunk therefore either completes first (and is left alone) or waits
+/// until the stale copy is fully gone before installing its fresh one.
+///
+/// Callers that may run concurrently should go through
+/// [`schedule_stale_purge`] so the work is not duplicated.
 pub async fn purge_stale_chunks(
     pool: &SqlitePool,
     video_id: &str,
     format_id: &str,
     fingerprint: Option<&str>,
 ) -> (u64, u64) {
-    let rows: Vec<(i64, String, i64)> = match sqlx::query_as(
-        "SELECT id, file_path, file_size_bytes FROM segment_cache \
+    let rows: Vec<(i64, i64, String, i64)> = match sqlx::query_as(
+        "SELECT id, segment_number, file_path, file_size_bytes FROM segment_cache \
          WHERE video_id = ? AND format_id = ? AND fingerprint IS NOT ?",
     )
     .bind(video_id)
@@ -233,7 +344,9 @@ pub async fn purge_stale_chunks(
 
     let mut removed = 0u64;
     let mut bytes = 0u64;
-    for (id, path, size) in rows {
+    for (id, segment_number, path, size) in rows {
+        let chunk_num = u32::try_from(segment_number).unwrap_or(u32::MAX);
+        let _chunk_guard = chunk_lock(video_id, format_id, chunk_num).lock().await;
         let deleted =
             sqlx::query("DELETE FROM segment_cache WHERE id = ? AND fingerprint IS NOT ?")
                 .bind(id)
@@ -298,7 +411,9 @@ pub async fn touch_chunks(
 /// a current chunk from one left over after YouTube re-encoded the file.
 ///
 /// Uses atomic write (temp file + rename) to prevent concurrent readers
-/// from observing partially-written data.
+/// from observing partially-written data, and holds the chunk's
+/// [`chunk_lock`] across the write and the row upsert so neither a
+/// second writer nor [`purge_stale_chunks`] can interleave with it.
 pub async fn store_chunk(
     pool: &SqlitePool,
     cache_dir: &str,
@@ -316,6 +431,8 @@ pub async fn store_chunk(
     let path = chunk_path(cache_dir, video_id, format_id, chunk_num);
     let path_str = path.to_string_lossy().to_string();
     let size = data.len() as i64;
+
+    let _chunk_guard = chunk_lock(video_id, format_id, chunk_num).lock().await;
 
     // Write to a temporary file, then atomically rename. This prevents
     // concurrent readers from seeing partial data.
@@ -787,12 +904,12 @@ mod tests {
         // Now chunk 0 range is cached.
         let st = range_status(&pool, "vid1", "137", fp, 0, CHUNK_SIZE - 1).await;
         assert!(st.fully_cached);
-        assert_eq!(st.stale_chunks, 0);
+        assert!(!st.has_stale);
 
         // But a range spanning chunks 0-1 is not fully cached.
         let st = range_status(&pool, "vid1", "137", fp, 0, CHUNK_SIZE * 2 - 1).await;
         assert!(!st.fully_cached);
-        assert_eq!(st.stale_chunks, 0);
+        assert!(!st.has_stale);
     }
 
     #[tokio::test]
@@ -813,17 +930,17 @@ mod tests {
         // Same encode: chunk 0 hits, chunk 1 (NULL) counts as stale.
         let st = range_status(&pool, "vid1", "137", Some("lmt:old"), 0, CHUNK_SIZE - 1).await;
         assert!(st.fully_cached);
-        assert_eq!(st.stale_chunks, 1);
+        assert!(st.has_stale);
 
         // New encode: nothing matches, both chunks are stale.
         let st = range_status(&pool, "vid1", "137", Some("lmt:new"), 0, CHUNK_SIZE - 1).await;
         assert!(!st.fully_cached);
-        assert_eq!(st.stale_chunks, 2);
+        assert!(st.has_stale);
 
         // No fingerprint at all: only the NULL row matches.
         let st = range_status(&pool, "vid1", "137", None, CHUNK_SIZE, CHUNK_SIZE * 2 - 1).await;
         assert!(st.fully_cached);
-        assert_eq!(st.stale_chunks, 1);
+        assert!(st.has_stale);
         let st = range_status(&pool, "vid1", "137", None, 0, CHUNK_SIZE - 1).await;
         assert!(!st.fully_cached);
     }
@@ -876,6 +993,96 @@ mod tests {
         // Idempotent.
         let (removed, _) = purge_stale_chunks(&pool, "vid1", "137", Some("lmt:new")).await;
         assert_eq!(removed, 0);
+    }
+
+    /// A purge racing a writer for the same chunk must never leave a
+    /// current-fingerprint row whose file has been unlinked. Repeats the
+    /// race many times with both operations started concurrently; the
+    /// per-chunk lock makes every interleaving end in a consistent state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn purge_racing_store_never_strands_a_fresh_chunk() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+        let stale = vec![0xAAu8; 256];
+        let fresh = vec![0xBBu8; 256];
+
+        for _ in 0..40 {
+            store_chunk(&pool, cache_dir, "vid1", "137", Some("lmt:old"), 0, &stale)
+                .await
+                .unwrap();
+
+            let (purge, store) = tokio::join!(
+                purge_stale_chunks(&pool, "vid1", "137", Some("lmt:new")),
+                store_chunk(&pool, cache_dir, "vid1", "137", Some("lmt:new"), 0, &fresh),
+            );
+            store.unwrap();
+            // Either the purge got to the stale row first (1 removed) or
+            // the writer replaced it first and the purge found nothing to
+            // do (0 removed). Both are fine; what must never happen is the
+            // fresh row surviving without its file.
+            assert!(purge.0 <= 1, "at most the stale copy is purged");
+
+            let row: (Option<String>,) = sqlx::query_as(
+                "SELECT fingerprint FROM segment_cache \
+                 WHERE video_id = 'vid1' AND format_id = '137' AND segment_number = 0",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row.0.as_deref(), Some("lmt:new"));
+            let on_disk = tokio::fs::read(chunk_path(cache_dir, "vid1", "137", 0))
+                .await
+                .expect("fresh chunk file must survive the purge");
+            assert_eq!(on_disk, fresh);
+        }
+    }
+
+    #[test]
+    fn begin_purge_is_exclusive_per_format_until_released() {
+        let first = begin_purge("vidX", "137").expect("slot is free");
+        assert!(begin_purge("vidX", "137").is_none(), "already in flight");
+        // Other formats and videos are independent.
+        let other = begin_purge("vidX", "251").expect("different format");
+        assert!(begin_purge("vidY", "137").is_some());
+        drop(other);
+        drop(first);
+        assert!(begin_purge("vidX", "137").is_some(), "released on drop");
+    }
+
+    /// Parallel segment requests that all see the stale rows schedule a
+    /// single purge; once it has run the slot is free again.
+    #[tokio::test]
+    async fn schedule_stale_purge_runs_once_per_format() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().to_str().unwrap();
+        let data = vec![1u8; 64];
+        store_chunk(&pool, cache_dir, "vidS", "137", Some("lmt:old"), 0, &data)
+            .await
+            .unwrap();
+        store_chunk(&pool, cache_dir, "vidS", "137", Some("lmt:old"), 1, &data)
+            .await
+            .unwrap();
+
+        // The current-thread runtime does not poll the spawned purge
+        // until this test yields, so the second call deterministically
+        // observes the first one still in flight.
+        assert!(schedule_stale_purge(&pool, "vidS", "137", Some("lmt:new")));
+        assert!(!schedule_stale_purge(&pool, "vidS", "137", Some("lmt:new")));
+
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let left: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM segment_cache WHERE video_id = 'vidS'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if left == 0 && begin_purge("vidS", "137").is_some() {
+                return;
+            }
+        }
+        panic!("purge did not complete and release its slot");
     }
 
     fn format_with(url: Option<&str>, filesize: Option<i64>) -> Format {
