@@ -18,7 +18,9 @@
 //!   channel, deduped + sorted.
 //! - `GET /api/feed/up-next` — the next videos to play after the one
 //!   currently on screen, given a `from=channel:ID|video:ID`
-//!   context. Drops blocked + access-denied items.
+//!   context. Drops blocked + access-denied items; prefers unwatched
+//!   videos and pads with already-watched ones so autoplay always has
+//!   somewhere to go.
 
 use std::collections::HashSet;
 
@@ -922,10 +924,12 @@ const UP_NEXT_DEFAULT_LIMIT: usize = 10;
 pub struct UpNextQuery {
     /// Source context. Recognised values:
     ///
-    /// - `channel:<id>` — channel uploads, drawn from the discovery sidecar.
-    /// - `video:<id>` — fall back to "more from the same channel" or
-    ///   the new-videos feed if no channel context is available.
-    /// - missing — returns the new-videos feed.
+    /// - `channel:<id>` — that channel's archive (`channel_videos`).
+    /// - `video:<id>` — "more from the same channel" when the video's
+    ///   channel is known, otherwise the new-videos mix.
+    /// - missing — the new-videos mix across allowlisted channels.
+    ///
+    /// Individually-allowlisted videos are appended to every variant.
     #[serde(default)]
     pub from: Option<String>,
     /// Currently-playing video ID. Excluded from the result.
@@ -945,6 +949,22 @@ pub struct UpNextItem {
 }
 
 /// `GET /api/feed/up-next`.
+///
+/// Builds the queue from three pools, in priority order:
+///
+/// 1. The context channel's archive (`from=channel:ID`, or the owning
+///    channel of `from=video:ID`), or — with no context — a round-robin
+///    across every allowlisted channel's recent uploads.
+/// 2. The child's individually-allowlisted videos. Without this pool a
+///    child whose allowlist is video-only (no channels) always got an
+///    empty queue, so autoplay never advanced for them.
+/// 3. Videos the child has already watched. Unwatched candidates are
+///    preferred, but once a kid has seen everything their channels have
+///    to offer the queue used to collapse to nothing — and with it
+///    autoplay. Now already-seen items pad the tail instead.
+///
+/// Every candidate still passes `can_child_view`, and the currently
+/// playing video is always excluded.
 pub async fn up_next(
     State(state): State<AppState>,
     current: CurrentAccount,
@@ -952,33 +972,48 @@ pub async fn up_next(
 ) -> AppResult<Json<Vec<UpNextItem>>> {
     let limit = q.limit.unwrap_or(UP_NEXT_DEFAULT_LIMIT).clamp(1, 50);
 
-    // Parse `from`.
+    // Parse `from`. A `video:<id>` context resolves to that video's
+    // channel so "more from this channel" works from a video card too.
     let (kind, id) = parse_from(q.from.as_deref());
-
-    let raw: Vec<UpNextItem> = match (kind, id) {
-        (Some("channel"), Some(channel_id)) => {
-            up_next_from_channel(&state, current.id, channel_id).await?
-        }
-        _ => up_next_from_new_videos(&state, current.id, limit).await?,
+    let channel_ctx: Option<String> = match (kind, id) {
+        (Some("channel"), Some(channel_id)) => Some(channel_id.to_string()),
+        (Some("video"), Some(video_id)) => lookup_video_channel(&state.db, video_id).await,
+        _ => None,
     };
 
-    // Exclude videos the child has already watched so the queue
-    // actually rotates instead of resurfacing the same items.
+    let mut raw: Vec<UpNextItem> = match channel_ctx.as_deref() {
+        Some(channel_id) => up_next_from_channel(&state, current.id, channel_id).await?,
+        None => up_next_from_new_videos(&state, current.id, limit).await?,
+    };
+    raw.extend(up_next_from_allowlisted_videos(&state, current.id).await?);
+
+    // Prefer videos the child hasn't watched so the queue rotates, but
+    // keep the watched ones as a fallback pool rather than dropping
+    // them outright.
     let watched: HashSet<String> = child_watched_video_ids(&state.db, current.id)
         .await
         .unwrap_or_default();
 
-    // Drop the current video, watched items, and
-    // access-control failures.
-    let mut out = Vec::with_capacity(limit);
+    // Bound the per-candidate access checks (up to four queries each):
+    // three times the limit is plenty of headroom for the unwatched
+    // pass and still leaves a fallback pool.
+    let max_candidates = limit.saturating_mul(3).max(UP_NEXT_DEFAULT_LIMIT);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unwatched: Vec<UpNextItem> = Vec::with_capacity(limit);
+    let mut already_watched: Vec<UpNextItem> = Vec::new();
+    let mut considered = 0usize;
     for item in raw {
         if Some(&item.video_id) == q.current_video.as_ref() {
             continue;
         }
-        if watched.contains(&item.video_id) {
+        if !seen.insert(item.video_id.clone()) {
             continue;
         }
-        if can_child_view(
+        if unwatched.len() >= limit || considered >= max_candidates {
+            break;
+        }
+        considered += 1;
+        if !can_child_view(
             &state.db,
             current.id,
             &item.video_id,
@@ -987,13 +1022,69 @@ pub async fn up_next(
         .await
         .unwrap_or(false)
         {
-            out.push(item);
-            if out.len() >= limit {
-                break;
-            }
+            continue;
+        }
+        if watched.contains(&item.video_id) {
+            already_watched.push(item);
+        } else {
+            unwatched.push(item);
         }
     }
+
+    let mut out = unwatched;
+    if out.len() < limit {
+        let room = limit - out.len();
+        out.extend(already_watched.into_iter().take(room));
+    }
     Ok(Json(out))
+}
+
+/// Resolve the owning channel of `video_id` from the canonical `videos`
+/// table. Returns `None` when the video is unknown or its channel
+/// hasn't been recorded yet (stub rows from a hand-allowlist add).
+async fn lookup_video_channel(db: &sqlx::SqlitePool, video_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT channel_id FROM videos WHERE video_id = ?")
+        .bind(video_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
+/// The child's individually-allowlisted videos, newest additions first,
+/// shuffled with the same daily seed as the other pools so the order is
+/// stable within a day.
+async fn up_next_from_allowlisted_videos(
+    state: &AppState,
+    child_id: i64,
+) -> AppResult<Vec<UpNextItem>> {
+    let rows: Vec<UpNextRow> = sqlx::query_as(
+        "SELECT av.video_id, v.title, v.channel_id, ch.channel_title, \
+                v.thumbnail_url \
+           FROM allowlisted_videos av \
+           JOIN videos v ON v.video_id = av.video_id \
+           LEFT JOIN channels ch ON ch.channel_id = v.channel_id \
+          WHERE av.child_account_id = ? \
+          ORDER BY av.created_at DESC \
+          LIMIT 50",
+    )
+    .bind(child_id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut items: Vec<UpNextItem> = rows
+        .into_iter()
+        .map(|r| UpNextItem {
+            video_id: r.video_id,
+            title: r.title,
+            channel_id: r.channel_id,
+            channel_title: r.channel_title,
+            thumbnail_url: r.thumbnail_url,
+        })
+        .collect();
+    let mut rng = daily_rng(child_id);
+    items.shuffle(&mut rng);
+    Ok(items)
 }
 
 /// Build a deterministic RNG keyed to `(child_id, today)` so the

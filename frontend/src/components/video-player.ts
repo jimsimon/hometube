@@ -177,6 +177,8 @@ function loadCastSdk(): Promise<void> {
 
 const HEARTBEAT_MS = 30_000;
 const AUTOPLAY_KEY = "hometube-autoplay-count";
+/** Set by `<hometube-up-next>` before an auto-advance navigation. */
+const AUTOPLAY_PENDING_KEY = "hometube-autoplay-pending";
 const VOLUME_KEY = "hometube-volume";
 const AUDIO_ONLY_KEY = "hometube-audio-only";
 const CAPTIONS_KEY = "hometube-captions";
@@ -1139,6 +1141,16 @@ export class VideoPlayer extends LitElement {
     if (!this.manualPlayed) {
       this.manualPlayed = true;
       try {
+        // `<hometube-up-next>` leaves this marker right before it
+        // navigates to the next video. The first `play` on that page
+        // is the auto-advance itself, so it must not reset the
+        // consecutive-autoplay counter — otherwise the parent's
+        // "pause after N videos in a row" cap could never trigger.
+        // Any later play (the child resumed after pausing) is manual
+        // and resets the streak as before.
+        const pending = sessionStorage.getItem(AUTOPLAY_PENDING_KEY);
+        sessionStorage.removeItem(AUTOPLAY_PENDING_KEY);
+        if (pending === this.videoId) return;
         sessionStorage.setItem(AUTOPLAY_KEY, "0");
       } catch {
         // ignore

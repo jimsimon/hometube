@@ -17,6 +17,14 @@ import "./loading-spinner.js";
 import "./error-banner.js";
 import "./content-card.js";
 
+/** Consecutive auto-advances in this tab. Shared with the player. */
+const AUTOPLAY_COUNT_KEY = "hometube-autoplay-count";
+/**
+ * Video ID the player should treat as auto-started on its next page.
+ * Set just before navigating; consumed by the player's first `play`.
+ */
+const AUTOPLAY_PENDING_KEY = "hometube-autoplay-pending";
+
 @customElement("hometube-up-next")
 export class UpNext extends LitElement {
   @property({ type: String, attribute: "video-id" })
@@ -141,9 +149,12 @@ export class UpNext extends LitElement {
     else url.searchParams.delete("from");
     // Track auto-advance count via sessionStorage so the player can
     // refuse it if the autoplay_max_consecutive cap is reached.
-    const key = "hometube-autoplay-count";
-    const current = Number(sessionStorage.getItem(key) ?? "0");
-    sessionStorage.setItem(key, String(current + 1));
+    let current = 0;
+    try {
+      current = Number(sessionStorage.getItem(AUTOPLAY_COUNT_KEY) ?? "0") || 0;
+    } catch {
+      current = 0;
+    }
     if (
       this.settings.autoplay_max_consecutive != null &&
       current + 1 > this.settings.autoplay_max_consecutive
@@ -157,6 +168,18 @@ export class UpNext extends LitElement {
         }),
       );
       return;
+    }
+    try {
+      sessionStorage.setItem(AUTOPLAY_COUNT_KEY, String(current + 1));
+      // Tell the player on the next page that its first `play` is this
+      // auto-advance, not a tap from the child. Without the marker the
+      // player treated every page's first play as manual and reset the
+      // counter to 0, so the "pause after N videos in a row" cap never
+      // fired.
+      sessionStorage.setItem(AUTOPLAY_PENDING_KEY, next.video_id);
+    } catch {
+      // sessionStorage unavailable — autoplay still works, the cap
+      // just can't be tracked.
     }
     window.location.href = url.toString();
   };
