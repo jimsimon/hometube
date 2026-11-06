@@ -390,3 +390,48 @@ async fn check_for_update_touches_last_checked_at() {
     // Either way the function shouldn't panic.
     assert!(after >= before);
 }
+
+// ---------------------------------------------------------------------------
+// youtube_extractor_args
+// ---------------------------------------------------------------------------
+
+#[test]
+fn youtube_extractor_args_requests_po_tokens_when_provider_installed() {
+    use hometube::services::ytdlp::youtube_extractor_args;
+
+    assert_eq!(
+        youtube_extractor_args("default,web_embedded,web_creator", true),
+        "youtube:player_client=default,web_embedded,web_creator;formats=duplicate;fetch_pot=always"
+    );
+}
+
+#[test]
+fn youtube_extractor_args_leaves_fetch_pot_alone_without_a_provider() {
+    use hometube::services::ytdlp::youtube_extractor_args;
+
+    // Without a provider plugin `fetch_pot=always` would only make
+    // yt-dlp warn on every client; keep yt-dlp's `auto` default.
+    assert_eq!(
+        youtube_extractor_args("default,web_embedded", false),
+        "youtube:player_client=default,web_embedded;formats=duplicate"
+    );
+}
+
+#[test]
+fn youtube_extractor_args_keeps_an_operator_fetch_pot_setting() {
+    use hometube::services::ytdlp::youtube_extractor_args;
+
+    // `YTDLP_PLAYER_CLIENT` is interpolated verbatim, so an operator can
+    // already carry a `fetch_pot=` clause (production did exactly this
+    // before the flag became automatic). Don't append a second one.
+    let injected = "default,-tv_samsung,web_creator,web_embedded;fetch_pot=always";
+    assert_eq!(
+        youtube_extractor_args(injected, true),
+        format!("youtube:player_client={injected};formats=duplicate")
+    );
+    let opt_out = "default,web_embedded;fetch_pot=never";
+    assert_eq!(
+        youtube_extractor_args(opt_out, true),
+        format!("youtube:player_client={opt_out};formats=duplicate")
+    );
+}
