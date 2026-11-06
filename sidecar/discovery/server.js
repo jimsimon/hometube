@@ -214,6 +214,66 @@ async function handleGetVideo(videoId) {
   });
 }
 
+/**
+ * Convert one node from a channel's videos tab into HomeTube's
+ * `ChannelVideoItem` shape. Returns `null` for nodes that aren't videos
+ * (shelves, shorts lockups, continuation items, …) or that carry no
+ * video ID, so callers can skip them instead of emitting blank rows.
+ *
+ * Three shapes are handled:
+ *   - `RichItem` containers — unwrapped to their `.content`.
+ *   - `LockupView` (what YouTube serves on channel video tabs as of
+ *     youtubei.js 18): id in `content_id`, title under `metadata.title`,
+ *     thumbnails under `content_image.image`, and a "views • N ago"
+ *     metadata row whose second part is the relative publish date.
+ *   - Legacy `Video` / `GridVideo` nodes: `id`, `title`, `thumbnails`,
+ *     `published`, `author`.
+ */
+function channelVideoNodeToItem(node, channelId, channelTitle) {
+  if (!node) return null;
+
+  if (node.type === "RichItem" && node.content) {
+    return channelVideoNodeToItem(node.content, channelId, channelTitle);
+  }
+
+  if (node.type === "LockupView") {
+    if (node.content_type !== "VIDEO") return null;
+    const videoId = node.content_id;
+    if (!videoId) return null;
+
+    let publishedAt = null;
+    const metaRows = node.metadata?.metadata?.metadata_rows;
+    if (metaRows?.length > 0) {
+      const parts = metaRows[0].metadata_parts;
+      if (parts?.length >= 2) {
+        publishedAt = textToString(parts[1].text) || null;
+      }
+    }
+
+    return {
+      video_id: videoId,
+      title: textToString(node.metadata?.title),
+      channel_id: channelId,
+      channel_title: channelTitle,
+      thumbnails: mapThumbnails(node.content_image?.image || []),
+      published_at: publishedAt,
+      position: null,
+    };
+  }
+
+  // Legacy Video / GridVideo shape.
+  if (!node.id) return null;
+  return {
+    video_id: node.id,
+    title: textToString(node.title),
+    channel_id: node.author?.id || channelId,
+    channel_title: node.author?.name || channelTitle,
+    thumbnails: mapThumbnails(node.thumbnails),
+    published_at: textToString(node.published) || null,
+    position: null,
+  };
+}
+
 /** GET /channel-videos/:channelId?maxResults=N */
 async function handleChannelVideos(channelId, url) {
   const maxResults = Math.min(
@@ -234,58 +294,32 @@ async function handleChannelVideos(channelId, url) {
     return jsonOk({ items: [], next_page_token: null });
   }
 
+  const channelTitle = channel.metadata?.title || null;
   const items = [];
+  const seen = new Set();
+  const push = (item) => {
+    if (!item || seen.has(item.video_id)) return;
+    seen.add(item.video_id);
+    items.push(item);
+  };
 
-  // Try the legacy .videos getter first (returns Video/GridVideo nodes).
-  if (videosTab?.videos?.length > 0) {
-    for (const video of videosTab.videos) {
-      if (items.length >= maxResults) break;
-      items.push({
-        video_id: video.id,
-        title: textToString(video.title),
-        channel_id: video.author?.id || channelId,
-        channel_title: video.author?.name || null,
-        thumbnails: mapThumbnails(video.thumbnails),
-        published_at: textToString(video.published) || null,
-        position: null,
-      });
-    }
+  // `videosTab.videos` is the primary source. Depending on the
+  // youtubei.js version and what YouTube serves, each entry is either a
+  // legacy Video/GridVideo node or (since youtubei.js 18) a LockupView
+  // node — `channelVideoNodeToItem` understands both and returns null
+  // for anything that isn't a video, so an unrecognised node shape can
+  // never produce an empty placeholder item.
+  for (const node of videosTab?.videos ?? []) {
+    if (items.length >= maxResults) break;
+    push(channelVideoNodeToItem(node, channelId, channelTitle));
   }
 
-  // YouTube now returns LockupView nodes inside RichItem containers on
-  // the videos tab. When .videos is empty, extract from the tab content.
-  // Note: uses `channel` from getChannel() above for metadata fallback.
+  // Fallback: walk the raw tab contents (RichItem → LockupView) when the
+  // `.videos` getter produced nothing usable.
   if (items.length === 0 && videosTab?.current_tab?.content?.contents) {
     for (const entry of videosTab.current_tab.content.contents) {
       if (items.length >= maxResults) break;
-      const lockup = entry.content || entry;
-      if (lockup.type !== "LockupView" || lockup.content_type !== "VIDEO") continue;
-
-      const videoId = lockup.content_id;
-      if (!videoId) continue;
-
-      const title = textToString(lockup.metadata?.title);
-      const thumbnails = lockup.content_image?.image || [];
-
-      // Metadata rows contain "views • time ago" style parts.
-      let publishedAt = null;
-      const metaRows = lockup.metadata?.metadata?.metadata_rows;
-      if (metaRows?.length > 0) {
-        const parts = metaRows[0].metadata_parts;
-        if (parts?.length >= 2) {
-          publishedAt = textToString(parts[1].text) || null;
-        }
-      }
-
-      items.push({
-        video_id: videoId,
-        title,
-        channel_id: channelId,
-        channel_title: channel.metadata?.title || null,
-        thumbnails: mapThumbnails(thumbnails),
-        published_at: publishedAt,
-        position: null,
-      });
+      push(channelVideoNodeToItem(entry, channelId, channelTitle));
     }
   }
 
