@@ -1531,9 +1531,40 @@ pub fn player_client_list(configured: &str, authenticated: bool) -> String {
     }
 }
 
+/// Build the `--extractor-args youtube:...` value for a yt-dlp run.
+///
+/// `player_client` and `formats=duplicate` are always set (see the
+/// comments in [`append_youtube_args_with`]). When a PO token provider
+/// plugin is installed, `fetch_pot=always` is added as well.
+///
+/// yt-dlp only asks its PO token providers for a GVS (video server)
+/// token when the client's built-in policy says one is required. The
+/// clients that still return direct `https` formats on a logged-in
+/// session (`web_embedded`, the `tv*` family) have no such policy, so
+/// under the default `fetch_pot=auto` their stream URLs carry no `pot=`
+/// parameter. Since late October 2026 YouTube serves such token-less
+/// URLs for roughly the first minute of media and answers 403 past
+/// that point, which stalls every video at about 0:59. `fetch_pot=always`
+/// makes yt-dlp attach a token to every client's URLs; the bgutil
+/// sidecar generates them and caches them per video, so the cost is one
+/// extra request per client per extraction.
+///
+/// Operators who already pass `fetch_pot=` through `YTDLP_PLAYER_CLIENT`
+/// (the value is interpolated verbatim, so `...;fetch_pot=never` works)
+/// keep their setting: nothing is appended when the list mentions it.
+pub fn youtube_extractor_args(player_clients: &str, pot_provider_installed: bool) -> String {
+    let mut args = format!("youtube:player_client={player_clients};formats=duplicate");
+    if pot_provider_installed && !player_clients.contains("fetch_pot=") {
+        args.push_str(";fetch_pot=always");
+    }
+    args
+}
+
 /// Append PO token arguments to a yt-dlp command:
 ///
 /// 1. `--plugin-dirs <path>` — if the bgutil PO token plugin is installed.
+///    When it is, the `youtube:` extractor args also get
+///    `fetch_pot=always` (see [`youtube_extractor_args`]).
 /// 2. `--extractor-args youtubepot-bgutilhttp:base_url=<url>` — PO token
 ///    server URL (via `POT_SERVER_URL` env var, defaults to the Docker
 ///    Compose sidecar at `http://pot-server:4416`).
@@ -1568,7 +1599,8 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
     } else {
         plugin_path.to_path_buf()
     };
-    if plugin_path_abs.exists() {
+    let pot_provider_installed = plugin_path_abs.exists();
+    if pot_provider_installed {
         cmd.arg("--plugin-dirs").arg(&plugin_path_abs);
     }
 
@@ -1640,11 +1672,15 @@ fn append_youtube_args_with(cmd: &mut Command, with_cookies: bool) -> YoutubeArg
     // Configurable via the `YTDLP_PLAYER_CLIENT` env var so production
     // deployments can pin to a single client if they discover one
     // works better for their cookie set / IP geolocation.
+    //
+    // `fetch_pot=always` is added whenever the PO token plugin is
+    // installed — see [`youtube_extractor_args`] for why.
     let configured =
         std::env::var("YTDLP_PLAYER_CLIENT").unwrap_or_else(|_| DEFAULT_PLAYER_CLIENTS.to_string());
     let player_clients = player_client_list(&configured, authenticated);
-    cmd.arg("--extractor-args").arg(format!(
-        "youtube:player_client={player_clients};formats=duplicate"
+    cmd.arg("--extractor-args").arg(youtube_extractor_args(
+        &player_clients,
+        pot_provider_installed,
     ));
 
     // JS runtime for YouTube's n-parameter / signature challenge
