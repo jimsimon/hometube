@@ -63,6 +63,28 @@ async fn parent_preview_invalid_kind_redirects() {
     );
 }
 
+#[tokio::test]
+async fn parent_preview_channel_page_passes_child_id_to_the_picker() {
+    // `?child=<id>` turns the channel grid into a per-video allowlist
+    // picker for that child.
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let res = app
+        .server
+        .get("/parent/preview/channel/UCabc?child=42")
+        .await;
+    assert!(res.status_code().is_success());
+    let body = res.text();
+    assert!(
+        body.contains("child-id=\"42\""),
+        "expected child-id attr, got: {body}"
+    );
+
+    // Without the query the grid is read-only.
+    let res = app.server.get("/parent/preview/channel/UCabc").await;
+    assert!(res.status_code().is_success());
+    assert!(!res.text().contains("child-id="));
+}
+
 // ===========================================================================
 // Child pages
 // ===========================================================================

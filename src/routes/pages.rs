@@ -256,6 +256,18 @@ struct ParentPreviewTemplate {
     /// `"video"` or `"channel"`.
     kind: String,
     resource_id: String,
+    /// Child whose allowlist the channel page's per-video "Add" controls
+    /// target (`?child=<id>`). `None` renders the read-only grid.
+    child_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewPageQuery {
+    /// Optional child account id. Only meaningful for `kind == channel`,
+    /// where it enables adding individual uploads to that child's
+    /// allowlist straight from the grid.
+    #[serde(default)]
+    pub child: Option<i64>,
 }
 
 /// `GET /parent/preview/:kind/:id` — parent-side preview shell that
@@ -264,6 +276,7 @@ struct ParentPreviewTemplate {
 pub async fn parent_preview(
     current: Option<CurrentAccount>,
     Path((kind, resource_id)): Path<(String, String)>,
+    Query(q): Query<PreviewPageQuery>,
 ) -> AppResult<Response> {
     match current {
         Some(c) if matches!(c.account_type, AccountType::Parent) => {
@@ -274,6 +287,7 @@ pub async fn parent_preview(
                 display_name: c.display_name,
                 kind,
                 resource_id,
+                child_id: q.child.filter(|id| *id > 0),
             };
             Ok(Html(tpl.render()?).into_response())
         }
