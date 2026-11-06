@@ -25,6 +25,10 @@
  *     formats above the cap) and the playback-speed control is hidden
  *     when `playback_speed_locked = true`.
  *   - Supports `start-at` for `?t=<seconds>` deep-links.
+ *   - Touch gestures: double tap on the left/right third of the video
+ *     seeks ∓10s (with a transient badge), double tap in the middle
+ *     toggles fullscreen. Replaces shaka's built-in tap handling, which
+ *     only worked while the control bar was visible.
  *   - Adds a "Download" button when `child_settings.downloads_enabled`
  *     is on; the click handler talks to the offline-downloads service
  *     to pipe the response into the Cache API.
@@ -52,6 +56,7 @@ interface ShakaPlayer {
   load(uri: string, startTime?: number, mimeType?: string): Promise<void>;
   destroy(): Promise<void>;
   configure(path: string, value: unknown): void;
+  seekRange(): { start: number; end: number };
   getNetworkingEngine(): {
     registerRequestFilter(
       filter: (type: number, request: { allowCrossSiteCredentials: boolean }) => void,
@@ -73,6 +78,12 @@ interface ShakaPlayer {
 interface ShakaUI {
   configure(config: Record<string, unknown>): void;
   destroy(): void;
+  getControls(): ShakaControls | null;
+}
+
+interface ShakaControls {
+  isFullScreenSupported(): boolean;
+  toggleFullScreen(): Promise<void> | void;
 }
 
 // Cast the imported namespace to our typed shape.
@@ -90,6 +101,12 @@ import {
   getStorageEstimate,
   saveVideoToOpfs,
 } from "../services/offline.js";
+import {
+  TAP_SEEK_SECONDS,
+  TapTracker,
+  clampSeekTarget,
+  type TapZone,
+} from "../services/tap-gestures.js";
 import {
   formatRelativeDate,
   normalizeThumbnailUrl,
@@ -343,6 +360,11 @@ export class VideoPlayer extends LitElement {
   @state() private captionTracks: CaptionTrack[] = [];
   @state() private error = "";
   @state() private continuePromptOpen = false;
+  /**
+   * Transient "« 10s" / "10s »" badge shown after an edge double tap.
+   * `seconds` accumulates while the child keeps tapping.
+   */
+  @state() private seekFeedback: { direction: "back" | "forward"; seconds: number } | null = null;
   /** True when the audio-only toggle is engaged. */
   @property({ type: Boolean, reflect: true, attribute: "data-audio-only" })
   audioOnly = false;
@@ -381,6 +403,16 @@ export class VideoPlayer extends LitElement {
   private sphericalRenderer: { destroy(): void; resize(): void } | null = null;
   /** Projection pose extracted from the first WebM init segment. */
   private projectionInfo: ProjectionInfo | null = null;
+  /** Double-tap detector for the touch gesture layer (see `onSurfaceTouchEnd`). */
+  private tapTracker = new TapTracker();
+  /** Where the current touch started, to tell a tap from a swipe. */
+  private touchStart: { x: number; y: number } | null = null;
+  /** `video.paused` at the first tap of a potential double tap. */
+  private pausedBeforeTap: boolean | null = null;
+  /** Timestamp of the last touch on the surface — mutes synthetic `dblclick`. */
+  private lastSurfaceTouchAt = 0;
+  /** Hides the seek badge after a short delay. */
+  private seekFeedbackTimer: number | null = null;
 
   static styles = [
     css`
@@ -444,6 +476,29 @@ export class VideoPlayer extends LitElement {
       }
       :host([data-audio-only]) .shaka-container video {
         opacity: 0;
+      }
+      /* Feedback badge for edge double-tap seeking. Lives inside the
+         shaka container so it is still visible in fullscreen (shaka
+         fullscreens the container, not the host). */
+      .seek-feedback {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 600;
+        pointer-events: none;
+        padding: 0.5rem 0.9rem;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.65);
+        color: white;
+        font-weight: 600;
+        font-size: clamp(1rem, 2.5vw, 1.4rem);
+        white-space: nowrap;
+      }
+      .seek-feedback.back {
+        left: 12%;
+      }
+      .seek-feedback.forward {
+        right: 12%;
       }
       .error {
         color: var(--wa-color-danger-fill, #b91c1c);
@@ -876,7 +931,30 @@ export class VideoPlayer extends LitElement {
         played: "rgb(255, 0, 0)",
         buffered: "rgba(255, 255, 255, 0.4)",
       },
+      // Touch gestures are handled by our own layer (see
+      // `onSurfaceTouchEnd`) so they work whether or not the control
+      // bar is visible. Shaka's built-ins are disabled because they
+      // fight it: its tap-to-seek buttons only intercept taps while the
+      // controls are opaque, and with the controls faded out two quick
+      // taps on an edge fell through to this double-tap-for-fullscreen
+      // path and minimised the video instead of seeking. Mouse
+      // double-click still toggles fullscreen via `onSurfaceDblClick`.
+      doubleClickForFullscreen: false,
+      seekOnTaps: false,
     });
+
+    // Gesture layer. Capture phase so we run before shaka's listeners on
+    // the controls container and can swallow the second tap of a double.
+    this.containerEl.addEventListener("touchstart", this.onSurfaceTouchStart, {
+      capture: true,
+      passive: true,
+    });
+    this.containerEl.addEventListener("touchend", this.onSurfaceTouchEnd, { capture: true });
+    this.containerEl.addEventListener("touchcancel", this.onSurfaceTouchCancel, {
+      capture: true,
+      passive: true,
+    });
+    this.containerEl.addEventListener("dblclick", this.onSurfaceDblClick);
 
     // Error handling.
     player.addEventListener("error", (event: Event) => {
@@ -1033,6 +1111,26 @@ export class VideoPlayer extends LitElement {
       this.videoEl.removeEventListener("volumechange", this.onVolumeChange);
       this.videoEl.textTracks.removeEventListener("change", this.onCaptionChange);
     }
+    if (this.containerEl) {
+      this.containerEl.removeEventListener("touchstart", this.onSurfaceTouchStart, {
+        capture: true,
+      });
+      this.containerEl.removeEventListener("touchend", this.onSurfaceTouchEnd, {
+        capture: true,
+      });
+      this.containerEl.removeEventListener("touchcancel", this.onSurfaceTouchCancel, {
+        capture: true,
+      });
+      this.containerEl.removeEventListener("dblclick", this.onSurfaceDblClick);
+    }
+    this.tapTracker.reset();
+    this.touchStart = null;
+    this.pausedBeforeTap = null;
+    if (this.seekFeedbackTimer != null) {
+      window.clearTimeout(this.seekFeedbackTimer);
+      this.seekFeedbackTimer = null;
+    }
+    this.seekFeedback = null;
     if (this.ui) {
       this.ui.destroy();
       this.ui = null;
@@ -1109,6 +1207,125 @@ export class VideoPlayer extends LitElement {
       // localStorage unavailable.
     }
   };
+
+  // ---------------------------------------------------------------------
+  // Touch gesture layer: double tap on the left/right third of the video
+  // seeks ∓10s, double tap in the middle toggles fullscreen. Works with
+  // the control bar visible or hidden — see `services/tap-gestures.ts`.
+  // ---------------------------------------------------------------------
+
+  /** Taps on buttons, the seek bar, or menus belong to shaka, not to us. */
+  private isSurfaceEvent(e: Event): boolean {
+    const ignored =
+      ".shaka-bottom-controls, .shaka-controls-button-panel, .shaka-settings-menu, " +
+      ".shaka-overflow-menu, .shaka-play-button, .shaka-ad-controls, " +
+      "button, input, select, a";
+    for (const node of e.composedPath()) {
+      if (node === this.containerEl) break;
+      if (node instanceof Element && node.matches(ignored)) return false;
+    }
+    return true;
+  }
+
+  private onSurfaceTouchStart = (e: TouchEvent): void => {
+    this.lastSurfaceTouchAt = Date.now();
+    if (e.touches.length !== 1 || !this.isSurfaceEvent(e)) {
+      this.touchStart = null;
+      this.tapTracker.reset();
+      return;
+    }
+    const t = e.touches[0];
+    this.touchStart = { x: t.clientX, y: t.clientY };
+  };
+
+  private onSurfaceTouchCancel = (): void => {
+    this.touchStart = null;
+    this.tapTracker.reset();
+  };
+
+  private onSurfaceTouchEnd = (e: TouchEvent): void => {
+    this.lastSurfaceTouchAt = Date.now();
+    const start = this.touchStart;
+    this.touchStart = null;
+    if (!start || e.changedTouches.length !== 1 || !this.videoEl || !this.containerEl) return;
+    const t = e.changedTouches[0];
+    // A finger that travelled is a swipe/scroll, not a tap.
+    if (Math.hypot(t.clientX - start.x, t.clientY - start.y) > 12) {
+      this.tapTracker.reset();
+      return;
+    }
+    // Nothing to seek in until media is loaded.
+    if (!Number.isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) return;
+
+    const rect = this.containerEl.getBoundingClientRect();
+    const result = this.tapTracker.register(
+      { x: t.clientX - rect.left, y: t.clientY - rect.top, time: Date.now() },
+      rect.width,
+    );
+    if (result.kind === "single") {
+      // Let shaka handle the single tap (show controls / play-pause),
+      // but remember the play state so a follow-up tap can undo it.
+      this.pausedBeforeTap = this.videoEl.paused;
+      return;
+    }
+
+    // Double tap: it's ours. Stop shaka from treating this touch as a
+    // second single tap (play/pause toggle or fullscreen).
+    e.preventDefault();
+    e.stopPropagation();
+    // If shaka's single-tap handling flipped play/pause on the first
+    // tap, flip it back — the child wanted to seek, not pause.
+    if (this.pausedBeforeTap != null && this.videoEl.paused !== this.pausedBeforeTap) {
+      if (this.pausedBeforeTap) this.videoEl.pause();
+      else void this.videoEl.play().catch(() => {});
+    }
+    this.pausedBeforeTap = this.videoEl.paused;
+    this.handleDoubleTap(result.zone);
+  };
+
+  private handleDoubleTap(zone: TapZone): void {
+    if (zone === "center") {
+      const controls = this.ui?.getControls();
+      if (controls?.isFullScreenSupported()) void controls.toggleFullScreen();
+      return;
+    }
+    this.seekBy(zone === "left" ? -TAP_SEEK_SECONDS : TAP_SEEK_SECONDS);
+  }
+
+  /** Mouse double-click keeps toggling fullscreen (shaka's own handler is off). */
+  private onSurfaceDblClick = (e: MouseEvent): void => {
+    // Some browsers synthesise dblclick from touch; the touch path
+    // already handled those.
+    if (Date.now() - this.lastSurfaceTouchAt < 1000) return;
+    if (!this.isSurfaceEvent(e)) return;
+    const controls = this.ui?.getControls();
+    if (controls?.isFullScreenSupported()) void controls.toggleFullScreen();
+  };
+
+  private seekBy(deltaSeconds: number): void {
+    if (!this.videoEl) return;
+    let range = { start: 0, end: this.videoEl.duration };
+    try {
+      const r = this.player?.seekRange();
+      if (r && Number.isFinite(r.end) && r.end > 0) range = r;
+    } catch {
+      // Fall back to the element's duration.
+    }
+    this.videoEl.currentTime = clampSeekTarget(this.videoEl.currentTime, deltaSeconds, range);
+    this.showSeekFeedback(deltaSeconds < 0 ? "back" : "forward");
+  }
+
+  private showSeekFeedback(direction: "back" | "forward"): void {
+    const prev = this.seekFeedback;
+    const seconds =
+      prev && prev.direction === direction ? prev.seconds + TAP_SEEK_SECONDS : TAP_SEEK_SECONDS;
+    this.seekFeedback = { direction, seconds };
+    if (this.seekFeedbackTimer != null) window.clearTimeout(this.seekFeedbackTimer);
+    this.seekFeedbackTimer = window.setTimeout(() => {
+      this.seekFeedbackTimer = null;
+      this.seekFeedback = null;
+    }, 700);
+  }
 
   private onCaptionChange = (): void => {
     if (!this.videoEl) return;
@@ -1436,6 +1653,17 @@ export class VideoPlayer extends LitElement {
       <div class="player-shell">
         <div class="shaka-container" style=${posterStyle}>
           <video autoplay .poster=${posterUrl ?? ""}></video>
+          ${this.seekFeedback
+            ? html`<div
+                class="seek-feedback ${this.seekFeedback.direction}"
+                role="status"
+                aria-live="polite"
+              >
+                ${this.seekFeedback.direction === "back"
+                  ? `« ${this.seekFeedback.seconds}s`
+                  : `${this.seekFeedback.seconds}s »`}
+              </div>`
+            : nothing}
         </div>
         ${this.continuePromptOpen
           ? html`
