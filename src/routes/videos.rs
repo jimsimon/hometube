@@ -708,6 +708,15 @@ pub struct FormatQuery {
 /// disabling every variant it trips over until only the lowest rung is
 /// left. Chunks from an old encode are bypassed and purged in the
 /// background.
+///
+/// **403 failover**: YouTube hands out a separate URL for the same file
+/// per player client, and some clients' URLs stop working part-way
+/// through the file (TV clients on a logged-in session refuse ranges
+/// past roughly the first minute of media). When upstream answers 403,
+/// the request is retried against the other clients' copies of the
+/// *same* file (same itag and [`segment_store::format_fingerprint`]),
+/// and the copy that worked is remembered for the rest of the URL's
+/// lifetime so later segments skip the dead URL.
 pub async fn get_format(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -857,12 +866,35 @@ pub async fn get_format(
     }
 
     // --- Cache-miss path: proxy from upstream with tee-caching ---
-    let mut req = state.http_client.get(&url);
-    if let Some(ref range_val) = range_header {
-        req = req.header(header::RANGE, range_val.as_str());
-    }
-    let res = req.send().await.map_err(AppError::Http)?;
+    let attempts = upstream_attempts(&result.formats, format, &url, fingerprint.as_deref()).await;
+    let (res, served_by) =
+        fetch_with_failover(&state.http_client, &attempts, range_header.as_deref()).await?;
     let status = res.status();
+    let served = &attempts[served_by];
+    if served.format_id != q.format {
+        if served_by == 0 {
+            // A remembered failover: the player keeps asking for the
+            // format it was given, and we keep answering from the copy
+            // that works.
+            debug!(
+                video_id = %q.video_id,
+                format = %q.format,
+                via = %served.format_id,
+                "serving from remembered alternate client URL"
+            );
+        } else {
+            warn!(
+                video_id = %q.video_id,
+                format = %q.format,
+                via = %served.format_id,
+                %status,
+                range = range_header.as_deref().unwrap_or("-"),
+                "upstream refused this client's URL with 403; failed over to \
+                 another client's copy of the same file"
+            );
+            remember_failover(&url, &served.format_id).await;
+        }
+    }
     if !status.is_success() {
         // Previously invisible: the status was passed straight through
         // to the player, so an upstream 403 (expired/revoked URL) or 416
@@ -976,6 +1008,169 @@ pub async fn get_format(
         }
     }
     Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Upstream 403 failover
+// ---------------------------------------------------------------------------
+
+/// One upstream URL `get_format` may fetch the requested bytes from:
+/// the player's format, or another client's copy of the same file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpstreamAttempt {
+    format_id: String,
+    url: String,
+}
+
+/// Other formats in the same extraction that point at the *same*
+/// upstream file as `primary` through a different URL: same itag, same
+/// file fingerprint (`lmt=`/`clen=`/filesize), different format id.
+/// With `formats=duplicate`, yt-dlp returns one such copy per player
+/// client (`247-dashy-0`, `247-dashy-1`, ...). Variants that share the
+/// primary's URL (the `https` / `-dashy` pair from one client) are
+/// skipped: retrying the same URL cannot help.
+///
+/// Formats without a fingerprint never qualify. A file-identity match is
+/// what makes the byte ranges the player computed from the primary's
+/// `sidx` valid against the alternate.
+fn failover_candidates<'a>(
+    formats: &'a [Format],
+    primary: &Format,
+    primary_url: &str,
+    fingerprint: Option<&str>,
+) -> Vec<&'a Format> {
+    let Some(fingerprint) = fingerprint else {
+        return Vec::new();
+    };
+    let Some(itag) = crate::services::ytdlp::parse_itag_from_format_id(&primary.format_id) else {
+        return Vec::new();
+    };
+    formats
+        .iter()
+        .filter(|f| {
+            f.format_id != primary.format_id
+                && f.url.as_deref().is_some_and(|u| u != primary_url)
+                && crate::services::ytdlp::parse_itag_from_format_id(&f.format_id) == Some(itag)
+                && segment_store::format_fingerprint(f).as_deref() == Some(fingerprint)
+        })
+        .collect()
+}
+
+/// Build the ordered list of URLs to try for one proxied request. The
+/// copy remembered by an earlier failover (if it is still part of the
+/// current extraction) goes first, then the format's own URL, then the
+/// remaining copies of the file. Each distinct URL appears once.
+async fn upstream_attempts(
+    formats: &[Format],
+    primary: &Format,
+    primary_url: &str,
+    fingerprint: Option<&str>,
+) -> Vec<UpstreamAttempt> {
+    let alternates = failover_candidates(formats, primary, primary_url, fingerprint);
+    let mut attempts: Vec<UpstreamAttempt> = Vec::with_capacity(alternates.len() + 1);
+    if let Some(remembered) = remembered_failover(primary_url).await {
+        if let Some(alt) = alternates.iter().find(|f| f.format_id == remembered) {
+            push_unique_attempt(&mut attempts, alt);
+        }
+    }
+    attempts.push(UpstreamAttempt {
+        format_id: primary.format_id.clone(),
+        url: primary_url.to_string(),
+    });
+    for alt in alternates {
+        push_unique_attempt(&mut attempts, alt);
+    }
+    attempts
+}
+
+fn push_unique_attempt(attempts: &mut Vec<UpstreamAttempt>, format: &Format) {
+    let Some(url) = format.url.as_deref() else {
+        return;
+    };
+    if attempts.iter().any(|a| a.url == url) {
+        return;
+    }
+    attempts.push(UpstreamAttempt {
+        format_id: format.format_id.clone(),
+        url: url.to_string(),
+    });
+}
+
+/// Fetch `range` from the first attempt that does not answer 403.
+///
+/// Returns the response together with the index of the attempt that
+/// produced it. Only 403 triggers moving on: any other status (416 for a
+/// range past the end, 5xx, ...) is the file's own answer and is passed
+/// through from the first URL that gave it. If every attempt is
+/// forbidden, the first 403 is returned so the player sees the same
+/// failure it would have without failover. Transport errors on one URL
+/// fall through to the next; the last error surfaces only when no URL
+/// produced a response at all.
+async fn fetch_with_failover(
+    client: &reqwest::Client,
+    attempts: &[UpstreamAttempt],
+    range: Option<&str>,
+) -> AppResult<(reqwest::Response, usize)> {
+    let mut forbidden: Option<(reqwest::Response, usize)> = None;
+    let mut last_err: Option<reqwest::Error> = None;
+    for (idx, attempt) in attempts.iter().enumerate() {
+        let mut req = client.get(&attempt.url);
+        if let Some(range) = range {
+            req = req.header(header::RANGE, range);
+        }
+        match req.send().await {
+            Ok(res) if res.status() == StatusCode::FORBIDDEN && idx + 1 < attempts.len() => {
+                debug!(
+                    format = %attempt.format_id,
+                    "upstream returned 403; trying the next copy of the file"
+                );
+                if forbidden.is_none() {
+                    forbidden = Some((res, idx));
+                }
+            }
+            Ok(res) => return Ok((res, idx)),
+            Err(err) => {
+                if idx + 1 < attempts.len() {
+                    debug!(
+                        format = %attempt.format_id,
+                        error = %err,
+                        "upstream fetch failed; trying the next copy of the file"
+                    );
+                }
+                last_err = Some(err);
+            }
+        }
+    }
+    match (forbidden, last_err) {
+        (Some(forbidden), _) => Ok(forbidden),
+        (None, Some(err)) => Err(AppError::Http(err)),
+        (None, None) => Err(AppError::BadRequest("format has no direct URL".into())),
+    }
+}
+
+/// Upper bound on remembered failovers. Keys are full `videoplayback`
+/// URLs (about 1 KiB each) that expire with the extraction, so the map
+/// is simply cleared when it fills up rather than evicted by age.
+const FAILOVER_MEMO_CAP: usize = 512;
+
+/// Failing primary URL → format id of the copy that served it. Keyed by
+/// URL rather than `(video_id, format_id)` so a fresh extraction (new
+/// URLs) starts clean automatically.
+fn failover_memo() -> &'static Mutex<HashMap<String, String>> {
+    static MEMO: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn remembered_failover(primary_url: &str) -> Option<String> {
+    failover_memo().lock().await.get(primary_url).cloned()
+}
+
+async fn remember_failover(primary_url: &str, format_id: &str) {
+    let mut memo = failover_memo().lock().await;
+    if memo.len() >= FAILOVER_MEMO_CAP && !memo.contains_key(primary_url) {
+        memo.clear();
+    }
+    memo.insert(primary_url.to_string(), format_id.to_string());
 }
 
 /// Parse a `Range: bytes=START-END` header.
