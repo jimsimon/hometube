@@ -507,6 +507,163 @@ async fn up_next_without_from_returns_empty_for_no_api_key() {
     assert!(body.as_array().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn up_next_includes_individually_allowlisted_videos() {
+    // A child with a video-only allowlist (no channels) used to get an
+    // empty queue, so autoplay never advanced.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "solo-a",
+        Some("Solo A"),
+        None,
+    )
+    .await;
+    allowlist_video(
+        &app.pool,
+        child_id,
+        parent_id,
+        "solo-b",
+        Some("Solo B"),
+        None,
+    )
+    .await;
+
+    let res = app
+        .server
+        .get("/api/feed/up-next?current_video=solo-a")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    // The current video is excluded; the other allowlisted one is queued.
+    assert_eq!(ids, vec!["solo-b"]);
+}
+
+#[tokio::test]
+async fn up_next_falls_back_to_already_watched_videos() {
+    // Once everything available has a watch_history row the queue must
+    // not collapse to nothing — autoplay should keep going.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    for vid in ["seen-1", "seen-2", "fresh"] {
+        allowlist_video(&app.pool, child_id, parent_id, vid, Some("T"), None).await;
+    }
+    for vid in ["seen-1", "seen-2"] {
+        seed_watch_history(
+            &app.pool,
+            child_id,
+            vid,
+            Some("T"),
+            None,
+            None,
+            None,
+            Some(300),
+            300,
+            Some(1),
+        )
+        .await;
+    }
+
+    let res = app
+        .server
+        .get("/api/feed/up-next?current_video=fresh&limit=5")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let mut ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["seen-1", "seen-2"]);
+
+    // Unwatched items still come first when both kinds are available.
+    let res = app
+        .server
+        .get("/api/feed/up-next?current_video=seen-1&limit=5")
+        .await;
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["fresh", "seen-2"]);
+}
+
+#[tokio::test]
+async fn up_next_video_context_uses_the_videos_channel() {
+    // `from=video:<id>` resolves to the owning channel's archive.
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    common::allowlist_channel(&app.pool, child_id, parent_id, "UCctx", Some("Ctx")).await;
+    for (vid, ts) in [("ctx-1", 1_700_000_000), ("ctx-2", 1_700_000_100)] {
+        common::seed_channel_video(
+            &app.pool,
+            "UCctx",
+            Some("Ctx"),
+            vid,
+            Some("V"),
+            Some(ts),
+            "rss",
+        )
+        .await;
+    }
+
+    let res = app
+        .server
+        .get("/api/feed/up-next?from=video:ctx-1&current_video=ctx-1")
+        .await;
+    assert_eq!(res.status_code(), StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ctx-2"]);
+}
+
+#[tokio::test]
+async fn up_next_never_queues_blocked_videos() {
+    let (app, auth) = boot_with_parent_and_child(AccountType::Child).await;
+    let child_id = auth.account_id;
+    let parent_id = app.parent_id.unwrap();
+
+    allowlist_video(&app.pool, child_id, parent_id, "ok", Some("Ok"), None).await;
+    allowlist_video(&app.pool, child_id, parent_id, "bad", Some("Bad"), None).await;
+    common::seed_blocked(&app.pool, child_id, parent_id, "bad", Some("Bad")).await;
+
+    let res = app.server.get("/api/feed/up-next").await;
+    let body: serde_json::Value = res.json();
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["video_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ok"]);
+}
+
 // ---------------------------------------------------------------------------
 // New videos feed
 // ---------------------------------------------------------------------------
