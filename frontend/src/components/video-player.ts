@@ -10,6 +10,9 @@
  *     manifest at `/api/videos/:id/stream/manifest.mpd`.
  *   - Sends a heartbeat every 30s while playing to
  *     `/api/usage/heartbeat` so watch time is recorded server-side.
+ *     Position-only writes (pause/seek, hide/unload beacon) are gated
+ *     by `ProgressGate` so an idle tab never re-sends a stale resume
+ *     point.
  *   - Dispatches `hometube:current-time` on every `timeupdate` and
  *     `hometube:video-ended` on `ended`.
  *   - Hosts the sleep-timer / like / subscribe / download controls
@@ -90,6 +93,7 @@ import {
   getStorageEstimate,
   saveVideoToOpfs,
 } from "../services/offline.js";
+import { ProgressGate } from "../services/progress-gate.js";
 import {
   formatRelativeDate,
   normalizeThumbnailUrl,
@@ -367,6 +371,14 @@ export class VideoPlayer extends LitElement {
    * threshold, so quick previews don't pollute watch_history.
    */
   private heartbeatSent = false;
+  /**
+   * Tracks whether the playhead has moved since the last accepted
+   * write. Position-only writers (pause / seek progress, the
+   * hide/unload beacon) skip the request when it is clean, so a tab
+   * that has sat paused for days can't overwrite a newer resume point
+   * recorded elsewhere with its stale one. See `ProgressGate`.
+   */
+  private progressGate = new ProgressGate();
   /** Debounce timer for `seeked` events so scrubbing doesn't burst-POST. */
   private seekedTimer: number | null = null;
   /** True after a manual play interaction; resets the autoplay counter. */
@@ -595,6 +607,7 @@ export class VideoPlayer extends LitElement {
     this.error = "";
     // Reset the "really watched" gate when the video changes.
     this.heartbeatSent = false;
+    this.progressGate.reset();
     try {
       // Restore the audio-only preference (global, not per-video).
       try {
@@ -1126,6 +1139,7 @@ export class VideoPlayer extends LitElement {
     const t = this.videoEl.currentTime;
     if (t !== this.lastSeenTime) {
       this.lastSeenTime = t;
+      this.progressGate.markDirty();
       document.dispatchEvent(
         new CustomEvent("hometube:current-time", {
           detail: { seconds: t },
@@ -1154,6 +1168,8 @@ export class VideoPlayer extends LitElement {
   };
 
   private onSeeked = (): void => {
+    // A seek moves the resume point even if playback is paused.
+    this.progressGate.markDirty();
     // Debounce: `seeked` fires on every scrub-bar release, including
     // intermediate stops while the user drags. We only need the final
     // resting position.
@@ -1165,6 +1181,7 @@ export class VideoPlayer extends LitElement {
   };
 
   private onEnded = (): void => {
+    this.progressGate.markDirty();
     void this.sendHeartbeat();
     this.stopHeartbeat();
 
@@ -1300,6 +1317,12 @@ export class VideoPlayer extends LitElement {
     // (open, glance, close in <30s) would still create watch_history
     // entries via the beacon.
     if (!this.heartbeatSent) return;
+    // Nothing moved since the last accepted write: the server already
+    // holds this exact position. This is what stops a tab that has been
+    // paused in the background for days from re-asserting its stale
+    // resume point (and crediting the idle time as watch time) every
+    // time the lid closes or the tab is finally discarded.
+    if (!this.progressGate.hasUnsentProgress()) return;
     const now = Date.now();
     const elapsed = Math.max(1, Math.round((now - this.lastHeartbeatAt) / 1000));
     // Skip if we just sent one — `pagehide` + `visibilitychange` can
@@ -1317,7 +1340,10 @@ export class VideoPlayer extends LitElement {
     // Only advance `lastHeartbeatAt` when the beacon was actually
     // queued. Otherwise, if the page survives (e.g. visibility flipped
     // back to visible) the next heartbeat would under-count.
-    if (queued) this.lastHeartbeatAt = now;
+    if (queued) {
+      this.lastHeartbeatAt = now;
+      this.progressGate.markSent();
+    }
   }
 
   /**
@@ -1330,10 +1356,14 @@ export class VideoPlayer extends LitElement {
   private async sendProgress(): Promise<void> {
     if (this.preview) return;
     if (!this.heartbeatSent) return;
+    // Skip when the playhead hasn't moved since the last accepted
+    // write — e.g. a second `pause` with no playback in between.
+    if (!this.progressGate.hasUnsentProgress()) return;
     const payload = this.buildUsagePayload(null);
     if (!payload) return;
     try {
       await api.post("/api/usage/progress", payload);
+      this.progressGate.markSent();
     } catch {
       // Best-effort — progress will get caught by the next heartbeat
       // or the unload beacon.
@@ -1353,6 +1383,7 @@ export class VideoPlayer extends LitElement {
       // watch_history.
       this.heartbeatSent = true;
       this.heartbeatErrorLogged = false;
+      this.progressGate.markSent();
     } catch (err) {
       // Heartbeat failures are non-fatal; the next tick will retry.
       // Log once per failure-streak so dev tooling surfaces
