@@ -88,7 +88,9 @@ jobs:
   # -----------------------------------------------------------------------
   test:
     name: Tests + coverage
-    runs-on: ubuntu-latest
+    # Pinned: `ubuntu-latest` moved to Ubuntu 26.04, which Playwright
+    # (needed for vitest browser mode) cannot install Chromium on yet.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -178,7 +180,8 @@ jobs:
   # -----------------------------------------------------------------------
   e2e:
     name: E2E + a11y
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/Ubuntu 26.04 reason as `test`.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
