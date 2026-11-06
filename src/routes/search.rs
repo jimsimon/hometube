@@ -63,6 +63,34 @@ const CHILD_SEARCH_SQL: &str = "\
     ORDER BY v.title \
     LIMIT ?3 OFFSET ?4";
 
+/// Child channel-search query. See the comment in [`search_channels`]
+/// for why this is `UNION ALL` + `GROUP BY channel_id` rather than a
+/// plain `UNION`. Extracted to a `const` so the test below can assert
+/// the dedupe shape statically.
+///
+/// Param bind contract: `?1` = child_account_id (allowlist branch),
+/// `?2` = child_account_id (subscription branch), `?3` = LIKE pattern,
+/// `?4` = LIMIT, `?5` = OFFSET.
+const CHILD_CHANNEL_SEARCH_SQL: &str = "\
+    SELECT channel_id, channel_title, channel_thumbnail_url, MIN(prio) AS prio FROM ( \
+        SELECT ac.channel_id, \
+               ch.channel_title AS channel_title, \
+               ch.channel_thumbnail_url, \
+               0 AS prio \
+          FROM allowlisted_channels ac \
+          JOIN channels ch ON ch.channel_id = ac.channel_id \
+          WHERE ac.child_account_id = ?1 \
+            AND ch.channel_title IS NOT NULL \
+        UNION ALL \
+        SELECT channel_id, channel_title, channel_thumbnail_url, 1 AS prio \
+          FROM child_subscriptions \
+          WHERE child_account_id = ?2 AND is_deleted = 0 \
+     ) \
+     WHERE channel_title LIKE ?3 ESCAPE '\\' \
+     GROUP BY channel_id \
+     ORDER BY channel_title \
+     LIMIT ?4 OFFSET ?5";
+
 #[derive(Debug, Deserialize)]
 pub struct ParentSearchQuery {
     pub q: String,
@@ -302,8 +330,24 @@ async fn search_channels(
     //   2. The child's subscribed channels (which the child can browse
     //      via /child/channels regardless of the per-video allowlist)
     //
-    // We UNION on the (channel_id, channel_title, thumbnail) shape so
-    // the result is naturally deduplicated.
+    // The two sources are UNION ALL'd and then collapsed to one row
+    // per `channel_id` with a GROUP BY. A plain `UNION` is *not*
+    // enough here: `child_subscriptions` carries its own denormalised
+    // `channel_title` / `channel_thumbnail_url` copy, captured when the
+    // child subscribed, while the allowlist row reads the live
+    // metadata from `channels`. As soon as either diverges (YouTube
+    // rotates avatar URLs regularly; titles get renamed) the two rows
+    // stop being byte-identical and UNION keeps both — which is how a
+    // child who subscribed to an allowlisted channel saw the same
+    // channel twice in search results and search-bar suggestions.
+    //
+    // `prio` ranks the allowlist/`channels` row (0) ahead of the
+    // subscription copy (1). SQLite guarantees that the bare
+    // `channel_title` / `channel_thumbnail_url` columns in a GROUP BY
+    // query with a single `MIN()` aggregate come from the row that
+    // supplied the minimum, so the canonical metadata wins whenever
+    // both sources match the query.
+    //
     // `allowlisted_channels` is now slim (FK only); pull metadata from
     // `channels`. `child_subscriptions` still carries its own
     // denormalised columns (out of scope for this refactor).
@@ -318,34 +362,17 @@ async fn search_channels(
     // for every allowlisted channel — so in practice this affects no
     // rows. If it ever does, the fix is to populate `channels`, not to
     // surface a blank-title row that the user can't search by name.
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT channel_id, channel_title, channel_thumbnail_url FROM ( \
-            SELECT ac.channel_id, \
-                   ch.channel_title AS channel_title, \
-                   ch.channel_thumbnail_url \
-              FROM allowlisted_channels ac \
-              JOIN channels ch ON ch.channel_id = ac.channel_id \
-              WHERE ac.child_account_id = ? \
-                AND ch.channel_title IS NOT NULL \
-            UNION \
-            SELECT channel_id, channel_title, channel_thumbnail_url \
-              FROM child_subscriptions \
-              WHERE child_account_id = ? AND is_deleted = 0 \
-         ) \
-         WHERE channel_title LIKE ? ESCAPE '\\' \
-         ORDER BY channel_title \
-         LIMIT ? OFFSET ?",
-    )
-    .bind(child_id)
-    .bind(child_id)
-    .bind(pattern)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
+    let rows: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(CHILD_CHANNEL_SEARCH_SQL)
+        .bind(child_id)
+        .bind(child_id)
+        .bind(pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, title, thumb)| ChildChannelHit {
+        .map(|(id, title, thumb, _prio)| ChildChannelHit {
             channel_id: id,
             channel_title: title,
             channel_thumbnail_url: thumb,
@@ -481,6 +508,24 @@ mod tests {
         assert!(
             CHILD_SEARCH_SQL.contains("UNION"),
             "child_search SQL must contain UNION for cross-source dedupe"
+        );
+    }
+
+    #[test]
+    fn child_channel_search_sql_collapses_to_one_row_per_channel() {
+        // Regression guard: a channel that is both allowlisted and
+        // subscribed must surface once. The two sources carry separate
+        // metadata copies, so row-level `UNION` dedupe is not enough —
+        // the query has to GROUP BY the channel id.
+        assert!(
+            CHILD_CHANNEL_SEARCH_SQL.contains("GROUP BY channel_id"),
+            "child channel search must collapse rows by channel_id"
+        );
+        // And the GROUP BY has to pick the allowlist/`channels`
+        // metadata deterministically via a MIN() over the priority.
+        assert!(
+            CHILD_CHANNEL_SEARCH_SQL.contains("MIN(prio)"),
+            "child channel search must rank sources with MIN(prio)"
         );
     }
 

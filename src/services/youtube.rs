@@ -288,7 +288,7 @@ impl YoutubeClient {
             .get("items")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        Ok(items)
+        Ok(dedupe_search_items(items))
     }
 
     /// Get metadata for a single channel.
@@ -418,6 +418,23 @@ impl YoutubeClient {
 // Utility helpers
 // ---------------------------------------------------------------------------
 
+/// Drop repeated search hits, keeping the first occurrence of each
+/// `(kind, id)` pair in sidecar order.
+///
+/// YouTube's search page can list the same channel more than once —
+/// once as a top "channel" result and again inside a shelf, or under
+/// both its handle and its legacy name — and youtubei.js faithfully
+/// surfaces every occurrence. The allowlist UI renders one card per
+/// item, so without this the parent sees the same channel two or three
+/// times. Ranking is preserved because we keep the earliest position.
+pub(crate) fn dedupe_search_items(items: Vec<SearchItem>) -> Vec<SearchItem> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert((item.kind.clone(), item.id.clone())))
+        .collect()
+}
+
 /// Tiny RFC 3986 unreserved-set percent-encoder. We avoid pulling in
 /// `urlencoding` for one helper.
 pub(crate) fn percent_encode(s: &str) -> String {
@@ -458,6 +475,47 @@ mod tests {
     #[test]
     fn encode_empty_string() {
         assert_eq!(percent_encode(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // dedupe_search_items
+    // -----------------------------------------------------------------------
+
+    fn item(kind: &str, id: &str, title: &str) -> SearchItem {
+        SearchItem {
+            kind: kind.into(),
+            id: id.into(),
+            title: title.into(),
+            description: String::new(),
+            channel_id: None,
+            channel_title: None,
+            thumbnails: HashMap::new(),
+            published_at: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_first_occurrence_and_order() {
+        let items = vec![
+            item("channel", "UCa", "A"),
+            item("channel", "UCb", "B"),
+            item("channel", "UCa", "A (again)"),
+            item("channel", "UCc", "C"),
+            item("channel", "UCb", "B (again)"),
+        ];
+        let out = dedupe_search_items(items);
+        let ids: Vec<&str> = out.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["UCa", "UCb", "UCc"]);
+        // The first-seen title survives.
+        assert_eq!(out[0].title, "A");
+    }
+
+    #[test]
+    fn dedupe_treats_same_id_with_different_kind_as_distinct() {
+        // A video and a channel can't share an ID in practice, but the
+        // key is (kind, id) so a mixed list never collapses across kinds.
+        let items = vec![item("video", "x", "V"), item("channel", "x", "C")];
+        assert_eq!(dedupe_search_items(items).len(), 2);
     }
 
     // -----------------------------------------------------------------------
