@@ -675,11 +675,23 @@ struct ChildChannelTemplate {
 }
 
 /// `GET /child/channel/:channelId` — single channel page.
+///
+/// Parents are routed to the parent-side channel page (recent uploads,
+/// each playable) rather than the dashboard, mirroring `child_video`.
 pub async fn child_channel(
     State(state): State<AppState>,
     current: Option<CurrentAccount>,
     Path(channel_id): Path<String>,
 ) -> AppResult<Response> {
+    if let Some(c) = &current {
+        if matches!(c.account_type, AccountType::Parent) {
+            return Ok(Redirect::to(&format!(
+                "/parent/preview/channel/{}",
+                crate::services::youtube::percent_encode(&channel_id)
+            ))
+            .into_response());
+        }
+    }
     require_child(&state, current, |c, ctx| {
         let tpl = ChildChannelTemplate {
             display_name: c.display_name,
@@ -825,7 +837,15 @@ pub async fn child_video(
         return Ok(Redirect::to("/").into_response());
     };
     if !matches!(c.account_type, AccountType::Child) {
-        return Ok(Redirect::to("/parent/home").into_response());
+        // Parents can watch too: send them to the parent watch page
+        // (allowlist bypassed, no watch-history side effects) instead of
+        // bouncing to the dashboard, so a video link a child shares or a
+        // card on the activity page just plays.
+        return Ok(Redirect::to(&format!(
+            "/parent/preview/video/{}",
+            crate::services::youtube::percent_encode(&video_id)
+        ))
+        .into_response());
     }
 
     // Share the process-wide cache so the extraction this page triggers

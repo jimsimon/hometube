@@ -459,13 +459,23 @@ export class AllowlistManager extends LitElement {
                   ? channelThumbnailProxyUrl(c.channel_id)
                   : c.channel_thumbnail_url}
               >
-                <wa-button
-                  size="small"
-                  variant="default"
-                  @click=${() => void this.removeItem(c.channel_id)}
-                >
-                  Remove
-                </wa-button>
+                <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
+                  <wa-button
+                    size="small"
+                    variant="default"
+                    href="/parent/preview/channel/${encodeURIComponent(c.channel_id)}"
+                    aria-label=${`Watch ${c.channel_title}`}
+                  >
+                    Watch
+                  </wa-button>
+                  <wa-button
+                    size="small"
+                    variant="default"
+                    @click=${() => void this.removeItem(c.channel_id)}
+                  >
+                    Remove
+                  </wa-button>
+                </div>
               </hometube-content-card>
             `,
           )}
@@ -483,13 +493,23 @@ export class AllowlistManager extends LitElement {
               .thumbnailUrl=${v.video_thumbnail_url}
               .channelTitle=${v.channel_title}
             >
-              <wa-button
-                size="small"
-                variant="default"
-                @click=${() => void this.removeItem(v.video_id)}
-              >
-                Remove
-              </wa-button>
+              <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
+                <wa-button
+                  size="small"
+                  variant="default"
+                  href="/parent/preview/video/${encodeURIComponent(v.video_id)}"
+                  aria-label=${`Watch ${v.video_title}`}
+                >
+                  Watch
+                </wa-button>
+                <wa-button
+                  size="small"
+                  variant="default"
+                  @click=${() => void this.removeItem(v.video_id)}
+                >
+                  Remove
+                </wa-button>
+              </div>
             </hometube-content-card>
           `,
         )}
