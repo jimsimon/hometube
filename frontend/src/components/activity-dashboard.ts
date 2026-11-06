@@ -70,6 +70,17 @@ export class ActivityDashboard extends LitElement {
       font-size: 1.5rem;
       font-weight: 700;
     }
+    .video-link {
+      color: inherit;
+      text-decoration: underline;
+      text-decoration-color: var(--wa-color-surface-border);
+      text-underline-offset: 0.15em;
+    }
+    .video-link:hover,
+    .video-link:focus-visible {
+      color: var(--wa-color-brand-on-quiet);
+      text-decoration-color: currentColor;
+    }
     h2 {
       margin: 1.5rem 0 0.5rem;
       font-size: 1.1rem;
@@ -252,7 +263,14 @@ export class ActivityDashboard extends LitElement {
                   (h) => html`
                     <tr>
                       <td>${this.formatDate(h.started_at)}</td>
-                      <td>${h.video_title ?? h.video_id}</td>
+                      <td>
+                        <a
+                          class="video-link"
+                          href="/parent/preview/video/${encodeURIComponent(h.video_id)}"
+                          title="Watch this video"
+                          >${h.video_title ?? h.video_id}</a
+                        >
+                      </td>
                       <td>${h.channel_title ?? "—"}</td>
                       <td>
                         ${h.duration_seconds != null ? this.formatMinutes(h.duration_seconds) : "—"}

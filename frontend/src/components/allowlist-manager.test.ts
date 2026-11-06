@@ -46,6 +46,15 @@ function mockFetch(responses: Record<string, unknown>): void {
   });
 }
 
+/** Find the `<wa-button>` inside `root` whose label contains `text`. */
+function findButton(root: Element, text: string): Element | null {
+  return (
+    Array.from(root.querySelectorAll("wa-button")).find((b) =>
+      (b.textContent ?? "").includes(text),
+    ) ?? null
+  );
+}
+
 async function mount(childId?: number): Promise<AllowlistManager> {
   const el = document.createElement("hometube-allowlist-manager") as AllowlistManager;
   if (childId != null) {
@@ -375,9 +384,45 @@ describe("<hometube-allowlist-manager>", () => {
 
     const card = el.shadowRoot!.querySelector("hometube-content-card");
     expect(card).not.toBeNull();
-    const removeBtn = card!.querySelector("wa-button");
+    const removeBtn = findButton(card!, "Remove");
     expect(removeBtn).not.toBeNull();
     expect(removeBtn!.textContent).toContain("Remove");
+  });
+
+  it("renders a Watch link for allowlisted channels and videos", async () => {
+    mockFetch({
+      "allowlist/channels": [
+        { id: 1, channel_id: "UC1", channel_title: "Ch1", channel_thumbnail_url: null },
+      ],
+      "allowlist/videos": [
+        {
+          id: 7,
+          video_id: "vid 1",
+          video_title: "Vid",
+          video_thumbnail_url: null,
+          channel_title: "Ch1",
+        },
+      ],
+    });
+    const el = await mount(1);
+
+    // Channels tab (default): the Watch link points at the parent
+    // channel page so a parent can browse + play its uploads.
+    const channelCard = el.shadowRoot!.querySelector("hometube-content-card")!;
+    const watchChannel = findButton(channelCard, "Watch");
+    expect(watchChannel).not.toBeNull();
+    expect(watchChannel!.getAttribute("href")).toBe("/parent/preview/channel/UC1");
+
+    // Videos tab: the Watch link opens the parent watch page, with the
+    // id URL-encoded.
+    const tabs = el.shadowRoot!.querySelectorAll('[role="tab"]');
+    const videoTab = Array.from(tabs).find((t) => t.textContent!.trim() === "Videos");
+    (videoTab as HTMLElement).click();
+    await el.updateComplete;
+    const videoCard = el.shadowRoot!.querySelector("hometube-content-card")!;
+    const watchVideo = findButton(videoCard, "Watch");
+    expect(watchVideo).not.toBeNull();
+    expect(watchVideo!.getAttribute("href")).toBe("/parent/preview/video/vid%201");
   });
 
   it("calls remove API when Remove button is clicked", async () => {
@@ -390,7 +435,7 @@ describe("<hometube-allowlist-manager>", () => {
     const el = await mount(1);
 
     const card = el.shadowRoot!.querySelector("hometube-content-card");
-    const removeBtn = card!.querySelector("wa-button")! as HTMLElement;
+    const removeBtn = findButton(card!, "Remove")! as HTMLElement;
     removeBtn.click();
     await flushAsync(el);
 

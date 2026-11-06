@@ -63,6 +63,50 @@ async fn parent_preview_invalid_kind_redirects() {
     );
 }
 
+#[tokio::test]
+async fn parent_opening_a_child_video_link_is_sent_to_the_parent_watch_page() {
+    // Parents can watch too: a /child/video link (shared by a kid, or
+    // from the activity dashboard) lands on the parent watch page rather
+    // than bouncing to the dashboard.
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let res = app.server.get("/child/video/abc%20123").await;
+    assert!(
+        res.status_code().is_redirection(),
+        "got {}",
+        res.status_code()
+    );
+    assert_eq!(
+        res.headers().get("location").unwrap(),
+        "/parent/preview/video/abc%20123"
+    );
+}
+
+#[tokio::test]
+async fn parent_opening_a_child_channel_link_is_sent_to_the_parent_channel_page() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let res = app.server.get("/child/channel/UCabc").await;
+    assert!(
+        res.status_code().is_redirection(),
+        "got {}",
+        res.status_code()
+    );
+    assert_eq!(
+        res.headers().get("location").unwrap(),
+        "/parent/preview/channel/UCabc"
+    );
+}
+
+#[tokio::test]
+async fn parent_watch_page_renders_the_player_without_preview_copy() {
+    let (app, _auth) = boot_with_parent_and_child(AccountType::Parent).await;
+    let res = app.server.get("/parent/preview/video/abc123").await;
+    assert!(res.status_code().is_success());
+    let body = res.text();
+    assert!(body.contains("<hometube-video-player"));
+    assert!(body.contains("video-id=\"abc123\""));
+    assert!(body.contains("Watch"));
+}
+
 // ===========================================================================
 // Child pages
 // ===========================================================================
