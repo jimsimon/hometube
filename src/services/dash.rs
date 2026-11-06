@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::error::AppResult;
 use crate::services::setup::{get_config_value, set_config_value};
 use crate::services::youtube;
-use crate::services::ytdlp::Format;
+use crate::services::ytdlp::{client_tag_from_format_note, Format};
 
 /// `app_config` key for the proxy HMAC secret.
 pub const KEY_PROXY_HMAC_SECRET: &str = "proxy_hmac_secret";
@@ -280,6 +280,36 @@ pub fn is_dash_usable(f: &Format) -> bool {
     }
 }
 
+/// How much to trust the stream URLs of the player client that
+/// produced a format. Lower sorts first.
+///
+/// yt-dlp tags every format's `format_note` with its client
+/// (`WEB-E`, `TV-S`, `WEB-C`, ...; see
+/// [`client_tag_from_format_note`]). `web_embedded` is the client whose
+/// URLs have served complete streams on every session so far, so it
+/// ranks first. TV clients (`tv`, `tv_samsung`, `tv_simply`,
+/// `tv_downgraded`, ...) rank last: YouTube ties their stream URLs to
+/// the TV ad experience and, on a logged-in session, refuses byte
+/// ranges past roughly the first minute of media with HTTP 403.
+/// Everything else, including formats without a recognisable client
+/// tag, sits in between.
+pub fn client_preference_rank(f: &Format) -> u8 {
+    match f
+        .format_note
+        .as_deref()
+        .and_then(client_tag_from_format_note)
+    {
+        Some("WEB-E") => 0,
+        Some(tag) if is_tv_client_tag(tag) => 2,
+        _ => 1,
+    }
+}
+
+/// yt-dlp abbreviates `tv` to `TV` and `tv_<word>` to `TV-<initial>`.
+fn is_tv_client_tag(tag: &str) -> bool {
+    tag == "TV" || tag.starts_with("TV-")
+}
+
 /// Synthesize a minimal DASH MPD from yt-dlp's per-format metadata.
 ///
 /// This is used when yt-dlp doesn't expose an upstream DASH manifest
@@ -342,7 +372,22 @@ pub fn synthesize_manifest<'a>(
     //
     // Storyboard formats (`sb*`) are excluded — they're image sprite
     // sheets, not playable media.
-    let usable: Vec<&Format> = formats.iter().filter(|f| is_dash_usable(f)).collect();
+    let mut usable: Vec<&Format> = formats.iter().filter(|f| is_dash_usable(f)).collect();
+
+    // `formats=duplicate` also returns one copy of each itag per
+    // player client that produced it. yt-dlp lists them in client
+    // order, and since 2026.10.21 its default list leads with a TV
+    // client (`tv_samsung`). YouTube gates that client's stream URLs
+    // on a logged-in session: bytes past roughly the first minute of
+    // media come back 403, which stalls playback at that point. The
+    // dedupe and trim passes below are first-seen-wins, so order the
+    // pool by client trust first: `web_embedded` (the client that has
+    // served every full stream so far), then other non-TV clients,
+    // then `tv*`. The sort is stable, so yt-dlp's quality ordering is
+    // preserved within each tier. A TV copy still wins when it is the
+    // only one with SegmentBase ranges (see `dedupe_prefer_with_ranges`):
+    // a playable Representation beats a preferred-but-unprobed one.
+    usable.sort_by_key(|f| client_preference_rank(f));
 
     // Deduplicate: yt-dlp's `formats=duplicate` extractor flag returns
     // both `https` (whole-file) and `http_dash_segments` (`*-dashy`)
@@ -1419,6 +1464,147 @@ mod tests {
         assert!(
             !mpd.contains(r#"id="247-dashy""#),
             "720p dashy variant dropped:\n{mpd}"
+        );
+    }
+
+    /// Build a `Format` tagged with a yt-dlp player client, the way
+    /// `formats=duplicate` output looks when several clients return the
+    /// same itag (`247-dashy-0` from the first client, `247-dashy-1`
+    /// from the second, ...).
+    fn client_format(
+        id: &str,
+        client_tag: &str,
+        height: Option<i64>,
+        vcodec: Option<&str>,
+        acodec: Option<&str>,
+        language: Option<&str>,
+    ) -> Format {
+        let mut f = https_format(id, height, vcodec, acodec, language);
+        let quality = height.map_or_else(|| "medium".to_string(), |h| format!("{h}p"));
+        f.format_note = Some(format!("{quality}, {client_tag}"));
+        f
+    }
+
+    #[test]
+    fn client_preference_rank_orders_web_embedded_first_and_tv_last() {
+        let rank = |note: Option<&str>| {
+            let mut f = https_format("247", Some(720), Some("vp9"), Some("none"), None);
+            f.format_note = note.map(str::to_owned);
+            client_preference_rank(&f)
+        };
+        assert_eq!(rank(Some("720p, WEB-E")), 0);
+        assert_eq!(rank(Some("720p, WEB-E, webm_dash")), 0);
+        assert_eq!(rank(Some("720p, WEB-C")), 1);
+        assert_eq!(rank(Some("720p, VISI")), 1);
+        assert_eq!(rank(Some("720p")), 1, "no client tag: neutral");
+        assert_eq!(rank(None), 1);
+        assert_eq!(rank(Some("720p, TV")), 2);
+        assert_eq!(rank(Some("720p, TV-S")), 2, "tv_samsung / tv_simply");
+        assert_eq!(rank(Some("medium, TV-D, webm_dash")), 2, "tv_downgraded");
+    }
+
+    /// yt-dlp lists the TV client's copy of each itag before the
+    /// web_embedded copy. Both have ranges, so the per-height / per-
+    /// language trims would take the TV copy first-seen; the client
+    /// preference sort must put web_embedded ahead for video and audio.
+    #[test]
+    fn synthesize_manifest_prefers_web_embedded_over_tv_client_variants() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            client_format(
+                "247-dashy-0",
+                "TV-S",
+                Some(720),
+                Some("vp9"),
+                Some("none"),
+                None,
+            ),
+            client_format(
+                "247-dashy-1",
+                "WEB-E",
+                Some(720),
+                Some("vp9"),
+                Some("none"),
+                None,
+            ),
+            client_format(
+                "251-dashy-0",
+                "TV-S",
+                None,
+                Some("none"),
+                Some("opus"),
+                Some("en"),
+            ),
+            client_format(
+                "251-dashy-1",
+                "WEB-E",
+                None,
+                Some("none"),
+                Some("opus"),
+                Some("en"),
+            ),
+        ];
+        let br = dummy_ranges(&["247-dashy-0", "247-dashy-1", "251-dashy-0", "251-dashy-1"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        assert!(
+            mpd.contains(r#"id="247-dashy-1""#),
+            "web_embedded video copy should win:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="247-dashy-0""#),
+            "TV video copy should be dropped:\n{mpd}"
+        );
+        assert!(
+            mpd.contains(r#"id="251-dashy-1""#),
+            "web_embedded audio copy should win:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="251-dashy-0""#),
+            "TV audio copy should be dropped:\n{mpd}"
+        );
+        assert_eq!(
+            mpd.matches("<Representation ").count(),
+            2,
+            "one video + one audio Representation:\n{mpd}"
+        );
+    }
+
+    /// Preference never costs playability: when only the TV copy has
+    /// SegmentBase ranges, it is the one that renders.
+    #[test]
+    fn synthesize_manifest_keeps_tv_variant_when_web_embedded_lacks_ranges() {
+        let secret = b"secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let formats = vec![
+            client_format(
+                "247-dashy-0",
+                "TV-S",
+                Some(720),
+                Some("vp9"),
+                Some("none"),
+                None,
+            ),
+            client_format(
+                "247-dashy-1",
+                "WEB-E",
+                Some(720),
+                Some("vp9"),
+                Some("none"),
+                None,
+            ),
+        ];
+        let br = dummy_ranges(&["247-dashy-0"]);
+        let mpd =
+            synthesize_manifest(secret, "vid", &formats, Some(60.0), &br).expect("synthesize");
+
+        assert!(
+            mpd.contains(r#"id="247-dashy-0""#),
+            "ranged TV copy should render:\n{mpd}"
+        );
+        assert!(
+            !mpd.contains(r#"id="247-dashy-1""#),
+            "unranged web_embedded copy cannot render:\n{mpd}"
         );
     }
 
