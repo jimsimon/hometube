@@ -6,6 +6,11 @@
  *   - a YouTube search box (parent-side: /api/parent/search)
  *   - a list of allowlisted items with remove buttons
  *
+ * The channel preview dialog receives the active `child-id`, which turns
+ * `<hometube-preview-channel>` into a per-video picker — so a parent can
+ * allow a few videos from a channel without allowlisting the channel
+ * itself. Its `allowlist-videos-added` event refreshes the lists here.
+ *
  * `child-id` is set externally by the parent home page when the child
  * dropdown changes.
  */
@@ -409,7 +414,11 @@ export class AllowlistManager extends LitElement {
       >
         ${item
           ? this.previewKind === "channel"
-            ? html`<hometube-preview-channel channel-id=${item.id}></hometube-preview-channel>`
+            ? html`<hometube-preview-channel
+                channel-id=${item.id}
+                child-id=${this.childId ?? nothing}
+                @allowlist-videos-added=${() => void this.refreshAll()}
+              ></hometube-preview-channel>`
             : html`
                 <hometube-preview-video video-id=${item.id}></hometube-preview-video>
                 <p style="margin-top: 0.75rem;">
@@ -438,7 +447,11 @@ export class AllowlistManager extends LitElement {
             @click=${() => void this.addFromPreview()}
             ?disabled=${this.addingFromPreview}
           >
-            ${this.addingFromPreview ? "Adding…" : "Add to allowlist"}
+            ${this.addingFromPreview
+              ? "Adding…"
+              : this.previewKind === "channel"
+                ? "Add whole channel"
+                : "Add to allowlist"}
           </wa-button>
         </div>
       </wa-dialog>

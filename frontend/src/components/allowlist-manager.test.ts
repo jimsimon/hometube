@@ -402,6 +402,78 @@ describe("<hometube-allowlist-manager>", () => {
     expect(deleteCalls.length).toBe(1);
   });
 
+  it("hands the active child to the channel preview and refreshes when videos are added", async () => {
+    mockFetch({
+      "allowlist/channels": [],
+      "allowlist/videos": [],
+      "parent/search": {
+        items: [
+          {
+            id: "UCabc",
+            kind: "channel",
+            title: "Dino Facts",
+            description: "",
+            channel_title: null,
+            thumbnails: {},
+          },
+        ],
+      },
+      "preview/channel": {
+        id: "UCabc",
+        title: "Dino Facts",
+        description: "",
+        thumbnails: {},
+        video_count: 0,
+        videos: [],
+        next_page_token: null,
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const el = await mount(3);
+      const input = el.shadowRoot!.querySelector('input[type="search"]') as HTMLInputElement;
+      input.value = "dino";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      vi.advanceTimersByTime(350);
+      await flushAsync(el);
+
+      const previewBtn = Array.from(el.shadowRoot!.querySelectorAll("wa-button")).find((b) =>
+        (b.textContent ?? "").includes("Preview"),
+      ) as HTMLElement;
+      previewBtn.click();
+      await flushAsync(el);
+
+      const preview = el.shadowRoot!.querySelector("hometube-preview-channel");
+      expect(preview).not.toBeNull();
+      // The dialog's preview is a picker for the selected child…
+      expect(preview!.getAttribute("child-id")).toBe("3");
+      // …and the footer makes clear that button allows the whole channel.
+      const footerAdd = Array.from(el.shadowRoot!.querySelectorAll("wa-button")).find((b) =>
+        (b.textContent ?? "").includes("Add whole channel"),
+      );
+      expect(footerAdd).toBeDefined();
+
+      // When the picker reports added videos, the manager re-fetches its lists.
+      const listCallsBefore = fetchSpy.mock.calls.filter((c: string[]) =>
+        c[0].includes("/api/children/3/allowlist/videos"),
+      ).length;
+      preview!.dispatchEvent(
+        new CustomEvent("allowlist-videos-added", {
+          bubbles: true,
+          composed: true,
+          detail: { childId: 3, videoIds: ["vid-1"] },
+        }),
+      );
+      await flushAsync(el);
+      const listCallsAfter = fetchSpy.mock.calls.filter((c: string[]) =>
+        c[0].includes("/api/children/3/allowlist/videos"),
+      ).length;
+      expect(listCallsAfter).toBeGreaterThan(listCallsBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("forwards channel header metadata in the add-channel POST body", async () => {
     // The body-data path on the backend prefers caller-supplied
     // metadata to the sidecar `/channels/:id` call. This test asserts

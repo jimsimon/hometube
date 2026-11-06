@@ -25,6 +25,7 @@
   <div class="page-section">
     <hometube-preview-channel
       channel-id="{{ resource_id }}"
+      {% if let Some(cid) = child_id %}child-id="{{ cid }}"{% endif %}
     ></hometube-preview-channel>
   </div>
   {% endif %}
